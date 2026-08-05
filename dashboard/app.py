@@ -9,6 +9,7 @@ import streamlit as st
 
 from charts import candlestick_with_ma, institutional_flow_chart, margin_balance_chart
 from stocks.config import load_config
+from stocks.daily_update import check_and_update
 from stocks.db import (
     bars_to_dataframe,
     connect,
@@ -24,6 +25,20 @@ from stocks.db import (
 st.set_page_config(page_title="台股訊號監控", layout="wide")
 
 config = load_config()
+
+if "checked_for_updates" not in st.session_state:
+    st.session_state.checked_for_updates = True
+    with st.spinner("檢查有沒有新的盤後資料..."):
+        result = check_and_update(config)
+    if result["watchlist_empty"]:
+        pass  # 觀察清單是空的，下面的頁籤本來就會提示要先跑fetch_historical.py
+    elif result["new_price_days"] == 0 and result["new_market_days"] == 0:
+        st.toast("資料已經是最新的，沒有新的盤後資料", icon="✅")
+    else:
+        st.toast(
+            f"已更新：股價 {result['new_price_days']} 天、三大法人/融資融券/估值 {result['new_market_days']} 天",
+            icon="🔄",
+        )
 
 tab_watchlist, tab_chart, tab_fundamentals, tab_history = st.tabs(["觀察清單", "K線圖", "籌碼/基本面", "訊號紀錄"])
 

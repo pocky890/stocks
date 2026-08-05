@@ -9,39 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import argparse
 
-import yfinance as yf
-
 from stocks.config import load_config
 from stocks.db import connect, init_db, insert_bars_daily, upsert_symbol
-from stocks.models import Bar
+from stocks.yfinance_client import fetch_symbol_bars
 
 DEFAULT_SYMBOLS = ["2330", "2317", "2454", "2308", "2882"]
-
-
-def fetch_symbol(symbol: str, period: str = "1y") -> list[Bar]:
-    ticker = f"{symbol}.TW"
-    df = yf.download(ticker, period=period, progress=False)
-    if df.empty:
-        print(f"  警告：{ticker} 沒有抓到資料")
-        return []
-
-    if isinstance(df.columns, __import__("pandas").MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    bars = []
-    for ts, row in df.iterrows():
-        bars.append(
-            Bar(
-                symbol=symbol,
-                ts=ts.to_pydatetime(),
-                open=float(row["Open"]),
-                high=float(row["High"]),
-                low=float(row["Low"]),
-                close=float(row["Close"]),
-                volume=int(row["Volume"]),
-            )
-        )
-    return bars
 
 
 def main():
@@ -55,8 +27,9 @@ def main():
 
     for symbol in args.symbols:
         print(f"抓取 {symbol} 近{args.period}日K...")
-        bars = fetch_symbol(symbol, args.period)
+        bars = fetch_symbol_bars(symbol, args.period)
         if not bars:
+            print(f"  警告：{symbol} 沒有抓到資料")
             continue
         with connect(config.db_path) as conn:
             insert_bars_daily(conn, bars)

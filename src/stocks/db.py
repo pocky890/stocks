@@ -94,6 +94,11 @@ CREATE TABLE IF NOT EXISTS ex_dividend_schedule (
     detail TEXT,
     PRIMARY KEY (symbol, ex_date)
 );
+
+CREATE TABLE IF NOT EXISTS market_data_sync_log (
+    date TEXT PRIMARY KEY,
+    checked_at TEXT NOT NULL
+);
 """
 
 
@@ -211,6 +216,21 @@ def fetch_trading_dates(conn: sqlite3.Connection) -> list[str]:
     without guessing at holidays."""
     rows = conn.execute("SELECT DISTINCT date FROM bars_daily ORDER BY date ASC").fetchall()
     return [r["date"] for r in rows]
+
+
+def fetch_synced_market_dates(conn: sqlite3.Connection) -> set[str]:
+    """Dates already attempted for institutional/margin/valuation data -- tracked
+    separately from whether TWSE actually had rows, so a date TWSE genuinely has no
+    data for (a data gap, not a holiday) doesn't get retried forever."""
+    rows = conn.execute("SELECT date FROM market_data_sync_log").fetchall()
+    return {r["date"] for r in rows}
+
+
+def mark_market_data_synced(conn: sqlite3.Connection, dates: list[str]) -> None:
+    conn.executemany(
+        "INSERT OR REPLACE INTO market_data_sync_log (date, checked_at) VALUES (?, ?)",
+        [(d, datetime.now().isoformat()) for d in dates],
+    )
 
 
 def insert_institutional_flows(conn: sqlite3.Connection, rows: list[dict]) -> None:
