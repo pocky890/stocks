@@ -1,0 +1,18 @@
+{
+  "market_hours": {
+    "open": "09:00",
+    "close": "13:30",
+    "bar_interval_minutes": 5
+  },
+  "batch": {
+    "pacing_seconds": 0.5
+  },
+  "strategy_params": {
+    "ma_crossover": { "fast": 5, "slow": 20 },
+    "rsi": { "period": 14, "oversold": 30, "overbought": 70 },
+    "macd": { "fast": 12, "slow": 26, "signal": 9 },
+    "bollinger": { "period": 20, "num_std": 2 },
+    "volume_anomaly": { "avg_period": 20, "multiplier": 2 },
+    "ma_alignment": { "fast": 5, "mid": 10, "slow": 20 }
+  }
+}

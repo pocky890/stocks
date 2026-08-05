@@ -1,0 +1,11 @@
+shioaji
+pandas
+python-dotenv
+requests
+streamlit
+plotly
+pytest
+
+# 暫用：Shioaji金鑰到手前，fetch_historical.py用這個抓範例歷史資料。
+# 之後接上shioaji_client.fetch_kbars()後可移除。
+yfinance
