@@ -20,6 +20,7 @@ from stocks.db import (
     insert_margin_balances,
     insert_valuations,
     mark_market_data_synced,
+    upsert_symbol,
 )
 from stocks.twse_client import (
     fetch_ex_dividend_schedule,
@@ -70,6 +71,8 @@ def main():
                 insert_margin_balances(conn, margins)
             if valuations:
                 insert_valuations(conn, valuations)
+                for row in valuations:
+                    upsert_symbol(conn, row["symbol"], name=row["name"], market="TWSE", is_watchlist=True)
             mark_market_data_synced(conn, [date])
 
         if (i + 1) % 20 == 0 or i == len(dates) - 1:

@@ -24,6 +24,16 @@ from stocks.db import (
 
 st.set_page_config(page_title="台股訊號監控", layout="wide")
 
+STRATEGY_LABELS = {
+    "ma_crossover": "均線交叉 (5/20日)",
+    "rsi": "RSI超買超賣",
+    "macd": "MACD交叉",
+    "bollinger": "布林通道",
+    "volume_anomaly": "成交量異常",
+    "price_alert": "到價提醒",
+    "ma_alignment": "多空排列 (5/10/20日線)",
+}
+
 config = load_config()
 
 if "checked_for_updates" not in st.session_state:
@@ -51,7 +61,9 @@ symbols = [w["code"] for w in watchlist]
 with tab_watchlist:
     st.subheader("觀察清單")
     if watchlist:
-        st.dataframe(pd.DataFrame(watchlist)[["code", "name", "market"]], use_container_width=True)
+        st.dataframe(pd.DataFrame(watchlist)[["code", "name"]], use_container_width=True)
+        strategy_list = "、".join(STRATEGY_LABELS.get(k, k) for k in STRATEGY_LABELS)
+        st.caption(f"目前每檔股票都套用同一組 {len(STRATEGY_LABELS)} 種策略（還沒有支援每檔各自挑策略）：{strategy_list}")
     else:
         st.info("觀察清單是空的，先跑 `python scripts/fetch_historical.py` 填範例資料")
 

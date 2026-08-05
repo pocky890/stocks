@@ -64,6 +64,8 @@ def _refresh_market_data(config: Config, symbols: set[str]) -> int:
                 insert_margin_balances(conn, margins)
             if valuations:
                 insert_valuations(conn, valuations)
+                for row in valuations:
+                    upsert_symbol(conn, row["symbol"], name=row["name"], market="TWSE", is_watchlist=True)
             mark_market_data_synced(conn, [date])
 
     schedule = [r for r in fetch_ex_dividend_schedule() if r["symbol"] in symbols]

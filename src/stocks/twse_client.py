@@ -105,6 +105,7 @@ def fetch_valuations_for_date(date_iso: str) -> list[dict]:
         rows.append(
             {
                 "symbol": row[0],
+                "name": row[1],
                 "date": date_iso,
                 "pe_ratio": _to_number(row[5], cast=float),
                 "dividend_yield": _to_number(row[3], cast=float),
