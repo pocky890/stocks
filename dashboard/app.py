@@ -10,7 +10,9 @@ import streamlit as st
 from charts import candlestick_with_ma, institutional_flow_chart, intraday_line_chart, kd_chart, margin_balance_chart
 from stocks.config import load_config
 from stocks.daily_update import add_symbol_to_watchlist, check_and_update
+from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.db import (
+    attach_institutional_flows,
     bars_list_to_dataframe,
     bars_to_dataframe,
     connect,
@@ -25,6 +27,8 @@ from stocks.db import (
     remove_from_watchlist,
 )
 from stocks.shioaji_client import ShioajiClient
+from stocks.strategies import STRATEGY_REGISTRY
+from stocks.strategy_stats import simulate_round_trips, summarize_trades
 from stocks.watchlist_view import build_buy_recommendations, build_overview_rows
 
 st.set_page_config(page_title="台股訊號監控", layout="wide")
@@ -68,11 +72,59 @@ STRATEGY_LABELS = {
     "kd": "KD低檔黃金交叉/高檔死亡交叉",
     "institutional_streak": "三大法人連續買賣超",
     "ma_trend": "站上5/20日均線且20日線上揚",
+    "atr_breakout": "ATR動態通道突破(創20日新高進場，2倍ATR移動停損出場)",
+    "chip_momentum": "外資買超動能(連3日買超+未超買進場，2.5倍ATR移動停損出場)",
     "buy_formula": "極簡買進公式(籌碼+趨勢環境成立時，爆量突破布林或KD黃金交叉即買)",
     "sell_formula": "極簡賣出公式(跌破5日線+RSI超買/法人連3賣，或跌破10日線)",
 }
+# buy_formula/sell_formula是多條件組合、可以直接依據行動的完整判斷，稱為「策略」；
+# 其他都只是單一指標的訊號，可信度較低，稱為「指標訊號」——跟notifier.NOTIFIABLE_STRATEGIES
+# (只有這兩個會推播Telegram)是同一個區分，直接沿用避免兩處各自維護一份清單。
 
 config = load_config()
+
+
+TRACK_RECORD_STRATEGIES = ["chip_momentum", "atr_breakout"]  # 這兩個自己的BUY/SELL事件本來就是配好對的
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _compute_track_records(_config, symbols: tuple):
+    """算「策略」類(NOTIFIABLE_STRATEGIES)在每支股票自己歷史資料上的勝率/平均報酬，
+    給使用者參考「這個策略在這支股票的過去表現」，不是自動下單依據。快取5分鐘——這是跑
+    全部歷史資料的策略運算，不用每次▲▼/新增股票都重算一次。buy_formula/sell_formula
+    只定義單邊，個別算沒意義，這裡把兩者的事件合併成一組配對的進出場來看(跟使用者設計
+    這兩個公式的原意一致：一個負責進場條件，一個負責出場條件)。"""
+    rows = []
+    with connect(_config.db_path) as conn:
+        for code in symbols:
+            bars = bars_to_dataframe(fetch_bars_daily(conn, code), ts_field="date")
+            bars = attach_institutional_flows(bars, fetch_institutional_flows(conn, code))
+            if bars.empty:
+                continue
+
+            row = {"代號": code}
+            for name in TRACK_RECORD_STRATEGIES:
+                events = STRATEGY_REGISTRY[name].evaluate(code, bars, _config.strategy_params.get(name, {}))
+                trades, _ = simulate_round_trips(events)
+                summary = summarize_trades(trades)
+                row[STRATEGY_LABELS[name].split("(")[0]] = (
+                    f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均（{summary['n']}筆）"
+                    if summary
+                    else "尚無完整交易紀錄"
+                )
+
+            combined_events = STRATEGY_REGISTRY["buy_formula"].evaluate(
+                code, bars, _config.strategy_params.get("buy_formula", {})
+            ) + STRATEGY_REGISTRY["sell_formula"].evaluate(code, bars, _config.strategy_params.get("sell_formula", {}))
+            trades, _ = simulate_round_trips(combined_events)
+            summary = summarize_trades(trades)
+            row["極簡買賣公式"] = (
+                f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均（{summary['n']}筆）"
+                if summary
+                else "尚無完整交易紀錄"
+            )
+            rows.append(row)
+    return rows
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -129,8 +181,14 @@ with tab_watchlist:
         st.rerun()
 
     if watchlist:
-        strategy_list = "、".join(STRATEGY_LABELS.get(k, k) for k in STRATEGY_LABELS)
-        st.caption(f"目前每檔股票都套用同一組 {len(STRATEGY_LABELS)} 種策略（還沒有支援每檔各自挑策略）：{strategy_list}")
+        strategy_keys = [k for k in STRATEGY_LABELS if k in NOTIFIABLE_STRATEGIES]
+        indicator_keys = [k for k in STRATEGY_LABELS if k not in NOTIFIABLE_STRATEGIES]
+        st.caption(
+            f"目前每檔股票都套用同一組 {len(indicator_keys)} 種指標訊號 + {len(strategy_keys)} 種策略"
+            "（還沒有支援每檔各自挑）："
+        )
+        st.caption(f"📊 策略（會推播Telegram）：{'、'.join(STRATEGY_LABELS[k] for k in strategy_keys)}")
+        st.caption(f"📈 指標訊號（只記錄不推播）：{'、'.join(STRATEGY_LABELS[k] for k in indicator_keys)}")
         st.markdown("#### 總覽（價位/均線/指標，暫用最新收盤價，之後接即時報價會自動換資料源；▲▼可調整順序）")
 
         overview_rows = build_overview_rows(config)
@@ -210,6 +268,13 @@ with tab_watchlist:
             st.dataframe(pd.DataFrame(recommendations), use_container_width=True, hide_index=True)
         else:
             st.caption("目前沒有股票符合")
+
+        with st.expander("📊 策略歷史勝率參考（不是自動下單依據，只是這個策略在這支股票過去表現如何）"):
+            track_records = _compute_track_records(config, tuple(symbols))
+            if track_records:
+                st.dataframe(pd.DataFrame(track_records), use_container_width=True, hide_index=True)
+            else:
+                st.caption("歷史資料不足，算不出任何一次完整的進出場")
     else:
         st.info("觀察清單是空的，用上面欄位新增股票，或先跑 `python scripts/fetch_historical.py` 填範例資料")
 
@@ -275,12 +340,20 @@ with tab_fundamentals:
 
 with tab_history:
     st.subheader("訊號歷史紀錄")
-    filter_symbol = st.selectbox("篩選股票（可選）", ["全部"] + symbols)
+    col_symbol, col_strategy = st.columns(2)
+    filter_symbol = col_symbol.selectbox("篩選股票（可選）", ["全部"] + symbols)
+    filter_strategy = col_strategy.selectbox(
+        "篩選訊號/策略（可選）",
+        ["全部"] + list(STRATEGY_REGISTRY),
+        format_func=lambda k: k if k == "全部" else f"[{'策略' if k in NOTIFIABLE_STRATEGIES else '指標訊號'}] {k}",
+    )
     with connect(config.db_path) as conn:
-        if filter_symbol == "全部":
-            rows = fetch_signal_events(conn, symbol=None, limit=200)
-        else:
-            rows = fetch_signal_events(conn, symbol=filter_symbol, limit=200)
+        rows = fetch_signal_events(
+            conn,
+            symbol=None if filter_symbol == "全部" else filter_symbol,
+            strategy=None if filter_strategy == "全部" else filter_strategy,
+            limit=200,
+        )
 
     if not rows:
         st.info("目前沒有任何訊號紀錄（backtest.py不會寫入signal_events，要跑live/batch才會有）")

@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "stocks-dashboard",
-      "runtimeExecutable": "C:\\_Data\\Claude Project\\Stocks\\.venv\\Scripts\\python.exe",
+      "runtimeExecutable": "D:\\Claude project\\Stocks\\.venv\\Scripts\\python.exe",
       "runtimeArgs": ["-m", "streamlit", "run", "dashboard/app.py", "--server.port", "8765", "--server.headless", "true"],
       "port": 8765
     }

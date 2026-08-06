@@ -11,7 +11,9 @@ class Strategy(Protocol):
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]: ...
 
 
+from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bollinger import BollingerStrategy
+from stocks.strategies.chip_momentum import ChipMomentumStrategy
 from stocks.strategies.composite_formula import BuyFormulaStrategy, SellFormulaStrategy
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
@@ -36,4 +38,6 @@ STRATEGY_REGISTRY: dict[str, Strategy] = {
     "ma_trend": MATrendStrategy(),
     "buy_formula": BuyFormulaStrategy(),
     "sell_formula": SellFormulaStrategy(),
+    "atr_breakout": ATRBreakoutStrategy(),
+    "chip_momentum": ChipMomentumStrategy(),
 }

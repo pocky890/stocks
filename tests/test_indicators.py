@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from stocks.indicators import bollinger_bands, ema, macd, rolling_avg_volume, rsi, sma, stochastic_kd
+from stocks.indicators import atr, bollinger_bands, ema, macd, rolling_avg_volume, rsi, sma, stochastic_kd
 
 
 def test_sma_basic():
@@ -52,6 +52,20 @@ def test_rolling_avg_volume_basic():
     result = rolling_avg_volume(volume, period=3)
     assert result.iloc[2] == pytest.approx(200.0)
     assert result.iloc[4] == pytest.approx(400.0)
+
+
+def test_atr_uses_true_range_including_gaps():
+    high = pd.Series([10.0, 12.0, 11.0])
+    low = pd.Series([8.0, 9.0, 9.0])
+    close = pd.Series([9.0, 11.0, 10.0])
+    result = atr(high, low, close, period=2)
+
+    # TR[0] = high-low (no prev close) = 2
+    # TR[1] = max(high-low=3, |high-prev_close|=3, |low-prev_close|=0) = 3
+    # TR[2] = max(high-low=2, |high-prev_close|=0, |low-prev_close|=2) = 2
+    assert pd.isna(result.iloc[0])
+    assert result.iloc[1] == pytest.approx(2.5)
+    assert result.iloc[2] == pytest.approx(2.5)
 
 
 def test_stochastic_kd_matches_hand_computed_values():

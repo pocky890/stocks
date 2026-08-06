@@ -10,9 +10,11 @@ from stocks.telegram_client import send_message
 
 DIRECTION_LABEL = {Direction.BUY: "買", Direction.SELL: "賣"}
 MAX_BATCH_SYMBOLS_LISTED = 30
-# 只有這兩個「已經是多條件組合」的策略會推播——單一指標(RSI/MACD/KD/均線交叉...)本身
-# 誤判率較高，不再各自觸發通知，但照樣會寫進signal_events(訊號紀錄頁籤看得到全部)。
-NOTIFIABLE_STRATEGIES = {"buy_formula", "sell_formula"}
+# 只有這幾個「進場/出場邏輯完整、可以直接照著做」的策略會推播——單一指標(RSI/MACD/KD/
+# 均線交叉...)本身誤判率較高，不再各自觸發通知，但照樣會寫進signal_events(訊號紀錄頁籤
+# 看得到全部)。atr_breakout/chip_momentum雖然各自只用ATR/外資買超一個核心指標，但進場+
+# 出場邏輯是綁在一起的完整系統，跟buy_formula/sell_formula同一類，不是單純的指標訊號。
+NOTIFIABLE_STRATEGIES = {"buy_formula", "sell_formula", "atr_breakout", "chip_momentum"}
 _MA_PERIODS = (5, 10, 20, 60)
 _MA_NAMES = {20: "月", 60: "季"}  # 5、10維持數字講法，20/60叫月線/季線，跟dashboard命名一致
 

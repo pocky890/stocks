@@ -34,6 +34,8 @@
       "kd_d_smooth": 3,
       "kd_k_threshold": 40
     },
+    "atr_breakout": { "donchian_period": 20, "atr_period": 14, "atr_multiplier": 2 },
+    "chip_momentum": { "chip_streak_days": 3, "rsi_period": 14, "rsi_overbought": 70, "atr_period": 14, "atr_multiplier": 2.5 },
     "sell_formula": {
       "chip_days": 3,
       "rsi_period": 14,

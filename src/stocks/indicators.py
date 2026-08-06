@@ -38,6 +38,16 @@ def rolling_avg_volume(volume: pd.Series, period: int = 20) -> pd.Series:
     return volume.rolling(window=period).mean()
 
 
+def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """True range取三者最大：當日high-low、跟前一日收盤的high/low差距（涵蓋跳空缺口），
+    再取period日簡單移動平均（不是Wilder平滑，跟本檔案其他指標的簡單風格一致）。"""
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    return true_range.rolling(window=period).mean()
+
+
 def stochastic_kd(high: pd.Series, low: pd.Series, close: pd.Series, rsv_period: int = 9, k_smooth: int = 3, d_smooth: int = 3):
     """台股慣用KD：K = 前值*(k_smooth-1)/k_smooth + RSV/k_smooth，等同alpha=1/k_smooth的ewm。"""
     lowest_low = low.rolling(window=rsv_period).min()

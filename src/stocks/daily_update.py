@@ -56,12 +56,15 @@ def _refresh_market_data_twse(config: Config, symbols: set[str]) -> int:
         already_have = fetch_synced_market_dates(conn)
     todo_dates = [d for d in all_dates if d not in already_have]
 
+    # retries=1(不重試)：這條路是dashboard載入時的即時互動路徑，TWSE不穩時應該馬上放棄
+    # 改下次(下次dashboard載入或下次跑scripts/fetch_market_data.py)再抓，不該讓使用者
+    # 等重試+逾時——那種耐心重試是scripts/fetch_market_data.py長時間背景回補才需要的。
     for date in todo_dates:
-        flows = [r for r in twse_client.fetch_institutional_flows_for_date(date) if r["symbol"] in symbols]
+        flows = [r for r in twse_client.fetch_institutional_flows_for_date(date, retries=1) if r["symbol"] in symbols]
         time.sleep(config.batch_pacing_seconds)
-        margins = [r for r in twse_client.fetch_margin_balances_for_date(date) if r["symbol"] in symbols]
+        margins = [r for r in twse_client.fetch_margin_balances_for_date(date, retries=1) if r["symbol"] in symbols]
         time.sleep(config.batch_pacing_seconds)
-        valuations = [r for r in twse_client.fetch_valuations_for_date(date) if r["symbol"] in symbols]
+        valuations = [r for r in twse_client.fetch_valuations_for_date(date, retries=1) if r["symbol"] in symbols]
         time.sleep(config.batch_pacing_seconds)
 
         with connect(config.db_path) as conn:
@@ -75,7 +78,7 @@ def _refresh_market_data_twse(config: Config, symbols: set[str]) -> int:
                     upsert_symbol(conn, row["symbol"], name=row["name"], market="TWSE", is_watchlist=True)
             mark_market_data_synced(conn, [date])
 
-    schedule = [r for r in twse_client.fetch_ex_dividend_schedule() if r["symbol"] in symbols]
+    schedule = [r for r in twse_client.fetch_ex_dividend_schedule(retries=1) if r["symbol"] in symbols]
     with connect(config.db_path) as conn:
         if schedule:
             insert_ex_dividend_schedule(conn, schedule)

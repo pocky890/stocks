@@ -184,12 +184,24 @@ def insert_signal_events(conn: sqlite3.Connection, events: list[SignalEvent]) ->
     return newly_inserted
 
 
-def fetch_signal_events(conn: sqlite3.Connection, symbol: str | None = None, limit: int = 200):
+def fetch_signal_events(
+    conn: sqlite3.Connection, symbol: str | None = None, strategy: str | None = None, limit: int = 200
+):
+    conditions = []
+    params: list = []
     if symbol:
-        query = "SELECT * FROM signal_events WHERE symbol = ? ORDER BY ts DESC LIMIT ?"
-        return conn.execute(query, (symbol, limit)).fetchall()
-    query = "SELECT * FROM signal_events ORDER BY ts DESC LIMIT ?"
-    return conn.execute(query, (limit,)).fetchall()
+        conditions.append("symbol = ?")
+        params.append(symbol)
+    if strategy:
+        conditions.append("strategy = ?")
+        params.append(strategy)
+
+    query = "SELECT * FROM signal_events"
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY ts DESC LIMIT ?"
+    params.append(limit)
+    return conn.execute(query, params).fetchall()
 
 
 def upsert_symbol(conn: sqlite3.Connection, code: str, name: str = "", market: str = "", is_watchlist: bool = False) -> None:

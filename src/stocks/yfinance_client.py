@@ -15,6 +15,9 @@ def _bars_from_dataframe(symbol: str, df: pd.DataFrame) -> list[Bar]:
 
     bars = []
     for ts, row in df.iterrows():
+        if pd.isna(row["Open"]) or pd.isna(row["High"]) or pd.isna(row["Low"]) or pd.isna(row["Close"]):
+            continue  # 當天還在盤中/尚未收盤，yfinance會回傳缺值OHLC(但Volume可能已經有部分值)，
+            # 不是真正的K棒——跟shioaji_client.fetch_daily_quotes()的同一個防護一致。
         bars.append(
             Bar(
                 symbol=symbol,

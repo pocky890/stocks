@@ -65,6 +65,20 @@ def test_fetch_signal_events_returns_newest_first(tmp_path):
     assert rows[0]["ts"] == newer.ts.isoformat()
 
 
+def test_fetch_signal_events_filters_by_strategy(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    ma_event = make_event(strategy="ma_crossover")
+    formula_event = make_event(strategy="buy_formula")
+
+    with db.connect(db_path) as conn:
+        db.insert_signal_events(conn, [ma_event, formula_event])
+        rows = db.fetch_signal_events(conn, strategy="buy_formula")
+
+    assert len(rows) == 1
+    assert rows[0]["strategy"] == "buy_formula"
+
+
 def test_upsert_symbol_without_name_does_not_blank_out_existing_name(tmp_path):
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)

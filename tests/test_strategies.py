@@ -3,7 +3,9 @@ import math
 import pandas as pd
 
 from stocks.models import Direction
+from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bollinger import BollingerStrategy
+from stocks.strategies.chip_momentum import ChipMomentumStrategy
 from stocks.strategies.composite_formula import BuyFormulaStrategy, SellFormulaStrategy, compute_buy_condition
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
@@ -312,3 +314,63 @@ def test_sell_formula_fires_via_institutional_selling_confirmation():
 def test_institutional_streak_returns_nothing_without_institutional_columns():
     bars = make_bars([100, 101, 102])
     assert InstitutionalStreakStrategy().evaluate("2330", bars, {"threshold_days": 3}) == []
+
+
+def test_atr_breakout_enters_on_donchian_breakout_and_trails_stop_up_before_exiting():
+    # flat first 3 days establish the donchian channel + ATR baseline, then a breakout
+    # above the prior 3-day high buys in; price keeps rising (stop ratchets up: 7 -> 8 -> 13)
+    # before a sharp drop finally breaches the trailing stop and exits.
+    closes = [10, 10, 10, 15, 18, 20, 8]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    bars = make_bars(closes, highs=highs, lows=lows)
+
+    events = ATRBreakoutStrategy().evaluate(
+        "2330", bars, {"donchian_period": 3, "atr_period": 2, "atr_multiplier": 2}
+    )
+
+    assert len(events) == 2
+    buy, sell = events
+    assert buy.direction == Direction.BUY
+    assert buy.price == 15
+    assert sell.direction == Direction.SELL
+    assert sell.price == 8
+    assert buy.ts < sell.ts
+
+
+def test_atr_breakout_stays_flat_generates_no_signal():
+    closes = [10] * 8
+    bars = make_bars(closes, highs=[11] * 8, lows=[9] * 8)
+    events = ATRBreakoutStrategy().evaluate(
+        "2330", bars, {"donchian_period": 3, "atr_period": 2, "atr_multiplier": 2}
+    )
+    assert events == []
+
+
+def test_chip_momentum_enters_on_foreign_buy_streak_and_exits_on_atr_stop():
+    # 前5天10/9交錯震盪(RSI維持中性，不會被「未超買」濾網擋掉)，外資在idx2-4連續3天買超
+    # (streak在idx4達到3天門檻)觸發進場；之後價格急漲又急跌，ATR停損線跟著往上拉再被跌破出場。
+    closes = [10, 9, 10, 9, 10, 15, 18, 20, 8]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    foreign_net = [0, 0, 5, 5, 5, 0, 0, 0, 0]
+    bars = make_bars(closes, highs=highs, lows=lows)
+    bars["foreign_net"] = foreign_net
+
+    events = ChipMomentumStrategy().evaluate(
+        "2330", bars, {"chip_streak_days": 3, "rsi_period": 2, "rsi_overbought": 70, "atr_period": 2, "atr_multiplier": 2}
+    )
+
+    assert len(events) == 2
+    buy, sell = events
+    assert buy.direction == Direction.BUY
+    assert buy.price == 10
+    assert buy.ts == bars.index[4]
+    assert sell.direction == Direction.SELL
+    assert sell.price == 8
+    assert sell.ts == bars.index[8]
+
+
+def test_chip_momentum_returns_nothing_without_institutional_columns():
+    bars = make_bars([10, 11, 12])
+    assert ChipMomentumStrategy().evaluate("2330", bars, {}) == []
