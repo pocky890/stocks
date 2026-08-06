@@ -11,7 +11,7 @@ import argparse
 
 from stocks.config import load_config
 from stocks.db import connect, init_db, insert_bars_daily, upsert_symbol
-from stocks.yfinance_client import fetch_symbol_bars
+from stocks.yfinance_client import detect_market_and_fetch_bars
 
 DEFAULT_SYMBOLS = ["2330", "2317", "2454", "2308", "2882"]
 
@@ -27,13 +27,13 @@ def main():
 
     for symbol in args.symbols:
         print(f"抓取 {symbol} 近{args.period}日K...")
-        bars = fetch_symbol_bars(symbol, args.period)
+        bars, market = detect_market_and_fetch_bars(symbol, args.period)
         if not bars:
             print(f"  警告：{symbol} 沒有抓到資料")
             continue
         with connect(config.db_path) as conn:
             insert_bars_daily(conn, bars)
-            upsert_symbol(conn, symbol, market="TWSE", is_watchlist=True)
+            upsert_symbol(conn, symbol, market=market, is_watchlist=True)
         print(f"  已寫入 {len(bars)} 筆")
 
 

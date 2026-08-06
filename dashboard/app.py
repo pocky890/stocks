@@ -9,7 +9,7 @@ import streamlit as st
 
 from charts import candlestick_with_ma, institutional_flow_chart, margin_balance_chart
 from stocks.config import load_config
-from stocks.daily_update import check_and_update
+from stocks.daily_update import add_symbol_to_watchlist, check_and_update
 from stocks.db import (
     bars_to_dataframe,
     connect,
@@ -20,6 +20,8 @@ from stocks.db import (
     fetch_signal_events,
     fetch_valuations,
     fetch_watchlist,
+    remove_from_watchlist,
+    set_watchlist_order,
 )
 
 st.set_page_config(page_title="台股訊號監控", layout="wide")
@@ -42,13 +44,13 @@ if "checked_for_updates" not in st.session_state:
         result = check_and_update(config)
     if result["watchlist_empty"]:
         pass  # 觀察清單是空的，下面的頁籤本來就會提示要先跑fetch_historical.py
-    elif result["new_price_days"] == 0 and result["new_market_days"] == 0:
+    elif result["new_price_days"] == 0 and result["new_market_days"] == 0 and not result["otc_synced"]:
         st.toast("資料已經是最新的，沒有新的盤後資料", icon="✅")
     else:
-        st.toast(
-            f"已更新：股價 {result['new_price_days']} 天、三大法人/融資融券/估值 {result['new_market_days']} 天",
-            icon="🔄",
-        )
+        parts = [f"股價 {result['new_price_days']} 天", f"上市籌碼 {result['new_market_days']} 天"]
+        if result["otc_synced"]:
+            parts.append("上櫃籌碼已同步最新一天")
+        st.toast(f"已更新：{'、'.join(parts)}", icon="🔄")
 
 tab_watchlist, tab_chart, tab_fundamentals, tab_history = st.tabs(["觀察清單", "K線圖", "籌碼/基本面", "訊號紀錄"])
 
@@ -60,12 +62,49 @@ symbols = [w["code"] for w in watchlist]
 
 with tab_watchlist:
     st.subheader("觀察清單")
+
+    with st.form("add_symbol_form", clear_on_submit=True):
+        add_col1, add_col2 = st.columns([3, 1])
+        new_code = add_col1.text_input(
+            "新增股票代號", placeholder="輸入股票代號，例如 2603", label_visibility="collapsed"
+        )
+        add_submitted = add_col2.form_submit_button("新增到觀察清單", use_container_width=True)
+    if add_submitted and new_code.strip():
+        with st.spinner(f"抓取 {new_code.strip()} 資料..."):
+            add_result = add_symbol_to_watchlist(config, new_code.strip())
+        (st.success if add_result["ok"] else st.warning)(add_result["message"])
+        st.rerun()
+
     if watchlist:
-        st.dataframe(pd.DataFrame(watchlist)[["code", "name"]], use_container_width=True)
+        edited = st.data_editor(
+            pd.DataFrame(watchlist)[["code", "name", "sort_order"]],
+            column_config={
+                "code": st.column_config.TextColumn("代號", disabled=True),
+                "name": st.column_config.TextColumn("名稱", disabled=True),
+                "sort_order": st.column_config.NumberColumn("排序（數字越小越前面）", step=1),
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            key="watchlist_editor",
+        )
+        if st.button("儲存排序"):
+            with connect(config.db_path) as conn:
+                for _, row in edited.iterrows():
+                    set_watchlist_order(conn, row["code"], int(row["sort_order"]))
+            st.rerun()
+
+        remove_col1, remove_col2 = st.columns([3, 1])
+        remove_code = remove_col1.selectbox("移除股票", symbols, label_visibility="collapsed")
+        if remove_col2.button("移除", use_container_width=True):
+            with connect(config.db_path) as conn:
+                remove_from_watchlist(conn, remove_code)
+            st.rerun()
+
         strategy_list = "、".join(STRATEGY_LABELS.get(k, k) for k in STRATEGY_LABELS)
         st.caption(f"目前每檔股票都套用同一組 {len(STRATEGY_LABELS)} 種策略（還沒有支援每檔各自挑策略）：{strategy_list}")
     else:
-        st.info("觀察清單是空的，先跑 `python scripts/fetch_historical.py` 填範例資料")
+        st.info("觀察清單是空的，用上面欄位新增股票，或先跑 `python scripts/fetch_historical.py` 填範例資料")
 
 with tab_chart:
     st.subheader("K線圖 + 均線")

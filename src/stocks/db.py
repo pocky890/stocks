@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     code TEXT PRIMARY KEY,
     name TEXT,
     market TEXT,
-    is_watchlist INTEGER NOT NULL DEFAULT 0
+    is_watchlist INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS bars_5min (
@@ -116,6 +117,15 @@ def connect(db_path: str):
 def init_db(db_path: str) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS doesn't add columns to a table that already existed
+    before that column was introduced -- patch those in for DBs created by an older schema."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(symbols)")}
+    if "sort_order" not in columns:
+        conn.execute("ALTER TABLE symbols ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
 
 
 def insert_bars_daily(conn: sqlite3.Connection, bars: list[Bar]) -> None:
@@ -174,15 +184,40 @@ def fetch_signal_events(conn: sqlite3.Connection, symbol: str | None = None, lim
 
 
 def upsert_symbol(conn: sqlite3.Connection, code: str, name: str = "", market: str = "", is_watchlist: bool = False) -> None:
+    """Callers that don't know the name yet (e.g. a price-only refresh) pass name="" --
+    that must never blank out a name we already captured from a previous chips-data fetch."""
     conn.execute(
         """INSERT INTO symbols (code, name, market, is_watchlist) VALUES (?, ?, ?, ?)
-           ON CONFLICT(code) DO UPDATE SET name=excluded.name, market=excluded.market, is_watchlist=excluded.is_watchlist""",
+           ON CONFLICT(code) DO UPDATE SET
+               name=CASE WHEN excluded.name != '' THEN excluded.name ELSE symbols.name END,
+               market=excluded.market, is_watchlist=excluded.is_watchlist""",
         (code, name, market, int(is_watchlist)),
     )
 
 
 def fetch_watchlist(conn: sqlite3.Connection):
-    return conn.execute("SELECT * FROM symbols WHERE is_watchlist = 1").fetchall()
+    return conn.execute("SELECT * FROM symbols WHERE is_watchlist = 1 ORDER BY sort_order ASC, code ASC").fetchall()
+
+
+def add_to_watchlist(conn: sqlite3.Connection, code: str, name: str = "", market: str = "TWSE") -> None:
+    """Add a symbol to the watchlist, placing it last in sort order. Re-adding a
+    previously removed symbol puts it back at the end rather than its old position."""
+    max_order = conn.execute("SELECT COALESCE(MAX(sort_order), -1) AS m FROM symbols").fetchone()["m"]
+    conn.execute(
+        """INSERT INTO symbols (code, name, market, is_watchlist, sort_order) VALUES (?, ?, ?, 1, ?)
+           ON CONFLICT(code) DO UPDATE SET is_watchlist=1, sort_order=excluded.sort_order,
+               name=CASE WHEN excluded.name != '' THEN excluded.name ELSE symbols.name END""",
+        (code, name, market, max_order + 1),
+    )
+
+
+def remove_from_watchlist(conn: sqlite3.Connection, code: str) -> None:
+    """Soft-remove: keeps history/name, just stops it showing up as an active watchlist symbol."""
+    conn.execute("UPDATE symbols SET is_watchlist = 0 WHERE code = ?", (code,))
+
+
+def set_watchlist_order(conn: sqlite3.Connection, code: str, sort_order: int) -> None:
+    conn.execute("UPDATE symbols SET sort_order = ? WHERE code = ?", (sort_order, code))
 
 
 def insert_connectivity_event(conn: sqlite3.Connection, event_type: str, detail: str = "") -> None:
