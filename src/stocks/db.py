@@ -160,6 +160,15 @@ def fetch_bars_5min(conn: sqlite3.Connection, symbol: str, limit: int | None = N
     return rows
 
 
+def fetch_bars_5min_today(conn: sqlite3.Connection, symbol: str):
+    """給總覽表格的「今日走勢」迷你K線圖用。run_live.py沒跑起來的日子這裡自然是空的。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    return conn.execute(
+        "SELECT * FROM bars_5min WHERE symbol = ? AND ts >= ? ORDER BY ts ASC",
+        (symbol, today),
+    ).fetchall()
+
+
 def insert_signal_events(conn: sqlite3.Connection, events: list[SignalEvent]) -> list[SignalEvent]:
     """Insert events, ignoring duplicates (same symbol/strategy/direction/ts).
     Returns only the events that were actually newly inserted."""
@@ -220,6 +229,21 @@ def set_watchlist_order(conn: sqlite3.Connection, code: str, sort_order: int) ->
     conn.execute("UPDATE symbols SET sort_order = ? WHERE code = ?", (sort_order, code))
 
 
+def move_watchlist_symbol(conn: sqlite3.Connection, code: str, direction: int) -> None:
+    """direction: -1 to move up, +1 to move down. Renumbers every watchlist symbol's
+    sort_order sequentially (0..n-1) based on current display order and swaps the target
+    with its neighbor -- this also self-heals any duplicate/untidy sort_order values left
+    over from before the reorder UI existed, instead of requiring a separate migration."""
+    codes = [r["code"] for r in fetch_watchlist(conn)]
+    idx = codes.index(code)
+    new_idx = idx + direction
+    if new_idx < 0 or new_idx >= len(codes):
+        return
+    codes[idx], codes[new_idx] = codes[new_idx], codes[idx]
+    for position, c in enumerate(codes):
+        set_watchlist_order(conn, c, position)
+
+
 def insert_connectivity_event(conn: sqlite3.Connection, event_type: str, detail: str = "") -> None:
     conn.execute(
         "INSERT INTO connectivity_events (ts, event_type, detail) VALUES (?, ?, ?)",
@@ -243,6 +267,42 @@ def bars_to_dataframe(rows, ts_field: str) -> pd.DataFrame:
         },
         index=index,
     )
+
+
+def bars_list_to_dataframe(bars: list[Bar]) -> pd.DataFrame:
+    """跟bars_to_dataframe同樣的欄位形狀，但輸入是list[Bar]物件（例如shioaji_client現場抓
+    的今日分K），不是sqlite3.Row查詢結果。"""
+    if not bars:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    index = pd.to_datetime([b.ts for b in bars])
+    return pd.DataFrame(
+        {
+            "open": [b.open for b in bars],
+            "high": [b.high for b in bars],
+            "low": [b.low for b in bars],
+            "close": [b.close for b in bars],
+            "volume": [b.volume for b in bars],
+        },
+        index=index,
+    )
+
+
+def attach_institutional_flows(bars_df: pd.DataFrame, institutional_rows) -> pd.DataFrame:
+    """Left-joins foreign_net/trust_net (from institutional_flows rows, e.g. from
+    fetch_institutional_flows()) onto an OHLCV bars DataFrame by date, so strategies
+    like institutional_streak can read them off the same DataFrame every other
+    strategy already gets. Dates bars_df has but institutional_rows doesn't get NaN,
+    which InstitutionalStreakStrategy treats as neutral (breaks any streak)."""
+    if not institutional_rows:
+        return bars_df
+    inst_df = pd.DataFrame(
+        {
+            "foreign_net": [r["foreign_net"] for r in institutional_rows],
+            "trust_net": [r["trust_net"] for r in institutional_rows],
+        },
+        index=pd.to_datetime([r["date"] for r in institutional_rows]),
+    )
+    return bars_df.join(inst_df, how="left")
 
 
 def fetch_trading_dates(conn: sqlite3.Connection) -> list[str]:

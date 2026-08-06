@@ -1,9 +1,14 @@
+import math
+
 import pandas as pd
 
 from stocks.models import Direction
 from stocks.strategies.bollinger import BollingerStrategy
+from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
+from stocks.strategies.kd_strategy import KDStrategy
 from stocks.strategies.ma_alignment import MAAlignmentStrategy
 from stocks.strategies.ma_crossover import MACrossoverStrategy
+from stocks.strategies.ma_trend import MATrendStrategy
 from stocks.strategies.macd_strategy import MACDStrategy
 from stocks.strategies.price_alert import PriceAlertStrategy
 from stocks.strategies.rsi_strategy import RSIStrategy
@@ -117,3 +122,80 @@ def test_ma_alignment_buy_once_and_sell_per_broken_ma():
     assert len(buys) == 1, "the AND-condition of being above all 3 MAs should be a single edge event"
     assert len(sells) == 3, "each of the 3 MAs being broken should fire its own independent sell event"
     assert {e.detail for e in sells} == {"跌破2日線", "跌破3日線", "跌破4日線"}
+
+
+def test_kd_fires_golden_in_oversold_then_death_in_overbought():
+    # a sine wave naturally cycles K/D through oversold and overbought zones with real crossings
+    closes = [100 + 30 * math.sin(i / 6) for i in range(60)]
+    bars = make_bars(closes)
+    events = KDStrategy().evaluate("2330", bars, {"rsv_period": 9, "k_smooth": 3, "d_smooth": 3})
+
+    buys = [e for e in events if e.direction == Direction.BUY]
+    sells = [e for e in events if e.direction == Direction.SELL]
+    assert len(buys) == 1, "golden cross only counts while K and D are both under the oversold threshold"
+    assert len(sells) == 1, "death cross only counts while K and D are both over the overbought threshold"
+    assert buys[0].ts < sells[0].ts
+
+
+def test_kd_ignores_crossings_outside_the_extreme_zones():
+    # a small wiggle around the midline crosses K/D repeatedly but never enters <20 or >80
+    closes = [100 + 3 * math.sin(i / 2) for i in range(40)]
+    bars = make_bars(closes)
+    events = KDStrategy().evaluate("2330", bars, {"rsv_period": 9, "k_smooth": 3, "d_smooth": 3})
+    assert events == []
+
+
+def test_institutional_streak_fires_once_when_threshold_first_reached():
+    closes = [100] * 10
+    bars = make_bars(closes)
+    bars["foreign_net"] = [100, 100, -50, 200, 200, 200, 200, -10, -10, -10]
+    bars["trust_net"] = [0] * 10
+
+    events = InstitutionalStreakStrategy().evaluate("2330", bars, {"threshold_days": 3})
+
+    foreign_buys = [e for e in events if e.detail == "外資連續3日買超"]
+    assert len(foreign_buys) == 1, "streak of exactly 3 positive days should fire once, not keep re-firing"
+    assert foreign_buys[0].ts == bars.index[5], "index 3,4,5 are the 1st/2nd/3rd positive day of that streak"
+
+
+def test_institutional_streak_tracks_foreign_and_trust_independently():
+    closes = [100] * 6
+    bars = make_bars(closes)
+    bars["foreign_net"] = [100, 100, 100, 100, 100, 100]  # foreign never breaks its buy streak
+    bars["trust_net"] = [-50, -50, -50, 50, 50, 50]  # trust flips from selling to buying
+
+    events = InstitutionalStreakStrategy().evaluate("2330", bars, {"threshold_days": 3})
+
+    assert {(e.detail, e.direction) for e in events} == {
+        ("外資連續3日買超", Direction.BUY),
+        ("投信連續3日賣超", Direction.SELL),
+        ("投信連續3日買超", Direction.BUY),
+    }
+
+
+def test_ma_trend_fires_once_when_price_and_slow_ma_slope_both_confirm():
+    # flat around 5 (slow MA flat), then a sustained rise lifts price above both MAs and
+    # turns the slow MA's own slope positive -- single edge event, no re-fire while it holds
+    closes = [5, 5, 5, 5, 5] + [10, 12, 14, 16, 18, 20]
+    bars = make_bars(closes)
+    events = MATrendStrategy().evaluate("2330", bars, {"fast": 2, "slow": 4})
+
+    assert len(events) == 1, "the AND-condition should be a single edge event, not one per day it holds"
+    assert events[0].direction == Direction.BUY
+    assert all(e.direction == Direction.BUY for e in events), "只定義了進場條件，不該出現SELL"
+
+
+def test_ma_trend_waits_for_slow_ma_slope_even_if_price_already_above_both_mas():
+    # a sharp bounce puts price back above both MAs a step before the slow (longer-lookback)
+    # MA's own slope actually turns positive -- price position alone isn't enough
+    closes = [30, 26, 22, 18, 14, 20, 21, 25]
+    bars = make_bars(closes)
+    events = MATrendStrategy().evaluate("2330", bars, {"fast": 2, "slow": 4})
+
+    assert len(events) == 1
+    assert events[0].ts == bars.index[7], "價格站上均線是在index6，但慢線斜率要到index7才轉正"
+
+
+def test_institutional_streak_returns_nothing_without_institutional_columns():
+    bars = make_bars([100, 101, 102])
+    assert InstitutionalStreakStrategy().evaluate("2330", bars, {"threshold_days": 3}) == []

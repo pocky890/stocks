@@ -13,6 +13,9 @@
     "macd": { "fast": 12, "slow": 26, "signal": 9 },
     "bollinger": { "period": 20, "num_std": 2 },
     "volume_anomaly": { "avg_period": 20, "multiplier": 2 },
-    "ma_alignment": { "fast": 5, "mid": 10, "slow": 20 }
+    "ma_alignment": { "fast": 5, "mid": 10, "slow": 20 },
+    "kd": { "rsv_period": 9, "k_smooth": 3, "d_smooth": 3, "oversold": 20, "overbought": 80 },
+    "institutional_streak": { "threshold_days": 3 },
+    "ma_trend": { "fast": 5, "slow": 20 }
   }
 }

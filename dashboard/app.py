@@ -7,10 +7,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pandas as pd
 import streamlit as st
 
-from charts import candlestick_with_ma, institutional_flow_chart, margin_balance_chart
+from charts import candlestick_with_ma, institutional_flow_chart, intraday_line_chart, kd_chart, margin_balance_chart
 from stocks.config import load_config
 from stocks.daily_update import add_symbol_to_watchlist, check_and_update
 from stocks.db import (
+    bars_list_to_dataframe,
     bars_to_dataframe,
     connect,
     fetch_bars_daily,
@@ -20,11 +21,41 @@ from stocks.db import (
     fetch_signal_events,
     fetch_valuations,
     fetch_watchlist,
+    move_watchlist_symbol,
     remove_from_watchlist,
-    set_watchlist_order,
 )
+from stocks.shioaji_client import ShioajiClient
+from stocks.watchlist_view import build_overview_rows
 
 st.set_page_config(page_title="台股訊號監控", layout="wide")
+
+# st.button內容預設靠左，這裡讓它在欄位裡水平置中；只影響watchlist_rows容器內的按鈕(▲▼移除)，
+# 不動到其他地方的按鈕(例如新增表單的按鈕本來就use_container_width=True，置中沒有視覺差異)。
+# 按鈕本身要先縮小(預設padding讓它比▲▼那兩欄還寬，置中的flex容器根本沒有多餘空間可以置中)。
+# nowrap是為了數字欄位(季線/月線等)在窄欄位裡不要被硬擠成兩行；三大法人是刻意用<br>換行，
+# nowrap不影響<br>造成的換行，只擋掉瀏覽器自動換行。
+st.markdown(
+    """
+<style>
+.st-key-watchlist_rows div[data-testid="stColumn"] div[data-testid="stElementContainer"] { width: 100%; }
+.st-key-watchlist_rows div[data-testid="stButton"] { display: flex; justify-content: center; width: 100%; }
+.st-key-watchlist_rows div[data-testid="stButton"] button {
+    width: auto !important;
+    padding: 0.15rem 0.15rem;
+    min-width: 0;
+}
+/* ▲是第1欄、▼是第2欄，把▼再往左拉近一點，兩顆按鈕之間不用留一整欄的間距 */
+.st-key-watchlist_rows div[data-testid="stColumn"]:nth-of-type(2) {
+    margin-left: -10px;
+}
+.st-key-watchlist_rows > div[data-testid="stLayoutWrapper"]:nth-of-type(even) {
+    background-color: rgba(255, 255, 255, 0.04);
+}
+.st-key-watchlist_rows [data-testid="stMarkdownContainer"] p { white-space: nowrap; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 STRATEGY_LABELS = {
     "ma_crossover": "均線交叉 (5/20日)",
@@ -34,9 +65,26 @@ STRATEGY_LABELS = {
     "volume_anomaly": "成交量異常",
     "price_alert": "到價提醒",
     "ma_alignment": "多空排列 (5/10/20日線)",
+    "kd": "KD低檔黃金交叉/高檔死亡交叉",
+    "institutional_streak": "三大法人連續買賣超",
+    "ma_trend": "站上5/20日均線且20日線上揚",
 }
 
 config = load_config()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_today_intraday(_config, symbols: tuple):
+    """現場連線Shioaji抓觀察清單今天的分K，供「今日走勢」小圖用，不用等run_live.py
+    整天掛著累積。快取60秒——▲▼/移除按鈕每次點擊都會讓整頁重新執行，沒有快取的話
+    每次點擊都要重新登入Shioaji。"""
+    client = ShioajiClient(_config)
+    client.connect()
+    try:
+        return client.fetch_today_kbars(list(symbols))
+    finally:
+        client.disconnect()
+
 
 if "checked_for_updates" not in st.session_state:
     st.session_state.checked_for_updates = True
@@ -51,6 +99,9 @@ if "checked_for_updates" not in st.session_state:
         if result["otc_synced"]:
             parts.append("上櫃籌碼已同步最新一天")
         st.toast(f"已更新：{'、'.join(parts)}", icon="🔄")
+
+    for error in result["errors"]:
+        st.warning(f"⚠️ {error}（不影響其他資料，稍後重新整理再試一次即可）")
 
 tab_watchlist, tab_chart, tab_fundamentals, tab_history = st.tabs(["觀察清單", "K線圖", "籌碼/基本面", "訊號紀錄"])
 
@@ -76,33 +127,80 @@ with tab_watchlist:
         st.rerun()
 
     if watchlist:
-        edited = st.data_editor(
-            pd.DataFrame(watchlist)[["code", "name", "sort_order"]],
-            column_config={
-                "code": st.column_config.TextColumn("代號", disabled=True),
-                "name": st.column_config.TextColumn("名稱", disabled=True),
-                "sort_order": st.column_config.NumberColumn("排序（數字越小越前面）", step=1),
-            },
-            hide_index=True,
-            use_container_width=True,
-            num_rows="fixed",
-            key="watchlist_editor",
-        )
-        if st.button("儲存排序"):
-            with connect(config.db_path) as conn:
-                for _, row in edited.iterrows():
-                    set_watchlist_order(conn, row["code"], int(row["sort_order"]))
-            st.rerun()
-
-        remove_col1, remove_col2 = st.columns([3, 1])
-        remove_code = remove_col1.selectbox("移除股票", symbols, label_visibility="collapsed")
-        if remove_col2.button("移除", use_container_width=True):
-            with connect(config.db_path) as conn:
-                remove_from_watchlist(conn, remove_code)
-            st.rerun()
-
         strategy_list = "、".join(STRATEGY_LABELS.get(k, k) for k in STRATEGY_LABELS)
         st.caption(f"目前每檔股票都套用同一組 {len(STRATEGY_LABELS)} 種策略（還沒有支援每檔各自挑策略）：{strategy_list}")
+        st.markdown("#### 總覽（價位/均線/指標，暫用最新收盤價，之後接即時報價會自動換資料源；▲▼可調整順序）")
+
+        overview_rows = build_overview_rows(config)
+        try:
+            intraday_bars = _fetch_today_intraday(config, tuple(symbols)) if symbols else {}
+        except Exception as exc:
+            intraday_bars = {}
+            st.warning(f"⚠️ 抓即時盤中資料失敗，今日走勢欄位暫時顯示「尚無盤中資料」：{exc}")
+
+        headers = ["", "", "代號", "名稱", "今日走勢", "漲跌", "目前價位", "5日", "10日", "月線", "季線", "RSI", "MACD", "布林通道", "成交量", "KD", "三大法人", ""]
+        widths = [0.35, 0.35, 0.8, 0.9, 1.3, 1.2, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 1.3, 1.6, 0.9]
+
+        header_cols = st.columns(widths, vertical_alignment="center", gap="xxsmall")
+        for col, label in zip(header_cols, headers):
+            if label:
+                col.markdown(f"**{label}**")
+
+        with st.container(key="watchlist_rows"):
+            for i, row in enumerate(overview_rows):
+                cols = st.columns(widths, vertical_alignment="center", gap="xxsmall")
+                code = row["代號"]
+
+                if cols[0].button("▲", key=f"up_{code}", disabled=(i == 0)):
+                    with connect(config.db_path) as conn:
+                        move_watchlist_symbol(conn, code, direction=-1)
+                    st.rerun()
+                if cols[1].button("▼", key=f"down_{code}", disabled=(i == len(overview_rows) - 1)):
+                    with connect(config.db_path) as conn:
+                        move_watchlist_symbol(conn, code, direction=1)
+                    st.rerun()
+
+                cols[2].write(row["代號"])
+                cols[3].write(row["名稱"])
+
+                today_bars_raw = intraday_bars.get(code, [])
+                prev_close = row["昨收"]
+                if len(today_bars_raw) >= 2 and prev_close is not None:
+                    # 分時線至少要2個點才能畫出一段線，只有1筆的話畫不出東西
+                    today_bars = bars_list_to_dataframe(today_bars_raw)
+                    cols[4].plotly_chart(
+                        intraday_line_chart(today_bars, prev_close),
+                        use_container_width=True,
+                        config={"displayModeBar": False},
+                    )
+                else:
+                    cols[4].write("尚無盤中資料")
+
+                cols[5].markdown(row["漲跌"], unsafe_allow_html=True)
+                cols[6].markdown(row["目前價位"], unsafe_allow_html=True)
+
+                for col, field in zip(
+                    cols[7:15],
+                    ["5日", "10日", "月線", "季線", "RSI", "MACD", "布林通道", "成交量"],
+                ):
+                    col.markdown(row[field], unsafe_allow_html=True)
+
+                kd_df = row["KD"].dropna()
+                if len(kd_df) >= 2:
+                    cols[15].plotly_chart(
+                        kd_chart(kd_df),
+                        use_container_width=True,
+                        config={"displayModeBar": False},
+                    )
+                else:
+                    cols[15].write("—")
+
+                cols[16].markdown(row["三大法人"].replace("\n", "<br>"), unsafe_allow_html=True)
+
+                if cols[17].button("移除", key=f"remove_{code}", use_container_width=True):
+                    with connect(config.db_path) as conn:
+                        remove_from_watchlist(conn, code)
+                    st.rerun()
     else:
         st.info("觀察清單是空的，用上面欄位新增股票，或先跑 `python scripts/fetch_historical.py` 填範例資料")
 

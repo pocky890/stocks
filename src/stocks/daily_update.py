@@ -7,6 +7,9 @@
 沒辦法backfill歷史，只能每次都呼叫一次讓它慢慢累積。
 """
 import time
+from datetime import datetime, timedelta
+
+import requests
 
 from stocks import tpex_client, twse_client
 from stocks.config import Config
@@ -119,6 +122,19 @@ def _refresh_market_data_tpex(config: Config, symbols: set[str]) -> bool:
     return len(dates_after - dates_before) > 0
 
 
+def _fetch_name_from_recent_valuations(code: str, latest_date: str) -> str:
+    """公司名稱不管抓哪一天的估值資料都一樣，不用執著抓latest_date那天——TWSE的每日估值
+    報告有公布時間差，股價資料已經有today的K棒時，當天的估值報告可能還沒出來，
+    往前找最近幾天(含當天)有資料的那天就好。"""
+    date_obj = datetime.strptime(latest_date, "%Y-%m-%d").date()
+    for days_back in range(5):
+        d = (date_obj - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        valuations = [r for r in twse_client.fetch_valuations_for_date(d) if r["symbol"] == code]
+        if valuations:
+            return valuations[0]["name"]
+    return ""
+
+
 def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     """新增一檔股票：自動判斷上市/上櫃，抓近1年股價，並只抓最新一天的三大法人/融資融券/估值
     （讓籌碼頁籤不是全空）。上市股票的舊日期籌碼資料因為sync log是以「日期」而非「日期+股票」為
@@ -153,7 +169,13 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
         valuations = [r for r in twse_client.fetch_valuations_for_date(latest_date) if r["symbol"] == code]
         chips_note = "完整歷史要另外跑 `python scripts/fetch_market_data.py --full` 補齊"
 
-    name = valuations[0]["name"] if valuations else ""
+    if valuations:
+        name = valuations[0]["name"]
+    elif market == "TWSE":
+        # 當天股價K棒已經有了，但TWSE的每日估值報告可能還沒公布，往前找最近幾天的估值資料要名字
+        name = _fetch_name_from_recent_valuations(code, latest_date)
+    else:
+        name = ""
 
     with connect(config.db_path) as conn:
         add_to_watchlist(conn, code, name=name, market=market)
@@ -182,19 +204,38 @@ def check_and_update(config: Config) -> dict:
     with connect(config.db_path) as conn:
         rows = fetch_watchlist(conn)
     if not rows:
-        return {"watchlist_empty": True, "new_price_days": 0, "new_market_days": 0, "otc_synced": False}
+        return {"watchlist_empty": True, "new_price_days": 0, "new_market_days": 0, "otc_synced": False, "errors": []}
 
     watchlist = {r["code"] for r in rows}
     twse_symbols = {r["code"] for r in rows if r["market"] != "TPEx"}
     tpex_symbols = {r["code"] for r in rows if r["market"] == "TPEx"}
 
-    new_price_days = _refresh_price_data(config, sorted(watchlist))
-    new_market_days = _refresh_market_data_twse(config, twse_symbols)
-    otc_synced = _refresh_market_data_tpex(config, tpex_symbols)
+    errors = []
+    new_price_days = 0
+    new_market_days = 0
+    otc_synced = False
+
+    # 每個資料來源各自獨立try/except：任何一個外部API連線失敗(逾時/SSL/伺服器錯誤)都不該讓
+    # 整個dashboard打不開，只影響那一塊資料，其他照樣正常更新。
+    try:
+        new_price_days = _refresh_price_data(config, sorted(watchlist))
+    except requests.RequestException as exc:
+        errors.append(f"股價更新失敗：{exc}")
+
+    try:
+        new_market_days = _refresh_market_data_twse(config, twse_symbols)
+    except requests.RequestException as exc:
+        errors.append(f"上市籌碼更新失敗：{exc}")
+
+    try:
+        otc_synced = _refresh_market_data_tpex(config, tpex_symbols)
+    except requests.RequestException as exc:
+        errors.append(f"上櫃籌碼更新失敗：{exc}")
 
     return {
         "watchlist_empty": False,
         "new_price_days": new_price_days,
         "new_market_days": new_market_days,
         "otc_synced": otc_synced,
+        "errors": errors,
     }

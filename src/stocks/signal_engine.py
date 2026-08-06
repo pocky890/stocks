@@ -10,13 +10,21 @@ def evaluate_all(
     strategy_params: dict,
     tier: Tier = Tier.REALTIME,
     price_alert_target: float | None = None,
+    skip_strategies: set[str] | None = None,
 ) -> list[SignalEvent]:
     """Run every registered strategy against the full bars history given.
     Each strategy is edge-triggered internally; duplicate suppression across
-    repeated/overlapping calls happens later at db.insert_signal_events()."""
+    repeated/overlapping calls happens later at db.insert_signal_events().
+
+    skip_strategies lets a caller opt specific strategies out entirely (e.g. the
+    full-market batch scan skips institutional_streak, which only has data for the
+    watchlist) without touching STRATEGY_REGISTRY itself."""
     events: list[SignalEvent] = []
+    skip_strategies = skip_strategies or set()
 
     for name, strategy in STRATEGY_REGISTRY.items():
+        if name in skip_strategies:
+            continue
         params = dict(strategy_params.get(name, {}))
         if name == "price_alert":
             if price_alert_target is None:

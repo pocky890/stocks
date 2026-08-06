@@ -36,3 +36,13 @@ def bollinger_bands(series: pd.Series, period: int = 20, num_std: float = 2):
 
 def rolling_avg_volume(volume: pd.Series, period: int = 20) -> pd.Series:
     return volume.rolling(window=period).mean()
+
+
+def stochastic_kd(high: pd.Series, low: pd.Series, close: pd.Series, rsv_period: int = 9, k_smooth: int = 3, d_smooth: int = 3):
+    """台股慣用KD：K = 前值*(k_smooth-1)/k_smooth + RSV/k_smooth，等同alpha=1/k_smooth的ewm。"""
+    lowest_low = low.rolling(window=rsv_period).min()
+    highest_high = high.rolling(window=rsv_period).max()
+    rsv = (close - lowest_low) / (highest_high - lowest_low) * 100
+    k = rsv.ewm(alpha=1 / k_smooth, adjust=False).mean()
+    d = k.ewm(alpha=1 / d_smooth, adjust=False).mean()
+    return k, d

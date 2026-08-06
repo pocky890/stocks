@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from stocks.indicators import bollinger_bands, ema, macd, rolling_avg_volume, rsi, sma
+from stocks.indicators import bollinger_bands, ema, macd, rolling_avg_volume, rsi, sma, stochastic_kd
 
 
 def test_sma_basic():
@@ -52,3 +52,17 @@ def test_rolling_avg_volume_basic():
     result = rolling_avg_volume(volume, period=3)
     assert result.iloc[2] == pytest.approx(200.0)
     assert result.iloc[4] == pytest.approx(400.0)
+
+
+def test_stochastic_kd_matches_hand_computed_values():
+    # high=low=close simplifies RSV to (close-min)/(max-min)*100 over the window
+    closes = pd.Series([10.0, 12.0, 11.0, 15.0, 14.0, 20.0])
+    k, d = stochastic_kd(closes, closes, closes, rsv_period=3, k_smooth=2, d_smooth=2)
+
+    assert k.iloc[:2].isna().all()
+    assert k.iloc[2] == pytest.approx(50.0)  # first valid RSV seeds K
+    assert k.iloc[3] == pytest.approx(75.0)  # 0.5*50 + 0.5*100
+    assert k.iloc[5] == pytest.approx(87.5)
+    assert d.iloc[2] == pytest.approx(50.0)
+    assert d.iloc[3] == pytest.approx(62.5)  # 0.5*50 + 0.5*75
+    assert d.iloc[5] == pytest.approx(78.125)

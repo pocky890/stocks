@@ -8,7 +8,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stocks.config import load_config
-from stocks.db import bars_to_dataframe, connect, fetch_bars_daily, fetch_watchlist
+from stocks.db import (
+    attach_institutional_flows,
+    bars_to_dataframe,
+    connect,
+    fetch_bars_daily,
+    fetch_institutional_flows,
+    fetch_watchlist,
+)
 from stocks.models import Tier
 from stocks.signal_engine import evaluate_all
 
@@ -18,7 +25,10 @@ def main():
 
     with connect(config.db_path) as conn:
         symbols = [row["code"] for row in fetch_watchlist(conn)]
-        bars_by_symbol = {s: bars_to_dataframe(fetch_bars_daily(conn, s), ts_field="date") for s in symbols}
+        bars_by_symbol = {}
+        for s in symbols:
+            bars = bars_to_dataframe(fetch_bars_daily(conn, s), ts_field="date")
+            bars_by_symbol[s] = attach_institutional_flows(bars, fetch_institutional_flows(conn, s))
 
     if not symbols:
         print("watchlist是空的，先跑 scripts/fetch_historical.py 填資料")
