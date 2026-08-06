@@ -7,11 +7,13 @@ from stocks.models import Bar
 from stocks.watchlist_view import (
     _bollinger_text,
     _current_streak,
+    _current_true_streak_start,
     _ma_price_text,
     _macd_text,
     _rsi_text,
     _round_or_none,
     _volume_text,
+    build_buy_recommendations,
     build_overview_rows,
     change_text,
     compute_change,
@@ -229,6 +231,71 @@ def test_price_text_highlights_limit_up_with_red_background():
 def test_price_text_highlights_limit_down_with_green_background():
     html = price_text(90.0, -9.8)
     assert "background-color:green" in html
+
+
+def test_current_true_streak_start_walks_back_to_the_first_true_day():
+    condition = pd.Series([False, False, True, True, True], index=pd.date_range("2026-01-01", periods=5))
+    assert _current_true_streak_start(condition) == condition.index[2]
+
+
+def test_current_true_streak_start_none_when_not_currently_true():
+    condition = pd.Series([True, True, False], index=pd.date_range("2026-01-01", periods=3))
+    assert _current_true_streak_start(condition) is None
+
+
+def test_build_buy_recommendations_lists_symbol_still_meeting_the_formula(tmp_path):
+    """跟build_overview_rows不同：這裡看的是「現在還符合嗎」(狀態)，不是edge——訊號
+    即使是幾天前才出現的，只要條件沒被打破，都該一直列在這裡讓使用者看到，不會因為
+    edge-triggered通知只發一次而錯過。"""
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    closes = [50] * 25 + [52, 55, 60, 68, 80]
+    volumes = [1000] * 29 + [6000]
+    dates = pd.date_range("2026-01-02", periods=30, freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c, low=c, close=c, volume=v)
+        for ts, c, v in zip(dates, closes, volumes)
+    ]
+    flows = [
+        {"symbol": "2454", "date": d, "foreign_net": n, "trust_net": 0, "dealer_net": 0, "total_net": n}
+        for d, n in zip(dates[-2:].strftime("%Y-%m-%d"), [100, 100])
+    ]
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+        db.insert_institutional_flows(conn, flows)
+
+    rows = build_buy_recommendations(config)
+
+    assert len(rows) == 1
+    assert rows[0]["代號"] == "2454"
+    assert rows[0]["名稱"] == "聯發科"
+    assert rows[0]["現價"] == 80
+    assert rows[0]["符合日期"] == dates[-1].strftime("%Y-%m-%d")
+
+
+def test_build_buy_recommendations_excludes_symbol_without_chip_support(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    closes = [50] * 25 + [52, 55, 60, 68, 80]
+    volumes = [1000] * 29 + [6000]
+    dates = pd.date_range("2026-01-02", periods=30, freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c, low=c, close=c, volume=v)
+        for ts, c, v in zip(dates, closes, volumes)
+    ]
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+        # 沒有三大法人資料，步驟1(籌碼靠山)不可能成立
+
+    assert build_buy_recommendations(config) == []
 
 
 def test_price_text_plain_number_when_change_unknown():

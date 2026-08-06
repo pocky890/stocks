@@ -4,6 +4,7 @@ import pandas as pd
 
 from stocks.models import Direction
 from stocks.strategies.bollinger import BollingerStrategy
+from stocks.strategies.composite_formula import BuyFormulaStrategy, SellFormulaStrategy, compute_buy_condition
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
 from stocks.strategies.ma_alignment import MAAlignmentStrategy
@@ -194,6 +195,118 @@ def test_ma_trend_waits_for_slow_ma_slope_even_if_price_already_above_both_mas()
 
     assert len(events) == 1
     assert events[0].ts == bars.index[7], "價格站上均線是在index6，但慢線斜率要到index7才轉正"
+
+
+def test_buy_formula_fires_when_chip_support_trend_and_breakout_all_align():
+    # flat baseline (25 days) then a rally that: lifts price above its 5/20-day MA (step 2),
+    # breaks out above the Bollinger upper band on a volume spike (step 3A) -- all landing on
+    # the same day foreign money completes a 2-day buying streak (step 1)
+    closes = [50] * 25 + [52, 55, 60, 68, 80]
+    volumes = [1000] * 29 + [6000]
+    bars = make_bars(closes, volumes=volumes)
+    bars["foreign_net"] = [0] * 28 + [100, 100]
+    bars["trust_net"] = [0] * 30
+
+    events = BuyFormulaStrategy().evaluate("2330", bars, {})
+
+    assert len(events) == 1, "the 3-step AND-condition should be a single edge event"
+    assert events[0].direction == Direction.BUY
+    assert events[0].ts == bars.index[-1]
+    assert "爆量突破布林上軌" in events[0].detail
+
+
+def test_buy_formula_does_not_fire_without_institutional_chip_data():
+    # identical setup to the passing case above, but with no foreign_net/trust_net columns --
+    # the chip condition can never be satisfied, so the formula must never fire
+    closes = [50] * 25 + [52, 55, 60, 68, 80]
+    volumes = [1000] * 29 + [6000]
+    bars = make_bars(closes, volumes=volumes)
+
+    assert BuyFormulaStrategy().evaluate("2330", bars, {}) == []
+
+
+def test_buy_condition_chip_check_counts_non_consecutive_buying_days():
+    # 2026-08-06 adjustment: chip support is now a rolling "N buy-days out of the last
+    # chip_lookback_days(5) days" count, not a consecutive streak -- two buy days with a gap
+    # between them should still satisfy chip_min_days(2) as long as both fall inside the
+    # trailing 5-day window on the day being checked. Everything else (mild uptrend so trend_up
+    # holds throughout, a forced volume+price breakout on day 24) is identical between the two
+    # variants -- only the chip timing differs, isolating exactly what's under test.
+    closes = [100 + i * 0.3 for i in range(30)]
+    closes[24] += 5  # force a bollinger breakout on day 24
+    volumes = [1000] * 30
+    volumes[24] = 5000  # force a volume spike on day 24
+
+    def build(foreign_buy_days):
+        bars = make_bars(closes, volumes=volumes)
+        foreign_net = [0] * 30
+        for d in foreign_buy_days:
+            foreign_net[d] = 100
+        bars["foreign_net"] = foreign_net
+        bars["trust_net"] = [0] * 30
+        return bars
+
+    within_window, _ = compute_buy_condition(build([20, 24]), {})
+    outside_window, _ = compute_buy_condition(build([15, 24]), {})
+
+    assert bool(within_window.iloc[24]), "day20+day24 both fall in the trailing 5-day window ending day24"
+    assert not bool(outside_window.iloc[24]), "day15 is outside day24's trailing 5-day window -- only 1 buy day counts"
+
+
+def test_sell_formula_fires_via_ma5_plus_rsi_confirmation():
+    # a rally pushes RSI persistently high (it decays slowly), then a short decline drops the
+    # price below its own 5-day MA while RSI is still >80 -- condition 1 (5-day MA breach
+    # confirmed by RSI overbought)
+    uptrend = list(range(1, 20))
+    downtrend = list(range(18, 5, -1))
+    bars = make_bars(uptrend + downtrend)
+
+    events = SellFormulaStrategy().evaluate("2330", bars, {})
+
+    assert len(events) == 1, "the OR-condition should be a single edge event"
+    assert "跌破5日均線+RSI超買" in events[0].detail
+    assert events[0].direction == Direction.SELL
+
+
+def test_sell_formula_fires_via_ma10_alone_without_rsi_or_chip_confirmation():
+    # a gentle oscillation keeps RSI moderate (never overbought) with no institutional data,
+    # then a mild decline drags price below its own 10-day MA -- condition 2 fires on its own,
+    # with neither of condition 1's confirming factors present
+    closes = [100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 99, 97, 95, 93, 91]
+    bars = make_bars(closes)
+
+    events = SellFormulaStrategy().evaluate("2330", bars, {})
+
+    assert len(events) >= 1
+    assert all("跌破10日均線" in e.detail and "RSI超買" not in e.detail for e in events)
+
+
+def test_sell_formula_does_not_fire_on_ma5_breach_alone_without_confirmation():
+    # price dips below its 5-day MA early in a mild pullback, but RSI is nowhere near
+    # overbought and there's no institutional data -- condition 1 needs a confirming factor,
+    # condition 2 (10-day MA) isn't reached either, so nothing should fire yet
+    bars = make_bars([100, 100, 100, 100, 100, 99, 98])
+
+    assert SellFormulaStrategy().evaluate("2330", bars, {}) == []
+
+
+def test_sell_formula_fires_via_institutional_selling_confirmation():
+    # a gentle sawtooth rise (keeps RSI moderate, not pinned at an artificial 100) then a
+    # 1-day dip below the 5-day MA, landing on the same day a 3-day foreign-selling streak
+    # completes -- RSI stays at 54.5 that day, isolating the institutional-selling branch
+    # of condition 1 from the RSI branch
+    closes = [100, 102, 101, 103, 102, 104, 103, 105, 104, 106, 105, 107, 106, 108, 107, 104]
+    bars = make_bars(closes)
+    n = len(closes)
+    bars["foreign_net"] = [0] * (n - 3) + [-50, -50, -50]
+    bars["trust_net"] = [0] * n
+
+    events = SellFormulaStrategy().evaluate("2330", bars, {})
+
+    assert len(events) == 1
+    assert events[0].ts == bars.index[-1]
+    assert "法人連續賣超" in events[0].detail
+    assert "RSI超買" not in events[0].detail, "當天RSI只有54.5，不該算超買"
 
 
 def test_institutional_streak_returns_nothing_without_institutional_columns():

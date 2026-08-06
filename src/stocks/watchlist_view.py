@@ -13,6 +13,7 @@ from stocks.db import (
     fetch_watchlist,
 )
 from stocks.indicators import bollinger_bands, macd, rolling_avg_volume, rsi, sma, stochastic_kd
+from stocks.strategies.composite_formula import compute_buy_condition
 
 MA_PERIODS = (5, 10, 20, 60)
 MA_NAMES = {20: "月", 60: "季"}  # 5、10維持數字講法，20/60改叫月線/季線
@@ -243,6 +244,51 @@ def build_overview_rows(config: Config) -> list[dict]:
                         merged["foreign_net"] if "foreign_net" in merged.columns else pd.Series(dtype=float),
                         merged["trust_net"] if "trust_net" in merged.columns else pd.Series(dtype=float),
                     ),
+                }
+            )
+
+    return rows
+
+
+def _current_true_streak_start(condition: pd.Series):
+    """從最後一天往前數，condition連續為True的第一天是哪一天(從什麼時候開始「一直符合到
+    現在」)。condition是空的或最後一天是False就回傳None。"""
+    if condition.empty or not bool(condition.iloc[-1]):
+        return None
+    idx = len(condition) - 1
+    while idx > 0 and bool(condition.iloc[idx - 1]):
+        idx -= 1
+    return condition.index[idx]
+
+
+def build_buy_recommendations(config: Config) -> list[dict]:
+    """觀察清單裡「極簡買進公式」3步驟目前還成立的股票——跟build_overview_rows不一樣，
+    這裡看的是「現在還符合嗎」(狀態)，不是「今天剛觸發」(edge)。edge-triggered的通知
+    只在條件第一次成立那天發一次，如果訊號出現時你還沒來得及進場(考慮兩天、等資金)，
+    通知早就過去了，但這裡只要條件還沒被打破，就會一直列在清單裡，不會因為錯過那一天
+    的通知就整個看不到。"""
+    params = config.strategy_params.get("buy_formula", {})
+    rows = []
+    with connect(config.db_path) as conn:
+        for symbol_row in fetch_watchlist(conn):
+            symbol, name = symbol_row["code"], symbol_row["name"]
+            bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
+            if bars.empty:
+                continue
+
+            flows = fetch_institutional_flows(conn, symbol)
+            merged = attach_institutional_flows(bars, flows)
+            condition, _ = compute_buy_condition(merged, params)
+            since = _current_true_streak_start(condition)
+            if since is None:
+                continue
+
+            rows.append(
+                {
+                    "代號": symbol,
+                    "名稱": name or "—",
+                    "現價": _round_or_none(bars["close"].iloc[-1]),
+                    "符合日期": since.strftime("%Y-%m-%d"),
                 }
             )
 

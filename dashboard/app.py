@@ -25,7 +25,7 @@ from stocks.db import (
     remove_from_watchlist,
 )
 from stocks.shioaji_client import ShioajiClient
-from stocks.watchlist_view import build_overview_rows
+from stocks.watchlist_view import build_buy_recommendations, build_overview_rows
 
 st.set_page_config(page_title="台股訊號監控", layout="wide")
 
@@ -68,6 +68,8 @@ STRATEGY_LABELS = {
     "kd": "KD低檔黃金交叉/高檔死亡交叉",
     "institutional_streak": "三大法人連續買賣超",
     "ma_trend": "站上5/20日均線且20日線上揚",
+    "buy_formula": "極簡買進公式(籌碼+趨勢環境成立時，爆量突破布林或KD黃金交叉即買)",
+    "sell_formula": "極簡賣出公式(跌破5日線+RSI超買/法人連3賣，或跌破10日線)",
 }
 
 config = load_config()
@@ -201,6 +203,13 @@ with tab_watchlist:
                     with connect(config.db_path) as conn:
                         remove_from_watchlist(conn, code)
                     st.rerun()
+
+        st.markdown("#### 建議買進（目前符合極簡買進公式3步驟，不是edge-triggered，訊號沒被打破就會一直列著）")
+        recommendations = build_buy_recommendations(config)
+        if recommendations:
+            st.dataframe(pd.DataFrame(recommendations), use_container_width=True, hide_index=True)
+        else:
+            st.caption("目前沒有股票符合")
     else:
         st.info("觀察清單是空的，用上面欄位新增股票，或先跑 `python scripts/fetch_historical.py` 填範例資料")
 

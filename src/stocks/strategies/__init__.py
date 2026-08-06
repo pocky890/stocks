@@ -12,6 +12,7 @@ class Strategy(Protocol):
 
 
 from stocks.strategies.bollinger import BollingerStrategy
+from stocks.strategies.composite_formula import BuyFormulaStrategy, SellFormulaStrategy
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
 from stocks.strategies.ma_alignment import MAAlignmentStrategy
@@ -33,4 +34,6 @@ STRATEGY_REGISTRY: dict[str, Strategy] = {
     "kd": KDStrategy(),
     "institutional_streak": InstitutionalStreakStrategy(),
     "ma_trend": MATrendStrategy(),
+    "buy_formula": BuyFormulaStrategy(),
+    "sell_formula": SellFormulaStrategy(),
 }
