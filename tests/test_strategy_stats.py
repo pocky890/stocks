@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from stocks.models import Direction, SignalEvent
-from stocks.strategy_stats import simulate_round_trips, summarize_trades
+from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 
 
 def make_event(direction, price, ts):
@@ -65,3 +65,56 @@ def test_summarize_trades_computes_win_rate_and_avg_return():
 
 def test_summarize_trades_returns_none_when_no_closed_trades():
     assert summarize_trades([]) is None
+
+
+def test_simulate_scaleout_trades_pairs_one_buy_with_two_sells():
+    events = [
+        make_event(Direction.BUY, 100.0, datetime(2026, 1, 1)),
+        make_event(Direction.SELL, 110.0, datetime(2026, 1, 5)),  # 賣出一半
+        make_event(Direction.SELL, 90.0, datetime(2026, 1, 8)),  # 賣出剩餘一半
+    ]
+
+    trades, still_open = simulate_scaleout_trades(events)
+
+    assert len(trades) == 1
+    assert trades[0].blended_exit_price == 100.0, "兩次出場價各半的均價：(110+90)/2"
+    assert trades[0].return_pct == 0.0
+    assert still_open is None
+
+
+def test_simulate_scaleout_trades_reports_still_open_after_only_one_exit():
+    events = [
+        make_event(Direction.BUY, 100.0, datetime(2026, 1, 1)),
+        make_event(Direction.SELL, 90.0, datetime(2026, 1, 5)),  # 只賣了一半，還缺第二次出場
+    ]
+
+    trades, still_open = simulate_scaleout_trades(events)
+
+    assert trades == []
+    assert still_open["entry"].price == 100.0
+    assert len(still_open["exits"]) == 1
+
+
+def test_simulate_scaleout_trades_reports_still_open_with_no_exit_at_all():
+    events = [make_event(Direction.BUY, 100.0, datetime(2026, 1, 1))]
+
+    trades, still_open = simulate_scaleout_trades(events)
+
+    assert trades == []
+    assert still_open["entry"].price == 100.0
+    assert still_open["exits"] == []
+
+
+def test_summarize_trades_works_on_scaleout_trades_too():
+    events = [
+        make_event(Direction.BUY, 100.0, datetime(2026, 1, 1)),
+        make_event(Direction.SELL, 120.0, datetime(2026, 1, 5)),
+        make_event(Direction.SELL, 140.0, datetime(2026, 1, 8)),
+    ]
+    trades, _ = simulate_scaleout_trades(events)
+
+    summary = summarize_trades(trades)
+
+    assert summary["n"] == 1
+    assert summary["win_rate"] == 100.0
+    assert summary["avg_return_pct"] == 30.0, "均價出場130 vs 進場100，(130-100)/100*100"

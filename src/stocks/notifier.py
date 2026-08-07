@@ -12,9 +12,14 @@ DIRECTION_LABEL = {Direction.BUY: "買", Direction.SELL: "賣"}
 MAX_BATCH_SYMBOLS_LISTED = 30
 # 只有這幾個「進場/出場邏輯完整、可以直接照著做」的策略會推播——單一指標(RSI/MACD/KD/
 # 均線交叉...)本身誤判率較高，不再各自觸發通知，但照樣會寫進signal_events(訊號紀錄頁籤
-# 看得到全部)。atr_breakout/chip_momentum雖然各自只用ATR/外資買超一個核心指標，但進場+
-# 出場邏輯是綁在一起的完整系統，跟buy_formula/sell_formula同一類，不是單純的指標訊號。
-NOTIFIABLE_STRATEGIES = {"buy_formula", "sell_formula", "atr_breakout", "chip_momentum"}
+# 看得到全部)。極簡買賣公式(buy_formula/sell_formula)回測後整體表現墊底，已經移除。
+NOTIFIABLE_STRATEGIES = {
+    "atr_breakout",
+    "chip_momentum",
+    "trend_following",
+    "breakout",
+    "golden_cross_scaleout",
+}
 _MA_PERIODS = (5, 10, 20, 60)
 _MA_NAMES = {20: "月", 60: "季"}  # 5、10維持數字講法，20/60叫月線/季線，跟dashboard命名一致
 
@@ -58,8 +63,8 @@ def notify_symbol_signals(
     single Telegram message, per the aggregation design (list which strategies fired,
     no weighted/scored judgment).
 
-    只通知buy_formula/sell_formula(NOTIFIABLE_STRATEGIES)——單一指標(RSI/MACD/KD/
-    均線交叉...)不再各自觸發通知，那些訊號照樣寫進signal_events，只是不推播。
+    只通知NOTIFIABLE_STRATEGIES這幾個策略——單一指標(RSI/MACD/KD/均線交叉...)不再
+    各自觸發通知，那些訊號照樣寫進signal_events，只是不推播。
     real-time這條路只服務觀察清單股票(run_live.py只訂閱觀察清單的tick)，所以這裡
     不需要另外判斷是否在觀察清單——跟notify_batch_summary(服務全市場)不一樣。
 
@@ -113,13 +118,14 @@ def notify_batch_summary(config: Config, events: list[SignalEvent], watchlist: s
     會被db.insert_signal_events()當成「新的」一次全灌進來，摘要不篩今天的話會被歷史
     累積灌爆(曾經一次收到769檔、內容只有股票代號+策略縮寫，完全看不出是不是今天的訊號)。
 
-    只通知buy_formula/sell_formula(NOTIFIABLE_STRATEGIES)，單一指標不再各自觸發通知。
-    賣出訊號只對觀察清單內的股票有意義(你在關注/持有的才需要知道要不要賣)，不在
-    watchlist裡的股票只送買進通知——這也是run_batch.py全市場掃描要傳watchlist進來的
-    原因。注意：sell_formula/buy_formula都需要三大法人資料，目前只有watchlist股票有
-    這份資料(run_batch.py的SKIP_STRATEGIES會跳過全市場的這兩個策略)，所以現階段非
-    watchlist股票實際上不會產生買進訊號——這裡的watchlist篩選是為未來全市場也接上
-    籌碼資料時預留的正確行為，不是現在就能生效的功能。"""
+    只通知NOTIFIABLE_STRATEGIES這幾個策略，單一指標不再各自觸發通知。賣出訊號只對
+    觀察清單內的股票有意義(你在關注/持有的才需要知道要不要賣)，不在watchlist裡的股票
+    只送買進通知——這也是run_batch.py全市場掃描要傳watchlist進來的原因。注意：
+    chip_momentum需要三大法人資料，目前只有watchlist股票有這份資料(run_batch.py的
+    SKIP_STRATEGIES會跳過全市場的institutional_streak，但chip_momentum本身沒被跳過，
+    只是全市場股票缺資料時會自動優雅降級回傳空清單)，所以現階段非watchlist股票的
+    chip_momentum訊號實際上不會產生——這裡的watchlist篩選是為未來全市場也接上籌碼
+    資料時預留的正確行為，不是現在就能生效的功能。"""
     today_events = [e for e in events if e.ts.date() == date.today() and e.strategy in NOTIFIABLE_STRATEGIES]
     today_events = [e for e in today_events if e.direction == Direction.BUY or e.symbol in watchlist]
 

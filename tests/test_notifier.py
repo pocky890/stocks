@@ -62,50 +62,50 @@ def make_event(strategy, direction, detail="", symbol="2330", ts=None):
     )
 
 
-def test_notify_symbol_signals_sends_for_a_single_buy_formula_trigger(captured_calls):
-    """buy_formula/sell_formula本身已經是多條件組合過的策略，觸發1次就該通知，
-    不需要像單一指標那樣等別的策略一起confirm。"""
+def test_notify_symbol_signals_sends_for_a_single_notifiable_trigger(captured_calls):
+    """NOTIFIABLE_STRATEGIES(atr_breakout/chip_momentum/trend_following/breakout)本身
+    已經是進出場邏輯完整的策略，觸發1次就該通知，不需要像單一指標那樣等別的策略一起confirm。"""
     config = make_config()
-    events = [make_event("buy_formula", Direction.BUY, "極簡買進公式成立(KD低檔黃金交叉)")]
+    events = [make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00")]
     notify_symbol_signals(config, "2330", "台積電", events, EMPTY_BARS)
 
     assert len(captured_calls) == 1
     text = captured_calls[0]["data"]["text"]
-    assert "[V] 極簡買進公式成立(KD低檔黃金交叉)" in text
+    assert "[V] 創20日新高突破，ATR停損 580.00" in text
     assert "2330 台積電" in text
     assert "$600.0" in text
     assert "🟢" in text
 
 
 def test_notify_symbol_signals_ignores_single_indicator_strategies(captured_calls):
-    """RSI/MACD/KD這些單一指標不再各自觸發通知(只有buy_formula/sell_formula會)，
-    這裡完全沒有formula事件，就不該推播。"""
+    """RSI/MACD/KD這些單一指標不再各自觸發通知(只有NOTIFIABLE_STRATEGIES會)，
+    這裡完全沒有NOTIFIABLE_STRATEGIES事件，就不該推播。"""
     config = make_config()
     events = [make_event("rsi", Direction.BUY, "RSI跌破30"), make_event("macd", Direction.BUY, "MACD黃金交叉")]
     notify_symbol_signals(config, "2330", "台積電", events, EMPTY_BARS)
     assert len(captured_calls) == 0
 
 
-def test_notify_symbol_signals_only_shows_formula_events_when_mixed_with_single_indicators(captured_calls):
-    """同一批events裡混了單一指標(rsi)跟formula(buy_formula)，訊息裡只該列出
-    formula那一項，單一指標不該出現(它們已經不算「觸發訊號」)。"""
+def test_notify_symbol_signals_only_shows_notifiable_events_when_mixed_with_single_indicators(captured_calls):
+    """同一批events裡混了單一指標(rsi)跟策略(atr_breakout)，訊息裡只該列出
+    策略那一項，單一指標不該出現(它們已經不算「觸發訊號」)。"""
     config = make_config()
     events = [
         make_event("rsi", Direction.BUY, "RSI跌破30"),
-        make_event("buy_formula", Direction.BUY, "極簡買進公式成立(爆量突破布林上軌)"),
+        make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00"),
     ]
     notify_symbol_signals(config, "2330", "台積電", events, EMPTY_BARS)
 
     assert len(captured_calls) == 1
     text = captured_calls[0]["data"]["text"]
-    assert "極簡買進公式成立" in text
+    assert "創20日新高突破" in text
     assert "RSI跌破30" not in text
     assert "觸發訊號（1項）" in text
 
 
-def test_notify_symbol_signals_uses_warning_header_for_sell_formula(captured_calls):
+def test_notify_symbol_signals_uses_warning_header_for_sell_events(captured_calls):
     config = make_config()
-    events = [make_event("sell_formula", Direction.SELL, "極簡賣出公式(2/3: 短線過熱、均線死亡交叉)")]
+    events = [make_event("chip_momentum", Direction.SELL, "跌破ATR移動停損 620.00")]
     notify_symbol_signals(config, "2344", "華邦電", events, EMPTY_BARS)
 
     text = captured_calls[0]["data"]["text"]
@@ -114,7 +114,7 @@ def test_notify_symbol_signals_uses_warning_header_for_sell_formula(captured_cal
 
 def test_notify_symbol_signals_falls_back_to_symbol_when_name_missing(captured_calls):
     config = make_config()
-    events = [make_event("buy_formula", Direction.BUY, "極簡買進公式成立(KD低檔黃金交叉)")]
+    events = [make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00")]
     notify_symbol_signals(config, "2330", "", events, EMPTY_BARS)
 
     text = captured_calls[0]["data"]["text"]
@@ -132,7 +132,7 @@ def test_notify_symbol_signals_includes_trend_line_when_daily_bars_available(cap
     所以額外加一行，格式跟以前dashboard的多空排列欄位一致(月線=20日,季線=60日)。"""
     config = make_config()
     uptrend = make_daily_bars([100 + i * 0.5 for i in range(70)])  # 持續上漲70天，現價必然站上所有均線
-    events = [make_event("buy_formula", Direction.BUY, "極簡買進公式成立(KD低檔黃金交叉)")]
+    events = [make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00")]
     notify_symbol_signals(config, "2330", "台積電", events, uptrend)
 
     text = captured_calls[0]["data"]["text"]
@@ -141,7 +141,7 @@ def test_notify_symbol_signals_includes_trend_line_when_daily_bars_available(cap
 
 def test_notify_symbol_signals_omits_trend_line_when_daily_bars_missing(captured_calls):
     config = make_config()
-    events = [make_event("buy_formula", Direction.BUY, "極簡買進公式成立(KD低檔黃金交叉)")]
+    events = [make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00")]
     notify_symbol_signals(config, "2330", "台積電", events, EMPTY_BARS)
 
     text = captured_calls[0]["data"]["text"]
@@ -158,10 +158,10 @@ def test_notify_connectivity_lost_and_restored(captured_calls):
     assert "連線已恢復" in captured_calls[1]["data"]["text"]
 
 
-def test_notify_batch_summary_lists_buy_formula_for_symbols_outside_watchlist(captured_calls):
+def test_notify_batch_summary_lists_buy_events_for_symbols_outside_watchlist(captured_calls):
     """買進機會對誰都有意義，不管在不在觀察清單裡——watchlist在這裡應該完全不擋買進事件。"""
     config = make_config()
-    events = [make_event("buy_formula", Direction.BUY, "極簡買進公式成立(KD低檔黃金交叉)", symbol="9999")]
+    events = [make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00", symbol="9999")]
     notify_batch_summary(config, events, watchlist=set())
 
     assert len(captured_calls) == 1
@@ -169,19 +169,19 @@ def test_notify_batch_summary_lists_buy_formula_for_symbols_outside_watchlist(ca
     assert "9999" in text and "共 1 檔" in text
 
 
-def test_notify_batch_summary_suppresses_sell_formula_outside_watchlist(captured_calls):
+def test_notify_batch_summary_suppresses_sell_events_outside_watchlist(captured_calls):
     """賣出訊號對「根本沒有在關注/沒有持有」的股票沒有意義，不在watchlist裡就不通知。"""
     config = make_config()
-    events = [make_event("sell_formula", Direction.SELL, "極簡賣出公式(2/3: ...)", symbol="9999")]
+    events = [make_event("chip_momentum", Direction.SELL, "跌破ATR移動停損 620.00", symbol="9999")]
     notify_batch_summary(config, events, watchlist={"2330"})
 
     assert len(captured_calls) == 1
     assert "今天沒有符合條件的股票" in captured_calls[0]["data"]["text"]
 
 
-def test_notify_batch_summary_allows_sell_formula_inside_watchlist(captured_calls):
+def test_notify_batch_summary_allows_sell_events_inside_watchlist(captured_calls):
     config = make_config()
-    events = [make_event("sell_formula", Direction.SELL, "極簡賣出公式(2/3: ...)", symbol="2330")]
+    events = [make_event("chip_momentum", Direction.SELL, "跌破ATR移動停損 620.00", symbol="2330")]
     notify_batch_summary(config, events, watchlist={"2330"})
 
     assert len(captured_calls) == 1
@@ -201,8 +201,8 @@ def test_notify_batch_summary_ignores_single_indicator_strategies(captured_calls
 def test_notify_batch_summary_groups_multiple_symbols(captured_calls):
     config = make_config()
     events = [
-        make_event("buy_formula", Direction.BUY, "極簡買進公式成立(...)", symbol="2330"),
-        SignalEvent("2317", "sell_formula", Direction.SELL, 100.0, datetime.now(), tier=Tier.BATCH, detail="極簡賣出公式(...)"),
+        make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00", symbol="2330"),
+        SignalEvent("2317", "chip_momentum", Direction.SELL, 100.0, datetime.now(), tier=Tier.BATCH, detail="跌破ATR移動停損 100.00"),
     ]
     notify_batch_summary(config, events, watchlist={"2330", "2317"})
 
@@ -218,20 +218,20 @@ def test_notify_batch_summary_filters_out_historical_backlog(captured_calls):
     幾天)時，很久以前的crossing也會被db.insert_signal_events()當成「新的」一起插入，
     但摘要只該通知今天真的觸發的，不然會被歷史累積灌爆(regression: 曾一次收到769檔全是舊資料)。"""
     config = make_config()
-    old_event = make_event("buy_formula", Direction.BUY, "極簡買進公式成立(...)", ts=datetime(2020, 1, 1))
-    today_event = make_event("sell_formula", Direction.SELL, "極簡賣出公式(...)", ts=datetime.now())
+    old_event = make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00", ts=datetime(2020, 1, 1))
+    today_event = make_event("chip_momentum", Direction.SELL, "跌破ATR移動停損 100.00", ts=datetime.now())
 
     notify_batch_summary(config, [old_event, today_event], watchlist={"2330"})
 
     assert len(captured_calls) == 1
     text = captured_calls[0]["data"]["text"]
     assert "共 1 檔" in text
-    assert "極簡買進公式" not in text, "很久以前的舊訊號不該出現在今天的摘要裡"
+    assert "創20日新高突破" not in text, "很久以前的舊訊號不該出現在今天的摘要裡"
 
 
 def test_notify_batch_summary_says_nothing_new_when_all_events_are_historical(captured_calls):
     config = make_config()
-    old_event = make_event("buy_formula", Direction.BUY, ts=datetime(2020, 1, 1))
+    old_event = make_event("atr_breakout", Direction.BUY, ts=datetime(2020, 1, 1))
 
     notify_batch_summary(config, [old_event], watchlist={"2330"})
 
@@ -241,6 +241,6 @@ def test_notify_batch_summary_says_nothing_new_when_all_events_are_historical(ca
 
 def test_send_message_without_credentials_does_not_call_requests(captured_calls):
     config = make_config(telegram_bot_token="", telegram_chat_id="")
-    events = [make_event("buy_formula", Direction.BUY, "極簡買進公式成立(...)")]
+    events = [make_event("atr_breakout", Direction.BUY, "創20日新高突破，ATR停損 580.00")]
     notify_symbol_signals(config, "2330", "台積電", events, EMPTY_BARS)
     assert len(captured_calls) == 0

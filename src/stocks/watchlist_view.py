@@ -1,5 +1,7 @@
 """觀察清單總覽表格要顯示什麼、怎麼算，跟「怎麼畫UI」分開。dashboard/app.py只呼叫
 build_overview_rows()把結果丟進st.dataframe，不自己算任何指標。"""
+from datetime import datetime
+
 import pandas as pd
 
 from stocks.config import Config
@@ -11,9 +13,18 @@ from stocks.db import (
     fetch_bars_daily,
     fetch_institutional_flows,
     fetch_watchlist,
+    get_disabled_strategies,
 )
 from stocks.indicators import bollinger_bands, macd, rolling_avg_volume, rsi, sma, stochastic_kd
-from stocks.strategies.composite_formula import compute_buy_condition
+from stocks.models import Direction
+from stocks.notifier import NOTIFIABLE_STRATEGIES
+from stocks.strategies import STRATEGY_REGISTRY
+from stocks.strategy_selection import SCALEOUT_STRATEGY
+from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades
+
+MAX_SIGNAL_AGE_DAYS = 100  # 超過這個天數的舊訊號直接不列(不是變灰/變淡)——那個策略對這支
+# 股票已經一段時間沒有任何動作，不管上次是買還是賣都不算「現在還有意義的訊號」，2026-08-07
+# 使用者確認拿掉，不是全部保留只是換顏色
 
 MA_PERIODS = (5, 10, 20, 60)
 MA_NAMES = {20: "月", 60: "季"}  # 5、10維持數字講法，20/60改叫月線/季線
@@ -119,12 +130,22 @@ def _prev_close(bars_daily_df: pd.DataFrame):
 
 
 def compute_change(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
-    """回傳(change, change_pct)：現價(今天盤中最新一筆，沒有就用日線最新收盤)比較昨收的漲跌點數/百分比。"""
+    """回傳(change, change_pct)：現價比較昨收的漲跌點數/百分比。優先用bars_daily當天那筆
+    (每天固定更新，最後、最完整的數字)；只有今天的日K還沒進來時才退回today_bars_df
+    (run_live.py即時累積的盤中5分K)——這張表只在run_live.py確實掛著的時候才會有資料，
+    一旦程式停掉，裡面最後一筆會凍結在停掉的那個時間點，不能無條件當作「現價」。"""
     prev_close = _prev_close(bars_daily_df)
     if prev_close is None:
         return None, None
 
-    current = today_bars_df["close"].iloc[-1] if not today_bars_df.empty else bars_daily_df["close"].iloc[-1]
+    today = pd.Timestamp.now().normalize()
+    today_daily_row = bars_daily_df[bars_daily_df.index >= today]
+    if not today_daily_row.empty:
+        current = today_daily_row["close"].iloc[-1]
+    elif not today_bars_df.empty:
+        current = today_bars_df["close"].iloc[-1]
+    else:
+        current = bars_daily_df["close"].iloc[-1]
     change = current - prev_close
     change_pct = (change / prev_close * 100) if prev_close else None
     return change, change_pct
@@ -156,9 +177,10 @@ def price_text(latest_close, change_pct) -> str:
 
 
 def _ma_price_text(latest_close, ma_series: pd.Series) -> str:
-    """5日/10日/月線/季線這幾欄：現價站上均線=紅色(多方)，跌破均線=綠色(空方)；後面加↑/↓
-    表示均線本身正在上揚/下彎——跟現價站上/跌破是兩件不同的事(均線可能上揚但現價還沒
-    站上，或現價站上但均線本身還在下彎)，箭頭比較的是均線今天跟昨天的值，不是價格。"""
+    """5日/10日/月線/季線這幾欄：數字顏色代表「現價站上/跌破均線」(站上=紅/多方，跌破=
+    綠/空方)；箭頭代表「均線本身比昨天上揚/下彎」，跟數字顏色是兩個獨立的維度(均線可能
+    上揚但現價還沒站上，或現價站上但均線本身還在下彎)，所以箭頭用自己的紅漲/綠跌上色
+    (跟大盤慣例一致)，不跟著數字顏色走，兩者可能同時顯示不同色。"""
     ma_value = ma_series.iloc[-1]
     value = _round_or_none(ma_value)
     if value is None:
@@ -169,9 +191,12 @@ def _ma_price_text(latest_close, ma_series: pd.Series) -> str:
     if len(ma_series) >= 2:
         prev_ma = ma_series.iloc[-2]
         if not pd.isna(prev_ma):
-            arrow = " ↑" if ma_value > prev_ma else " ↓" if ma_value < prev_ma else ""
+            if ma_value > prev_ma:
+                arrow = ' <span style="color:red">↑</span>'
+            elif ma_value < prev_ma:
+                arrow = ' <span style="color:green">↓</span>'
 
-    return f'<span style="color:{color}">{value}{arrow}</span>'
+    return f'<span style="color:{color}">{value}</span>{arrow}'
 
 
 def _empty_row(symbol: str, name: str) -> dict:
@@ -250,24 +275,18 @@ def build_overview_rows(config: Config) -> list[dict]:
     return rows
 
 
-def _current_true_streak_start(condition: pd.Series):
-    """從最後一天往前數，condition連續為True的第一天是哪一天(從什麼時候開始「一直符合到
-    現在」)。condition是空的或最後一天是False就回傳None。"""
-    if condition.empty or not bool(condition.iloc[-1]):
-        return None
-    idx = len(condition) - 1
-    while idx > 0 and bool(condition.iloc[idx - 1]):
-        idx -= 1
-    return condition.index[idx]
-
-
-def build_buy_recommendations(config: Config) -> list[dict]:
-    """觀察清單裡「極簡買進公式」3步驟目前還成立的股票——跟build_overview_rows不一樣，
-    這裡看的是「現在還符合嗎」(狀態)，不是「今天剛觸發」(edge)。edge-triggered的通知
-    只在條件第一次成立那天發一次，如果訊號出現時你還沒來得及進場(考慮兩天、等資金)，
-    通知早就過去了，但這裡只要條件還沒被打破，就會一直列在清單裡，不會因為錯過那一天
-    的通知就整個看不到。"""
-    params = config.strategy_params.get("buy_formula", {})
+def build_strategy_recommendations(config: Config) -> list[dict]:
+    """觀察清單裡每支股票、每個策略目前最後一個事件——不管方向是BUY還是SELL都列出來，
+    一列對應一個策略的訊號(不是把整支股票的好幾個策略塞進同一格文字)。NOTIFIABLE_STRATEGIES
+    這幾個策略進場/出場都是edge-triggered(條件第一天成立才發一次)，觸發後策略自己會追蹤
+    部位直到下一個相反方向事件，不像舊版buy_formula有「持續符合就一直列著」的連續狀態
+    可以看。這裡看的是「這個策略最後一次動作是叫你買還是叫你賣」，不是「條件現在還成立」。
+    每一列的「買進策略」跟「賣出策略」剛好一個有填一個留白(同一個策略同一時間不會又是
+    買又是賣)：最後一次是BUY就填「買進策略」，是SELL就填「賣出策略」。「觸發價格」是
+    那個事件當天的收盤價(那個策略真正判斷買/賣的依據)，「現價」是今天的收盤價，兩個
+    分開放才看得出來「當時觸發之後，現在漲跌多少」。超過MAX_SIGNAL_AGE_DAYS(100天)沒
+    動作的策略直接不列——2026-08-07發現沒有天數限制的話，會把一年多前的舊訊號跟這幾天
+    的新訊號混在一起，使用者確認拿掉超過100天沒動作的，不是保留但改樣式。"""
     rows = []
     with connect(config.db_path) as conn:
         for symbol_row in fetch_watchlist(conn):
@@ -278,18 +297,135 @@ def build_buy_recommendations(config: Config) -> list[dict]:
 
             flows = fetch_institutional_flows(conn, symbol)
             merged = attach_institutional_flows(bars, flows)
-            condition, _ = compute_buy_condition(merged, params)
-            since = _current_true_streak_start(condition)
-            if since is None:
+            current_price = _round_or_none(bars["close"].iloc[-1])
+
+            for strategy_name in NOTIFIABLE_STRATEGIES:
+                strategy = STRATEGY_REGISTRY.get(strategy_name)
+                if strategy is None:
+                    continue
+                events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
+                if not events:
+                    continue
+                last_event = max(events, key=lambda e: e.ts)
+                if (datetime.now() - last_event.ts).days > MAX_SIGNAL_AGE_DAYS:
+                    continue  # 這個策略對這支股票太久沒動作了，不算現在有意義的訊號
+
+                is_buy = last_event.direction == Direction.BUY
+                rows.append(
+                    {
+                        "代號": symbol,
+                        "名稱": name or "—",
+                        "買進策略": strategy_name if is_buy else "",
+                        "賣出策略": strategy_name if not is_buy else "",
+                        "觸發價格": _round_or_none(last_event.price),
+                        "現價": current_price,
+                        "觸發日期": last_event.ts.strftime("%Y-%m-%d"),
+                    }
+                )
+
+    return rows
+
+
+def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[dict]:
+    """模擬交易紀錄：從start_date開始，NOTIFIABLE_STRATEGIES每個策略每次BUY訊號就當作
+    買進、配對到下一個SELL訊號(或golden_cross_scaleout兩次SELL)就當作賣出，純粹照著
+    訊號模擬記錄買賣價位跟報酬率，不是真的下單——給使用者觀察這幾個策略實際表現用。
+    start_date當天之前已經在場內的部位不算(從那天開始當作空手重新起算，跟
+    simulate_round_trips/simulate_scaleout_trades本來的配對邏輯一致：先篩選事件範圍
+    再配對)。還沒配到出場的部位標記「持有中」，「賣出價位」留空(還沒真的賣)，另外用
+    「現價」欄位算未實現報酬率——兩者分開列，不能讓「持有中」那列的賣出價位看起來
+    像已經賣掉了。
+
+    這裡跟_compute_track_records不一樣：那裡是故意忽略排除清單(給使用者看「為什麼」
+    被排除的歷史全貌)，這裡是模擬「照現在的設定實際會不會被通知」，所以個股已經被
+    disabled_strategies排除的策略要跳過，不列進模擬交易——不然會看到「策略明明已經
+    被排除了，畫面上卻還在模擬買賣」這種矛盾。"""
+    start = pd.Timestamp(start_date)
+    rows = []
+    with connect(config.db_path) as conn:
+        for symbol_row in fetch_watchlist(conn):
+            symbol, name = symbol_row["code"], symbol_row["name"]
+            bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
+            if bars.empty:
                 continue
 
-            rows.append(
-                {
-                    "代號": symbol,
-                    "名稱": name or "—",
-                    "現價": _round_or_none(bars["close"].iloc[-1]),
-                    "符合日期": since.strftime("%Y-%m-%d"),
-                }
-            )
+            flows = fetch_institutional_flows(conn, symbol)
+            merged = attach_institutional_flows(bars, flows)
+            current_price = bars["close"].iloc[-1]
+            disabled = set(get_disabled_strategies(conn, symbol))
+
+            for strategy_name in NOTIFIABLE_STRATEGIES:
+                if strategy_name in disabled:
+                    continue
+                strategy = STRATEGY_REGISTRY.get(strategy_name)
+                if strategy is None:
+                    continue
+                events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
+                events_since = [e for e in events if e.ts >= start]
+                if not events_since:
+                    continue
+
+                base_row = {"代號": symbol, "名稱": name or "—", "策略": strategy_name}
+
+                if strategy_name == SCALEOUT_STRATEGY:
+                    trades, still_open = simulate_scaleout_trades(events_since)
+                    for t in trades:
+                        rows.append(
+                            {
+                                **base_row,
+                                "買進日期": t.entry_ts.strftime("%Y-%m-%d"),
+                                "買進價位": _round_or_none(t.entry_price),
+                                "賣出日期": t.exit2_ts.strftime("%Y-%m-%d"),
+                                "賣出價位": _round_or_none(t.blended_exit_price),
+                                "現價": _round_or_none(current_price),
+                                "報酬率(%)": _round_or_none(t.return_pct),
+                                "狀態": "已平倉",
+                            }
+                        )
+                    if still_open:
+                        entry, exits = still_open["entry"], still_open["exits"]
+                        unrealized_price = (exits[0].price + current_price) / 2 if exits else current_price
+                        rows.append(
+                            {
+                                **base_row,
+                                "買進日期": entry.ts.strftime("%Y-%m-%d"),
+                                "買進價位": _round_or_none(entry.price),
+                                "賣出日期": None,
+                                "賣出價位": None,
+                                "現價": _round_or_none(current_price),
+                                "報酬率(%)": _round_or_none((unrealized_price - entry.price) / entry.price * 100),
+                                "狀態": "持有中(未實現)",
+                            }
+                        )
+                else:
+                    trades, open_position = simulate_round_trips(events_since)
+                    for t in trades:
+                        rows.append(
+                            {
+                                **base_row,
+                                "買進日期": t.entry_ts.strftime("%Y-%m-%d"),
+                                "買進價位": _round_or_none(t.entry_price),
+                                "賣出日期": t.exit_ts.strftime("%Y-%m-%d"),
+                                "賣出價位": _round_or_none(t.exit_price),
+                                "現價": _round_or_none(current_price),
+                                "報酬率(%)": _round_or_none(t.return_pct),
+                                "狀態": "已平倉",
+                            }
+                        )
+                    if open_position:
+                        rows.append(
+                            {
+                                **base_row,
+                                "買進日期": open_position.ts.strftime("%Y-%m-%d"),
+                                "買進價位": _round_or_none(open_position.price),
+                                "賣出日期": None,
+                                "賣出價位": None,
+                                "現價": _round_or_none(current_price),
+                                "報酬率(%)": _round_or_none(
+                                    (current_price - open_position.price) / open_position.price * 100
+                                ),
+                                "狀態": "持有中(未實現)",
+                            }
+                        )
 
     return rows

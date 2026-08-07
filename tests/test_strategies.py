@@ -5,8 +5,9 @@ import pandas as pd
 from stocks.models import Direction
 from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bollinger import BollingerStrategy
+from stocks.strategies.breakout import BreakoutStrategy
 from stocks.strategies.chip_momentum import ChipMomentumStrategy
-from stocks.strategies.composite_formula import BuyFormulaStrategy, SellFormulaStrategy, compute_buy_condition
+from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
 from stocks.strategies.ma_alignment import MAAlignmentStrategy
@@ -14,7 +15,9 @@ from stocks.strategies.ma_crossover import MACrossoverStrategy
 from stocks.strategies.ma_trend import MATrendStrategy
 from stocks.strategies.macd_strategy import MACDStrategy
 from stocks.strategies.price_alert import PriceAlertStrategy
+from stocks.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
 from stocks.strategies.rsi_strategy import RSIStrategy
+from stocks.strategies.trend_following import TrendFollowingStrategy
 from stocks.strategies.volume_anomaly import VolumeAnomalyStrategy
 
 
@@ -199,118 +202,6 @@ def test_ma_trend_waits_for_slow_ma_slope_even_if_price_already_above_both_mas()
     assert events[0].ts == bars.index[7], "價格站上均線是在index6，但慢線斜率要到index7才轉正"
 
 
-def test_buy_formula_fires_when_chip_support_trend_and_breakout_all_align():
-    # flat baseline (25 days) then a rally that: lifts price above its 5/20-day MA (step 2),
-    # breaks out above the Bollinger upper band on a volume spike (step 3A) -- all landing on
-    # the same day foreign money completes a 2-day buying streak (step 1)
-    closes = [50] * 25 + [52, 55, 60, 68, 80]
-    volumes = [1000] * 29 + [6000]
-    bars = make_bars(closes, volumes=volumes)
-    bars["foreign_net"] = [0] * 28 + [100, 100]
-    bars["trust_net"] = [0] * 30
-
-    events = BuyFormulaStrategy().evaluate("2330", bars, {})
-
-    assert len(events) == 1, "the 3-step AND-condition should be a single edge event"
-    assert events[0].direction == Direction.BUY
-    assert events[0].ts == bars.index[-1]
-    assert "爆量突破布林上軌" in events[0].detail
-
-
-def test_buy_formula_does_not_fire_without_institutional_chip_data():
-    # identical setup to the passing case above, but with no foreign_net/trust_net columns --
-    # the chip condition can never be satisfied, so the formula must never fire
-    closes = [50] * 25 + [52, 55, 60, 68, 80]
-    volumes = [1000] * 29 + [6000]
-    bars = make_bars(closes, volumes=volumes)
-
-    assert BuyFormulaStrategy().evaluate("2330", bars, {}) == []
-
-
-def test_buy_condition_chip_check_counts_non_consecutive_buying_days():
-    # 2026-08-06 adjustment: chip support is now a rolling "N buy-days out of the last
-    # chip_lookback_days(5) days" count, not a consecutive streak -- two buy days with a gap
-    # between them should still satisfy chip_min_days(2) as long as both fall inside the
-    # trailing 5-day window on the day being checked. Everything else (mild uptrend so trend_up
-    # holds throughout, a forced volume+price breakout on day 24) is identical between the two
-    # variants -- only the chip timing differs, isolating exactly what's under test.
-    closes = [100 + i * 0.3 for i in range(30)]
-    closes[24] += 5  # force a bollinger breakout on day 24
-    volumes = [1000] * 30
-    volumes[24] = 5000  # force a volume spike on day 24
-
-    def build(foreign_buy_days):
-        bars = make_bars(closes, volumes=volumes)
-        foreign_net = [0] * 30
-        for d in foreign_buy_days:
-            foreign_net[d] = 100
-        bars["foreign_net"] = foreign_net
-        bars["trust_net"] = [0] * 30
-        return bars
-
-    within_window, _ = compute_buy_condition(build([20, 24]), {})
-    outside_window, _ = compute_buy_condition(build([15, 24]), {})
-
-    assert bool(within_window.iloc[24]), "day20+day24 both fall in the trailing 5-day window ending day24"
-    assert not bool(outside_window.iloc[24]), "day15 is outside day24's trailing 5-day window -- only 1 buy day counts"
-
-
-def test_sell_formula_fires_via_ma5_plus_rsi_confirmation():
-    # a rally pushes RSI persistently high (it decays slowly), then a short decline drops the
-    # price below its own 5-day MA while RSI is still >80 -- condition 1 (5-day MA breach
-    # confirmed by RSI overbought)
-    uptrend = list(range(1, 20))
-    downtrend = list(range(18, 5, -1))
-    bars = make_bars(uptrend + downtrend)
-
-    events = SellFormulaStrategy().evaluate("2330", bars, {})
-
-    assert len(events) == 1, "the OR-condition should be a single edge event"
-    assert "跌破5日均線+RSI超買" in events[0].detail
-    assert events[0].direction == Direction.SELL
-
-
-def test_sell_formula_fires_via_ma10_alone_without_rsi_or_chip_confirmation():
-    # a gentle oscillation keeps RSI moderate (never overbought) with no institutional data,
-    # then a mild decline drags price below its own 10-day MA -- condition 2 fires on its own,
-    # with neither of condition 1's confirming factors present
-    closes = [100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 99, 97, 95, 93, 91]
-    bars = make_bars(closes)
-
-    events = SellFormulaStrategy().evaluate("2330", bars, {})
-
-    assert len(events) >= 1
-    assert all("跌破10日均線" in e.detail and "RSI超買" not in e.detail for e in events)
-
-
-def test_sell_formula_does_not_fire_on_ma5_breach_alone_without_confirmation():
-    # price dips below its 5-day MA early in a mild pullback, but RSI is nowhere near
-    # overbought and there's no institutional data -- condition 1 needs a confirming factor,
-    # condition 2 (10-day MA) isn't reached either, so nothing should fire yet
-    bars = make_bars([100, 100, 100, 100, 100, 99, 98])
-
-    assert SellFormulaStrategy().evaluate("2330", bars, {}) == []
-
-
-def test_sell_formula_fires_via_institutional_selling_confirmation():
-    # a gentle sawtooth rise (keeps RSI moderate, not pinned at an artificial 100) then a
-    # 1-day dip below the 5-day MA, landing on the same day a 3-day foreign-selling streak
-    # completes -- RSI stays at 54.5 that day, isolating the institutional-selling branch
-    # of condition 1 from the RSI branch
-    closes = [100, 102, 101, 103, 102, 104, 103, 105, 104, 106, 105, 107, 106, 108, 107, 104]
-    bars = make_bars(closes)
-    n = len(closes)
-    bars["foreign_net"] = [0] * (n - 3) + [-50, -50, -50]
-    bars["trust_net"] = [0] * n
-
-    events = SellFormulaStrategy().evaluate("2330", bars, {})
-
-    assert len(events) == 1
-    assert events[0].ts == bars.index[-1]
-    assert "法人連續賣超" in events[0].detail
-    assert "RSI超買" not in events[0].detail, "當天RSI只有54.5，不該算超買"
-
-
 def test_institutional_streak_returns_nothing_without_institutional_columns():
     bars = make_bars([100, 101, 102])
     assert InstitutionalStreakStrategy().evaluate("2330", bars, {"threshold_days": 3}) == []
@@ -374,3 +265,221 @@ def test_chip_momentum_enters_on_foreign_buy_streak_and_exits_on_atr_stop():
 def test_chip_momentum_returns_nothing_without_institutional_columns():
     bars = make_bars([10, 11, 12])
     assert ChipMomentumStrategy().evaluate("2330", bars, {}) == []
+
+
+def test_trend_following_enters_on_ma_alignment_plus_volume_and_exits_on_ma_break():
+    # 前4天持平(2/4日均線都還是10，尚未多頭排列)，接著價格連漲3天且量放大，2日均線
+    # 站上4日均線且爆量觸發進場；最後急跌，收盤跌破2日均線(13)觸發出場(還沒跌破停損7)。
+    closes = [10, 10, 10, 10, 12, 14, 16, 10]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    volumes = [1000, 1000, 1000, 1000, 3000, 3000, 3000, 1000]
+    bars = make_bars(closes, volumes, highs=highs, lows=lows)
+
+    events = TrendFollowingStrategy().evaluate(
+        "2330", bars, {"fast": 2, "slow": 4, "volume_avg_period": 2, "atr_period": 2, "atr_multiplier": 2}
+    )
+
+    assert len(events) == 2
+    buy, sell = events
+    assert buy.direction == Direction.BUY
+    assert buy.price == 12
+    assert sell.direction == Direction.SELL
+    assert sell.price == 10
+    assert "跌破2日均線" in sell.detail
+    assert buy.ts < sell.ts
+
+
+def test_trend_following_stays_flat_generates_no_signal():
+    closes = [10] * 8
+    bars = make_bars(closes, highs=[11] * 8, lows=[9] * 8)
+    events = TrendFollowingStrategy().evaluate(
+        "2330", bars, {"fast": 2, "slow": 4, "volume_avg_period": 2, "atr_period": 2, "atr_multiplier": 2}
+    )
+    assert events == []
+
+
+def test_rsi_mean_reversion_enters_on_oversold_bounce_and_exits_on_reverting_above_ma():
+    # 前4天持平建立均線/布林基準，接著急跌到RSI(2)<10且跌破布林下軌觸發進場，之後反彈
+    # 收盤站回4日均線觸發出場(用+-3的高低點確保近2日最低/ATR停損都還沒被跌破，單獨驗證
+    # 均值回歸出場這條件)。
+    closes = [20, 20, 20, 20, 18, 15, 12, 16, 20, 22]
+    highs = [c + 3 for c in closes]
+    lows = [c - 3 for c in closes]
+    bars = make_bars(closes, highs=highs, lows=lows)
+
+    events = RSIMeanReversionStrategy().evaluate(
+        "2330",
+        bars,
+        {
+            "rsi_period": 2,
+            "rsi_oversold": 10,
+            "rsi_overbought": 70,
+            "bollinger_period": 4,
+            "bollinger_num_std": 1,
+            "ma_period": 4,
+            "low_lookback_days": 2,
+            "atr_period": 2,
+            "atr_multiplier": 2,
+        },
+    )
+
+    assert len(events) == 2
+    buy, sell = events
+    assert buy.direction == Direction.BUY
+    assert buy.price == 18
+    assert sell.direction == Direction.SELL
+    assert sell.price == 16
+    assert "站回4日均線" in sell.detail
+    assert buy.ts < sell.ts
+
+
+def test_rsi_mean_reversion_stays_flat_generates_no_signal():
+    closes = [20] * 8
+    bars = make_bars(closes, highs=[23] * 8, lows=[17] * 8)
+    events = RSIMeanReversionStrategy().evaluate("2330", bars, {"rsi_period": 2, "bollinger_period": 4})
+    assert events == []
+
+
+def test_breakout_enters_on_donchian_high_plus_volume_and_exits_on_donchian_low():
+    # 前3天持平建立唐奇安通道基準，第4天爆量創3日新高觸發進場；後面急漲又急跌，
+    # 最後跌破前3日最低(14)出場(還沒跌破停損7)。
+    closes = [10, 10, 10, 15, 18, 20, 8]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    volumes = [1000, 1000, 1000, 3000, 1000, 1000, 1000]
+    bars = make_bars(closes, volumes, highs=highs, lows=lows)
+
+    events = BreakoutStrategy().evaluate(
+        "2330",
+        bars,
+        {"high_lookback_days": 3, "low_lookback_days": 3, "volume_avg_period": 3, "volume_multiplier": 1.5, "atr_period": 2, "atr_multiplier": 2},
+    )
+
+    assert len(events) == 2
+    buy, sell = events
+    assert buy.direction == Direction.BUY
+    assert buy.price == 15
+    assert sell.direction == Direction.SELL
+    assert sell.price == 8
+    assert "跌破前3日最低" in sell.detail
+    assert buy.ts < sell.ts
+
+
+def test_breakout_stays_flat_generates_no_signal():
+    closes = [10] * 8
+    bars = make_bars(closes, highs=[11] * 8, lows=[9] * 8)
+    events = BreakoutStrategy().evaluate(
+        "2330", bars, {"high_lookback_days": 3, "low_lookback_days": 3, "volume_avg_period": 3, "volume_multiplier": 1.5}
+    )
+    assert events == []
+
+
+SCALEOUT_PARAMS = {"fast": 3, "mid": 5, "slow": 7, "chip_lookback_days": 5, "high_lookback_days": 5, "volume_avg_period": 3}
+
+
+def test_golden_cross_scaleout_enters_on_full_score_then_exits_in_two_stages_on_separate_days():
+    # 前7天持平建立均線/唐奇安通道基準，第8天5個打分條件全部到齊(MA3>MA7、站上MA7、
+    # 近5日籌碼淨買超、突破前5日新高、量能放大)，滿分8分遠超過門檻5分觸發進場；之後
+    # 價格衝高反轉緩跌：先放量跌破3日均線賣一半，隔一天才跌破5日均線賣掉剩餘一半。
+    closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 18, 16, 14, 12, 10, 8]
+    volumes = [1000] * 7 + [3000, 1000, 1000, 1000, 1000, 3000, 1000, 1000, 1000, 1000, 1000]
+    bars = make_bars(closes, volumes)
+    bars["foreign_net"] = [0, 0, 0, 0, 50, 50, 50] + [0] * 11
+    bars["trust_net"] = [0] * len(closes)
+
+    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+
+    assert len(events) == 3
+    buy, sell_half, sell_rest = events
+    assert buy.direction == Direction.BUY
+    assert buy.price == 12
+    assert "打分8分" in buy.detail
+    assert sell_half.direction == Direction.SELL
+    assert sell_half.price == 18
+    assert "跌破3日均線且量能放大" in sell_half.detail
+    assert "賣出一半" in sell_half.detail
+    assert sell_rest.direction == Direction.SELL
+    assert sell_rest.price == 16
+    assert "跌破5日均線" in sell_rest.detail
+    assert "賣出剩餘一半" in sell_rest.detail
+    assert buy.ts < sell_half.ts < sell_rest.ts
+
+
+def test_golden_cross_scaleout_enters_on_partial_score_reaching_threshold():
+    # 沒有爆量、也沒有創新高(highs設得很高讓突破永遠不成立)，但MA3>MA7(+2)+站上MA7(+1)+
+    # 籌碼買超(+2)=5分剛好達標，證明打分制不需要5個條件同時到齊，跟舊版4條件AND邏輯不同。
+    closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 18, 16, 14, 12, 10, 8]
+    volumes = [1000] * len(closes)
+    bars = make_bars(closes, volumes, highs=[50] * len(closes))
+    bars["foreign_net"] = [0, 0, 0, 0, 50, 50, 50] + [0] * 11
+    bars["trust_net"] = [0] * len(closes)
+
+    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+
+    buys = [e for e in events if e.direction == Direction.BUY]
+    assert len(buys) == 1
+    assert buys[0].price == 12
+    assert "打分5分" in buys[0].detail
+    assert "量增" not in buys[0].detail
+    assert "突破" not in buys[0].detail
+
+
+def test_golden_cross_scaleout_blocked_when_score_below_threshold():
+    # 同上但完全沒有籌碼支撐，只剩MA3>MA7(+2)+站上MA7(+1)=3分，沒到5分門檻，不該進場。
+    closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 18, 16, 14, 12, 10, 8]
+    bars = make_bars(closes, [1000] * len(closes), highs=[50] * len(closes))
+    bars["foreign_net"] = [0] * len(closes)
+    bars["trust_net"] = [0] * len(closes)
+
+    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+    assert events == []
+
+
+def test_golden_cross_scaleout_sells_both_halves_same_day_on_gap_down():
+    # 進場後價格直接跳空崩跌，同一天就跌破3日線跟5日線兩條均線，兩次出場事件應該同一天觸發。
+    closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 2]
+    volumes = [1000] * 7 + [3000, 1000, 1000, 1000, 1000, 3000]
+    bars = make_bars(closes, volumes)
+    bars["foreign_net"] = [0, 0, 0, 0, 50, 50, 50] + [0] * 6
+    bars["trust_net"] = [0] * len(closes)
+
+    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+
+    assert len(events) == 3
+    sells = [e for e in events if e.direction == Direction.SELL]
+    assert len(sells) == 2
+    assert sells[0].ts == sells[1].ts == bars.index[-1]
+    assert sells[0].price == sells[1].price == 2
+    assert "賣出剩餘一半" in sells[1].detail
+
+
+def test_golden_cross_scaleout_returns_nothing_without_institutional_columns():
+    # 沒有籌碼欄位時chip_backed整段是False，缺了+2分；把突破也擋掉(highs設高)的話剩下
+    # MA3>MA7(+2)+站上MA7(+1)+量增(+1)=4分不到5分門檻，不該進場。
+    closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 18, 16, 14, 12, 10, 8]
+    volumes = [1000] * 7 + [3000, 1000, 1000, 1000, 1000, 3000, 1000, 1000, 1000, 1000, 1000]
+    bars = make_bars(closes, volumes, highs=[50] * len(closes))
+    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+    assert events == []
+
+
+def test_golden_cross_scaleout_rsi_filter_blocks_entry_when_overbought():
+    # 20天持平後單邊上漲，量能在黃金交叉當天放大：MA3>MA7(+2)+站上MA7(+1)+量增(+1)=4分，
+    # 沒有籌碼、也沒有突破(highs設高擋掉)，剛好卡在門檻前一分——這一分要靠RSI濾網補。
+    # 這段單邊漲勢的RSI(14)算出來是100(超買)，用預設rsi_overbought=70會被擋住，但如果
+    # 把rsi_overbought調高到200(等於這條濾網永遠算過)，同一筆資料就能補上第5分進場——
+    # 證明RSI濾網真的在影響進場，不是擺著沒用的參數。
+    closes = [10] * 20 + [10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14]
+    volumes = [1000] * 20 + [3000] + [1000] * 7
+    bars = make_bars(closes, volumes, highs=[50] * len(closes))
+    params = dict(SCALEOUT_PARAMS)
+
+    blocked = GoldenCrossScaleOutStrategy().evaluate("2330", bars, {**params, "rsi_overbought": 70})
+    assert blocked == [], "RSI(14)在這段單邊漲勢算出來是100，超買濾網該擋住這筆進場"
+
+    allowed = GoldenCrossScaleOutStrategy().evaluate("2330", bars, {**params, "rsi_overbought": 200})
+    buys = [e for e in allowed if e.direction == Direction.BUY]
+    assert len(buys) == 1, "把超買門檻拉高到RSI永遠過關，同一筆資料應該能補上第5分進場"
+    assert buys[0].price == 10.5
+    assert "RSI未超買" in buys[0].detail

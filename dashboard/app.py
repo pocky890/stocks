@@ -1,4 +1,5 @@
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -9,7 +10,7 @@ import streamlit as st
 
 from charts import candlestick_with_ma, institutional_flow_chart, intraday_line_chart, kd_chart, margin_balance_chart
 from stocks.config import load_config
-from stocks.daily_update import add_symbol_to_watchlist, check_and_update
+from stocks.daily_update import add_symbol_to_watchlist, check_and_update, should_check_for_updates
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.db import (
     attach_institutional_flows,
@@ -23,13 +24,17 @@ from stocks.db import (
     fetch_signal_events,
     fetch_valuations,
     fetch_watchlist,
+    get_disabled_strategies,
+    get_setting,
+    init_db,
     move_watchlist_symbol,
     remove_from_watchlist,
+    set_setting,
 )
 from stocks.shioaji_client import ShioajiClient
 from stocks.strategies import STRATEGY_REGISTRY
-from stocks.strategy_stats import simulate_round_trips, summarize_trades
-from stocks.watchlist_view import build_buy_recommendations, build_overview_rows
+from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
+from stocks.watchlist_view import build_overview_rows, build_paper_trades, build_strategy_recommendations
 
 st.set_page_config(page_title="台股訊號監控", layout="wide")
 
@@ -74,26 +79,41 @@ STRATEGY_LABELS = {
     "ma_trend": "站上5/20日均線且20日線上揚",
     "atr_breakout": "ATR動態通道突破(創20日新高進場，2倍ATR移動停損出場)",
     "chip_momentum": "外資買超動能(連3日買超+未超買進場，2.5倍ATR移動停損出場)",
-    "buy_formula": "極簡買進公式(籌碼+趨勢環境成立時，爆量突破布林或KD黃金交叉即買)",
-    "sell_formula": "極簡賣出公式(跌破5日線+RSI超買/法人連3賣，或跌破10日線)",
+    "trend_following": "趨勢追蹤(20>60日均線+站上20日線+爆量進場，跌破20日線/均線反轉出場)",
+    "breakout": "Breakout突破(創20日新高+爆量進場，跌破10日最低出場)",
+    "golden_cross_scaleout": "均線黃金交叉分批出場(打分制進場≥5分，跌破5日線+量能先賣一半，跌破10日線或死亡交叉賣剩餘)",
 }
-# buy_formula/sell_formula是多條件組合、可以直接依據行動的完整判斷，稱為「策略」；
-# 其他都只是單一指標的訊號，可信度較低，稱為「指標訊號」——跟notifier.NOTIFIABLE_STRATEGIES
-# (只有這兩個會推播Telegram)是同一個區分，直接沿用避免兩處各自維護一份清單。
+# 進出場邏輯完整、可以直接依據行動的稱為「策略」；其他都只是單一指標的訊號，可信度較低，
+# 稱為「指標訊號」——跟notifier.NOTIFIABLE_STRATEGIES(只有這幾個會推播Telegram)是同一個
+# 區分，直接沿用避免兩處各自維護一份清單。
+
+
+def strategy_label(name: str) -> str:
+    """策略/指標的英文鍵值(例如"chip_momentum")只在程式內部跟資料庫用，畫面上一律要顯示
+    中文——STRATEGY_LABELS的中文說明常常後面還帶一段括號解釋參數，這裡只取名稱本體。"""
+    return STRATEGY_LABELS.get(name, name).split("(")[0]
 
 config = load_config()
+init_db(config.db_path)  # 確保schema是最新的(例如app_settings表)，下面馬上要用get_setting()
 
 
-TRACK_RECORD_STRATEGIES = ["chip_momentum", "atr_breakout"]  # 這兩個自己的BUY/SELL事件本來就是配好對的
+TRACK_RECORD_STRATEGIES = ["chip_momentum", "atr_breakout", "trend_following", "breakout"]  # 這幾個自己的BUY/SELL事件本來就是配好對的
+# golden_cross_scaleout一次進場配兩次出場(先賣一半、再賣剩餘一半)，跟上面幾個「一買配一賣」
+# 的形狀不一樣，直接套simulate_round_trips會把第一次半倉出場當成整筆平倉、報酬率算錯，
+# 要用simulate_scaleout_trades另外配對，所以不放進TRACK_RECORD_STRATEGIES一起迴圈處理。
+SCALEOUT_STRATEGY = "golden_cross_scaleout"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _compute_track_records(_config, symbols: tuple):
     """算「策略」類(NOTIFIABLE_STRATEGIES)在每支股票自己歷史資料上的勝率/平均報酬，
     給使用者參考「這個策略在這支股票的過去表現」，不是自動下單依據。快取5分鐘——這是跑
-    全部歷史資料的策略運算，不用每次▲▼/新增股票都重算一次。buy_formula/sell_formula
-    只定義單邊，個別算沒意義，這裡把兩者的事件合併成一組配對的進出場來看(跟使用者設計
-    這兩個公式的原意一致：一個負責進場條件，一個負責出場條件)。"""
+    全部歷史資料的策略運算，不用每次▲▼/新增股票都重算一次。
+
+    「（已排除）」標記對應scripts/recompute_strategy_selection.py寫進symbols.
+    disabled_strategies的排除清單——run_live.py/run_batch.py評估這支股票時會跳過這些
+    策略，不會通知/寫進signal_events，但這裡的歷史勝率分析不受影響，照樣完整顯示，
+    讓使用者知道「這個策略對這支股票表現不好，所以被排除」的理由是什麼。"""
     rows = []
     with connect(_config.db_path) as conn:
         for code in symbols:
@@ -101,27 +121,28 @@ def _compute_track_records(_config, symbols: tuple):
             bars = attach_institutional_flows(bars, fetch_institutional_flows(conn, code))
             if bars.empty:
                 continue
+            disabled = set(get_disabled_strategies(conn, code))
+
+            def cell_text(name: str, summary: dict | None) -> str:
+                text = (
+                    f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均（{summary['n']}筆）"
+                    if summary
+                    else "尚無完整交易紀錄"
+                )
+                return f"{text} (已排除)" if name in disabled else text
 
             row = {"代號": code}
             for name in TRACK_RECORD_STRATEGIES:
                 events = STRATEGY_REGISTRY[name].evaluate(code, bars, _config.strategy_params.get(name, {}))
                 trades, _ = simulate_round_trips(events)
-                summary = summarize_trades(trades)
-                row[STRATEGY_LABELS[name].split("(")[0]] = (
-                    f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均（{summary['n']}筆）"
-                    if summary
-                    else "尚無完整交易紀錄"
-                )
+                row[STRATEGY_LABELS[name].split("(")[0]] = cell_text(name, summarize_trades(trades))
 
-            combined_events = STRATEGY_REGISTRY["buy_formula"].evaluate(
-                code, bars, _config.strategy_params.get("buy_formula", {})
-            ) + STRATEGY_REGISTRY["sell_formula"].evaluate(code, bars, _config.strategy_params.get("sell_formula", {}))
-            trades, _ = simulate_round_trips(combined_events)
-            summary = summarize_trades(trades)
-            row["極簡買賣公式"] = (
-                f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均（{summary['n']}筆）"
-                if summary
-                else "尚無完整交易紀錄"
+            scaleout_events = STRATEGY_REGISTRY[SCALEOUT_STRATEGY].evaluate(
+                code, bars, _config.strategy_params.get(SCALEOUT_STRATEGY, {})
+            )
+            scaleout_trades, _ = simulate_scaleout_trades(scaleout_events)
+            row[STRATEGY_LABELS[SCALEOUT_STRATEGY].split("(")[0]] = cell_text(
+                SCALEOUT_STRATEGY, summarize_trades(scaleout_trades)
             )
             rows.append(row)
     return rows
@@ -140,10 +161,19 @@ def _fetch_today_intraday(_config, symbols: tuple):
         client.disconnect()
 
 
-if "checked_for_updates" not in st.session_state:
-    st.session_state.checked_for_updates = True
+# st.session_state在瀏覽器重新整理時會重置(每次整頁重新載入=新的session)，靠它做「只檢查
+# 一次」完全沒用，實測每次F5都還是會重打一次API。改成把「上次檢查時間」存進DB(跨session/
+# 跨重新整理都留著)，讓should_check_for_updates()決定今天還要不要再檢查一次。
+_now = datetime.now()
+with connect(config.db_path) as conn:
+    _last_check_str = get_setting(conn, "last_data_check")
+_last_check = datetime.fromisoformat(_last_check_str) if _last_check_str else None
+
+if should_check_for_updates(_last_check, _now):
     with st.spinner("檢查有沒有新的盤後資料..."):
         result = check_and_update(config)
+    with connect(config.db_path) as conn:
+        set_setting(conn, "last_data_check", _now.isoformat())
     if result["watchlist_empty"]:
         pass  # 觀察清單是空的，下面的頁籤本來就會提示要先跑fetch_historical.py
     elif result["new_price_days"] == 0 and result["new_market_days"] == 0 and not result["otc_synced"]:
@@ -184,8 +214,8 @@ with tab_watchlist:
         strategy_keys = [k for k in STRATEGY_LABELS if k in NOTIFIABLE_STRATEGIES]
         indicator_keys = [k for k in STRATEGY_LABELS if k not in NOTIFIABLE_STRATEGIES]
         st.caption(
-            f"目前每檔股票都套用同一組 {len(indicator_keys)} 種指標訊號 + {len(strategy_keys)} 種策略"
-            "（還沒有支援每檔各自挑）："
+            f"每檔股票套用 {len(indicator_keys)} 種指標訊號 + {len(strategy_keys)} 種策略，"
+            "策略部分依scripts/recompute_strategy_selection.py的backtest結果各自排除表現不好的（見下方「策略歷史勝率參考」的「(已排除)」標記）："
         )
         st.caption(f"📊 策略（會推播Telegram）：{'、'.join(STRATEGY_LABELS[k] for k in strategy_keys)}")
         st.caption(f"📈 指標訊號（只記錄不推播）：{'、'.join(STRATEGY_LABELS[k] for k in indicator_keys)}")
@@ -262,10 +292,37 @@ with tab_watchlist:
                         remove_from_watchlist(conn, code)
                     st.rerun()
 
-        st.markdown("#### 建議買進（目前符合極簡買進公式3步驟，不是edge-triggered，訊號沒被打破就會一直列著）")
-        recommendations = build_buy_recommendations(config)
+        st.markdown("#### 買進/賣出策略訊號（一列一個策略，標示觸發當天的價格/日期，現價供對照；預設依觸發日期新到舊排序）")
+        filter_col1, filter_col2, _filter_spacer = st.columns([1, 2, 3])
+        today_only = filter_col1.checkbox("只顯示今天觸發", key="buy_recommendations_today_only")
+        symbol_options = [f"{w['code']} {w['name']}" for w in watchlist]
+        selected_symbols = filter_col2.multiselect(
+            "只看特定股票", symbol_options, key="buy_recommendations_symbol_filter"
+        )
+
+        today_str = date.today().strftime("%Y-%m-%d")
+        recommendations = build_strategy_recommendations(config)
+        if today_only:
+            recommendations = [r for r in recommendations if r["觸發日期"] == today_str]
+        if selected_symbols:
+            selected_codes = {s.split(" ", 1)[0] for s in selected_symbols}
+            recommendations = [r for r in recommendations if r["代號"] in selected_codes]
+        recommendations = sorted(recommendations, key=lambda r: r["觸發日期"], reverse=True)
+
         if recommendations:
-            st.dataframe(pd.DataFrame(recommendations), use_container_width=True, hide_index=True)
+            display_rows = [
+                {
+                    "代號": r["代號"],
+                    "名稱": r["名稱"],
+                    "買進策略": STRATEGY_LABELS.get(r["買進策略"], r["買進策略"]).split("(")[0] if r["買進策略"] else "",
+                    "賣出策略": STRATEGY_LABELS.get(r["賣出策略"], r["賣出策略"]).split("(")[0] if r["賣出策略"] else "",
+                    "觸發價格": r["觸發價格"],
+                    "現價": r["現價"],
+                    "觸發日期": r["觸發日期"],
+                }
+                for r in recommendations
+            ]
+            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
         else:
             st.caption("目前沒有股票符合")
 
@@ -345,7 +402,7 @@ with tab_history:
     filter_strategy = col_strategy.selectbox(
         "篩選訊號/策略（可選）",
         ["全部"] + list(STRATEGY_REGISTRY),
-        format_func=lambda k: k if k == "全部" else f"[{'策略' if k in NOTIFIABLE_STRATEGIES else '指標訊號'}] {k}",
+        format_func=lambda k: k if k == "全部" else f"[{'策略' if k in NOTIFIABLE_STRATEGIES else '指標訊號'}] {strategy_label(k)}",
     )
     with connect(config.db_path) as conn:
         rows = fetch_signal_events(
@@ -359,4 +416,45 @@ with tab_history:
         st.info("目前沒有任何訊號紀錄（backtest.py不會寫入signal_events，要跑live/batch才會有）")
     else:
         df = pd.DataFrame([dict(r) for r in rows])
+        df["strategy"] = df["strategy"].apply(strategy_label)
         st.dataframe(df[["ts", "symbol", "strategy", "direction", "price", "detail", "tier"]], use_container_width=True)
+
+    st.markdown("#### 模擬交易紀錄（觀察策略是否可行）")
+    st.caption(
+        "從下面選的日期開始，每個策略每次BUY訊號當作買進、配對到SELL訊號當作賣出，純粹照訊號模擬記錄，"
+        "不是真的下單；「持有中」代表還沒配到出場訊號，報酬率用現價估算(未實現)。"
+    )
+    paper_start = st.date_input("模擬起始日期", value=date(2026, 7, 1), key="paper_trades_start")
+    paper_trades = build_paper_trades(config, start_date=paper_start.strftime("%Y-%m-%d"))
+
+    if not paper_trades:
+        st.info("這段時間沒有任何策略觸發買進訊號")
+    else:
+        paper_trades = [{**r, "策略": strategy_label(r["策略"])} for r in paper_trades]
+        by_symbol_df = pd.DataFrame(paper_trades)
+        by_symbol = (
+            by_symbol_df.groupby(["代號", "名稱"])["報酬率(%)"]
+            .agg(交易筆數="count", 總報酬="mean")
+            .round(1)
+            .reset_index()
+            .sort_values("總報酬", ascending=False)
+        )
+        st.caption("「總報酬」是這支股票在這段時間所有策略交易(已平倉+持有中未實現)報酬率的平均，不是加總。")
+        st.dataframe(by_symbol, use_container_width=True, hide_index=True)
+
+        closed = [r for r in paper_trades if r["狀態"] == "已平倉"]
+        if closed:
+            summary_df = pd.DataFrame(closed)
+            summary = (
+                summary_df.groupby("策略")["報酬率(%)"]
+                .agg(筆數="count", 勝率=lambda s: (s > 0).mean() * 100, 平均報酬="mean")
+                .round(1)
+                .reset_index()
+            )
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+
+        trades_df = pd.DataFrame(paper_trades).sort_values("買進日期", ascending=False)
+        trades_df["賣出日期"] = trades_df["賣出日期"].fillna("持有中")
+        # 賣出價位維持數字型別(NaN)讓Arrow序列化不會因為跟已平倉的float混在一起而出錯，
+        # st.dataframe本身就會把NaN顯示成空白，不需要另外塞"—"字串
+        st.dataframe(trades_df, use_container_width=True, hide_index=True)

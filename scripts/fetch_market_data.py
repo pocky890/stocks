@@ -10,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stocks.config import load_config
@@ -95,8 +97,13 @@ def main():
 
     if tpex_symbols:
         print("[上櫃] 抓最新一天的三大法人/融資融券/估值/除權息...")
-        synced = _refresh_market_data_tpex(config, tpex_symbols)
-        print(f"  {'有新資料' if synced else '跟上次抓的是同一天，沒有新資料'}")
+        # TPEx的SSL偶爾不穩定(已知問題，run_batch.py/daily_update.py都有同樣的try/except)，
+        # 失敗也不該讓已經抓好的上市資料白費——上市那段跑完就已經全部寫進DB了。
+        try:
+            synced = _refresh_market_data_tpex(config, tpex_symbols)
+            print(f"  {'有新資料' if synced else '跟上次抓的是同一天，沒有新資料'}")
+        except requests.RequestException as exc:
+            print(f"  上櫃籌碼抓取失敗(TPEx SSL偶爾不穩定)，跳過：{exc}")
 
     print("完成")
 

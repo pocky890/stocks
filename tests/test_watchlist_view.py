@@ -7,14 +7,14 @@ from stocks.models import Bar
 from stocks.watchlist_view import (
     _bollinger_text,
     _current_streak,
-    _current_true_streak_start,
     _ma_price_text,
     _macd_text,
     _rsi_text,
     _round_or_none,
     _volume_text,
-    build_buy_recommendations,
     build_overview_rows,
+    build_paper_trades,
+    build_strategy_recommendations,
     change_text,
     compute_change,
     institutional_text,
@@ -80,6 +80,18 @@ def test_ma_price_text_shows_arrow_for_ma_slope_not_price_position():
     assert "↓" in _ma_price_text(latest_close=100, ma_series=pd.Series([92, 90])), "均線比昨天低=下彎"
     text = _ma_price_text(latest_close=100, ma_series=pd.Series([90]))
     assert "↑" not in text and "↓" not in text, "只有一天資料算不出斜率，不該亂猜箭頭"
+
+
+def test_ma_price_text_arrow_color_is_independent_from_number_color():
+    # 現價跌破均線(數字該是綠色)，但均線本身還在上揚(箭頭該是紅色)——兩者是獨立維度，
+    # 顏色不該綁在一起，避免像「1846.5↓」用紅字卻配綠箭頭這種看起來矛盾的組合
+    text = _ma_price_text(latest_close=100, ma_series=pd.Series([105, 110]))
+    assert 'color:green">110</span>' in text, "現價跌破均線，數字維持綠色"
+    assert '<span style="color:red">↑</span>' in text, "均線本身上揚，箭頭獨立標紅"
+
+    text = _ma_price_text(latest_close=100, ma_series=pd.Series([95, 90]))
+    assert 'color:red">90</span>' in text, "現價站上均線，數字維持紅色"
+    assert '<span style="color:green">↓</span>' in text, "均線本身下彎，箭頭獨立標綠"
 
 
 def test_bollinger_text_positions():
@@ -200,6 +212,21 @@ def test_compute_change_prefers_todays_intraday_close():
     assert change_pct == pytest.approx(10.0)
 
 
+def test_compute_change_prefers_daily_close_over_stale_intraday_when_both_have_today():
+    # bars_daily已經有今天這筆(daily_update跑過，抓到收盤或最新報價)，但bars_5min是
+    # run_live.py早上開一段時間又停掉留下的舊資料——這時該信bars_daily，不能讓已經
+    # 停更新的盤中5分K蓋掉更完整/更新的日線收盤(這就是實際發生過的8299價格對不上的bug)
+    today = pd.Timestamp.now().normalize()
+    yesterday = today - pd.Timedelta(days=1)
+    bars_daily = pd.DataFrame({"close": [2025.0, 2020.0]}, index=[yesterday, today])
+    stale_today_bars = pd.DataFrame({"close": [2040.0]}, index=[today + pd.Timedelta(hours=1, minutes=15)])
+
+    change, change_pct = compute_change(bars_daily, stale_today_bars)
+
+    assert change == pytest.approx(-5.0)
+    assert change_pct == pytest.approx(-5.0 / 2025 * 100)
+
+
 def test_compute_change_returns_none_without_a_prior_trading_day():
     today = pd.Timestamp.now().normalize()
     bars_daily = pd.DataFrame({"close": [100.0]}, index=[today])
@@ -233,69 +260,210 @@ def test_price_text_highlights_limit_down_with_green_background():
     assert "background-color:green" in html
 
 
-def test_current_true_streak_start_walks_back_to_the_first_true_day():
-    condition = pd.Series([False, False, True, True, True], index=pd.date_range("2026-01-01", periods=5))
-    assert _current_true_streak_start(condition) == condition.index[2]
-
-
-def test_current_true_streak_start_none_when_not_currently_true():
-    condition = pd.Series([True, True, False], index=pd.date_range("2026-01-01", periods=3))
-    assert _current_true_streak_start(condition) is None
-
-
-def test_build_buy_recommendations_lists_symbol_still_meeting_the_formula(tmp_path):
-    """跟build_overview_rows不同：這裡看的是「現在還符合嗎」(狀態)，不是edge——訊號
-    即使是幾天前才出現的，只要條件沒被打破，都該一直列在這裡讓使用者看到，不會因為
-    edge-triggered通知只發一次而錯過。"""
+def test_build_strategy_recommendations_lists_one_row_per_open_buy_signal(tmp_path):
+    """NOTIFIABLE_STRATEGIES進場/出場都是edge-triggered，觸發後策略自己追蹤部位直到
+    下一個相反方向事件——這裡看的是「每個策略最後一次動作是叫你買還是叫你賣」，不是
+    像舊版buy_formula那種「條件現在還持續成立」的狀態。20天持平後單日創新高：
+    atr_breakout(唐奇安突破)跟golden_cross_scaleout(打分制剛好5分：MA5>MA20+站上MA20+
+    突破20日新高)都會進場，且之後沒有再出現賣出訊號——一列對應一個策略，兩列的「買進
+    策略」各自填自己的策略名稱，「賣出策略」都留白。"""
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
     config = make_config(db_path)
 
-    closes = [50] * 25 + [52, 55, 60, 68, 80]
-    volumes = [1000] * 29 + [6000]
-    dates = pd.date_range("2026-01-02", periods=30, freq="D")
+    closes = [50] * 20 + [60]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
     bars = [
-        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c, low=c, close=c, volume=v)
-        for ts, c, v in zip(dates, closes, volumes)
-    ]
-    flows = [
-        {"symbol": "2454", "date": d, "foreign_net": n, "trust_net": 0, "dealer_net": 0, "total_net": n}
-        for d, n in zip(dates[-2:].strftime("%Y-%m-%d"), [100, 100])
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
     ]
 
     with db.connect(db_path) as conn:
         db.insert_bars_daily(conn, bars)
         db.add_to_watchlist(conn, "2454", name="聯發科")
-        db.insert_institutional_flows(conn, flows)
 
-    rows = build_buy_recommendations(config)
+    rows = build_strategy_recommendations(config)
 
-    assert len(rows) == 1
-    assert rows[0]["代號"] == "2454"
-    assert rows[0]["名稱"] == "聯發科"
-    assert rows[0]["現價"] == 80
-    assert rows[0]["符合日期"] == dates[-1].strftime("%Y-%m-%d")
+    assert len(rows) == 2
+    buy_strategies = {r["買進策略"] for r in rows}
+    assert buy_strategies == {"atr_breakout", "golden_cross_scaleout"}
+    for row in rows:
+        assert row["代號"] == "2454"
+        assert row["名稱"] == "聯發科"
+        assert row["現價"] == 60
+        assert row["賣出策略"] == ""
+        assert row["觸發價格"] == 60
+        assert row["觸發日期"] == dates[-1].strftime("%Y-%m-%d")
 
 
-def test_build_buy_recommendations_excludes_symbol_without_chip_support(tmp_path):
+def test_build_strategy_recommendations_lists_sell_signal_after_a_closed_position(tmp_path):
+    # 先創新高進場，接著大跌觸發ATR停損賣出——最後一個事件變成SELL，那一列該填「賣出
+    # 策略」，「買進策略」留白，且觸發價格/日期要對應到「賣出當天」，不是進場那天。
+    closes = [50] * 20 + [60, 40]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
     config = make_config(db_path)
 
-    closes = [50] * 25 + [52, 55, 60, 68, 80]
-    volumes = [1000] * 29 + [6000]
-    dates = pd.date_range("2026-01-02", periods=30, freq="D")
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+
+    rows = build_strategy_recommendations(config)
+
+    atr_row = next(r for r in rows if r["賣出策略"] == "atr_breakout" or r["買進策略"] == "atr_breakout")
+    assert atr_row["賣出策略"] == "atr_breakout"
+    assert atr_row["買進策略"] == ""
+    assert atr_row["觸發價格"] == 40
+    assert atr_row["現價"] == 40
+    assert atr_row["觸發日期"] == dates[-1].strftime("%Y-%m-%d")
+
+
+def test_build_strategy_recommendations_omits_signals_older_than_max_age(tmp_path):
+    # 跟test_build_strategy_recommendations_lists_open_buy_signals_for_a_symbol同一組資料，
+    # 只是把整段K棒往前搬到150天前(超過MAX_SIGNAL_AGE_DAYS=100天)——atr_breakout/
+    # golden_cross_scaleout一樣會在最後一天觸發BUY，但因為太久沒動作了，不該再列出來，
+    # 不管是買進還是賣出欄位都不行(這支股票整列都該被拿掉，因為沒有其他訊號)。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    closes = [50] * 20 + [60]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize() - pd.Timedelta(days=150), periods=len(closes), freq="D")
     bars = [
-        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c, low=c, close=c, volume=v)
-        for ts, c, v in zip(dates, closes, volumes)
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
     ]
 
     with db.connect(db_path) as conn:
         db.insert_bars_daily(conn, bars)
         db.add_to_watchlist(conn, "2454", name="聯發科")
-        # 沒有三大法人資料，步驟1(籌碼靠山)不可能成立
 
-    assert build_buy_recommendations(config) == []
+    assert build_strategy_recommendations(config) == []
+
+
+def test_build_strategy_recommendations_excludes_symbol_with_no_signal_at_all(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    closes = [50] * 30  # 完全持平，策略都不會觸發任何進場/出場
+    dates = pd.date_range("2026-01-02", periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c, low=c, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+
+    assert build_strategy_recommendations(config) == []
+
+
+def test_build_paper_trades_lists_closed_round_trip_with_return_pct(tmp_path):
+    # 創新高進場(60)接著大跌觸發ATR停損賣出(40)——一買一賣配成一筆已平倉交易，
+    # 報酬率該是(40-60)/60*100 = -33.3%，不是隨便估的
+    closes = [50] * 20 + [60, 40]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+
+    rows = build_paper_trades(config, start_date=dates[0].strftime("%Y-%m-%d"))
+
+    atr_row = next(r for r in rows if r["策略"] == "atr_breakout")
+    assert atr_row["狀態"] == "已平倉"
+    assert atr_row["買進價位"] == 60
+    assert atr_row["賣出價位"] == 40
+    assert atr_row["報酬率(%)"] == pytest.approx(-33.3, abs=0.1)
+
+
+def test_build_paper_trades_marks_open_position_as_held_with_unrealized_return(tmp_path):
+    # 創新高進場(60)之後沒有再出現賣出訊號——還沒配到出場，該標記「持有中」，報酬率
+    # 用現價(也是60，因為進場那天剛好是最後一天)估算，不該假裝已經平倉
+    closes = [50] * 20 + [60]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+
+    rows = build_paper_trades(config, start_date=dates[0].strftime("%Y-%m-%d"))
+
+    atr_row = next(r for r in rows if r["策略"] == "atr_breakout")
+    assert atr_row["狀態"] == "持有中(未實現)"
+    assert atr_row["買進價位"] == 60
+    assert atr_row["賣出日期"] is None, "還沒真的賣，不該有賣出日期"
+    assert atr_row["賣出價位"] is None, "還沒真的賣，不該有賣出價位"
+    assert atr_row["現價"] == 60, "現價欄位獨立顯示，用來估算未實現報酬率"
+    assert atr_row["報酬率(%)"] == 0
+
+
+def test_build_paper_trades_ignores_signals_before_start_date(tmp_path):
+    # start_date設在買進訊號那天之後——那筆交易的BUY事件被篩掉了，剩一個孤立的SELL
+    # 配不成交易，也不該被誤判成部位，整筆不該出現
+    closes = [50] * 20 + [60, 40]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+
+    rows = build_paper_trades(config, start_date=dates[-1].strftime("%Y-%m-%d"))
+
+    assert not any(r["策略"] == "atr_breakout" for r in rows)
+
+
+def test_build_paper_trades_skips_strategies_disabled_for_that_symbol(tmp_path):
+    # 這裡跟_compute_track_records不一樣：模擬交易紀錄要反映「照現在的設定實際會不會
+    # 被通知」，個股已經被disabled_strategies排除的策略不該出現在模擬交易裡，不然會
+    # 看到「策略明明被排除了，畫面卻還在模擬買賣」這種矛盾
+    closes = [50] * 20 + [60]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+        db.set_disabled_strategies(conn, "2454", ["atr_breakout"])
+
+    rows = build_paper_trades(config, start_date=dates[0].strftime("%Y-%m-%d"))
+
+    assert not any(r["策略"] == "atr_breakout" for r in rows)
+    assert any(r["策略"] == "golden_cross_scaleout" for r in rows), "沒被排除的策略應該照樣出現"
 
 
 def test_price_text_plain_number_when_change_unknown():

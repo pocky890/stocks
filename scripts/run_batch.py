@@ -1,6 +1,6 @@
-"""收盤後全市場批次掃描。手動啟動（收盤後跑一次）。全市場跑9種策略（不含
-institutional_streak——那個目前只服務觀察清單，其他策略包含buy_formula/sell_formula
-都吃得到當天全市場的三大法人資料）。
+"""收盤後全市場批次掃描。手動啟動（收盤後跑一次）。全市場跑除institutional_streak以外
+的所有策略（那個目前只服務觀察清單，其他策略包含chip_momentum都吃得到當天全市場的
+三大法人資料）。
 
 用api.daily_quotes()一次拿全市場當天的日OHLCV(~2000檔)，不逐檔呼叫kbars()；三大法人
 資料同樣是TWSE/TPEx「一次呼叫拿全市場」，不是逐檔查詢，所以多抓這份資料不會多打
@@ -23,6 +23,7 @@ from stocks.db import (
     fetch_bars_daily,
     fetch_institutional_flows,
     fetch_watchlist,
+    get_disabled_strategies,
     init_db,
     insert_bars_daily,
     insert_institutional_flows,
@@ -78,7 +79,10 @@ def main():
         with connect(config.db_path) as conn:
             history = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
             history = attach_institutional_flows(history, fetch_institutional_flows(conn, symbol))
-            events = evaluate_all(symbol, history, config.strategy_params, tier=Tier.BATCH, skip_strategies=SKIP_STRATEGIES)
+            # 非觀察清單股票從沒被recompute_strategy_selection.py backtest過，
+            # get_disabled_strategies對它們一定回傳空清單，只有觀察清單股票的排除才會生效。
+            skip = SKIP_STRATEGIES | set(get_disabled_strategies(conn, symbol))
+            events = evaluate_all(symbol, history, config.strategy_params, tier=Tier.BATCH, skip_strategies=skip)
             new_events = insert_signal_events(conn, events)
             all_new_events.extend(new_events)
 

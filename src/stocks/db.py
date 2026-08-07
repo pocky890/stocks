@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -12,7 +13,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     name TEXT,
     market TEXT,
     is_watchlist INTEGER NOT NULL DEFAULT 0,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    disabled_strategies TEXT
 );
 
 CREATE TABLE IF NOT EXISTS bars_5min (
@@ -100,6 +102,11 @@ CREATE TABLE IF NOT EXISTS market_data_sync_log (
     date TEXT PRIMARY KEY,
     checked_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -126,6 +133,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(symbols)")}
     if "sort_order" not in columns:
         conn.execute("ALTER TABLE symbols ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+    if "disabled_strategies" not in columns:
+        conn.execute("ALTER TABLE symbols ADD COLUMN disabled_strategies TEXT")
 
 
 def insert_bars_daily(conn: sqlite3.Connection, bars: list[Bar]) -> None:
@@ -218,6 +227,21 @@ def upsert_symbol(conn: sqlite3.Connection, code: str, name: str = "", market: s
 
 def fetch_watchlist(conn: sqlite3.Connection):
     return conn.execute("SELECT * FROM symbols WHERE is_watchlist = 1 ORDER BY sort_order ASC, code ASC").fetchall()
+
+
+def get_disabled_strategies(conn: sqlite3.Connection, code: str) -> list[str]:
+    """回傳某支股票目前被排除的策略清單(scripts/recompute_strategy_selection.py寫入)——
+    排除的意思是run_live.py/run_batch.py不會再幫這支股票評估/通知這些策略，但dashboard的
+    回測/建議買進分析頁面不受影響，還是會照樣顯示所有策略供參考。沒有紀錄(從沒跑過
+    recompute，或這支股票所有策略都夠好)就回傳空清單。"""
+    row = conn.execute("SELECT disabled_strategies FROM symbols WHERE code = ?", (code,)).fetchone()
+    if row is None or not row["disabled_strategies"]:
+        return []
+    return json.loads(row["disabled_strategies"])
+
+
+def set_disabled_strategies(conn: sqlite3.Connection, code: str, strategies: list[str]) -> None:
+    conn.execute("UPDATE symbols SET disabled_strategies = ? WHERE code = ?", (json.dumps(strategies), code))
 
 
 def add_to_watchlist(conn: sqlite3.Connection, code: str, name: str = "", market: str = "TWSE") -> None:
@@ -338,6 +362,15 @@ def mark_market_data_synced(conn: sqlite3.Connection, dates: list[str]) -> None:
         "INSERT OR REPLACE INTO market_data_sync_log (date, checked_at) VALUES (?, ?)",
         [(d, datetime.now().isoformat()) for d in dates],
     )
+
+
+def get_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (key, value))
 
 
 def insert_institutional_flows(conn: sqlite3.Connection, rows: list[dict]) -> None:

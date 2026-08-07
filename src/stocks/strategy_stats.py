@@ -61,3 +61,57 @@ def summarize_trades(trades: list[Trade]) -> dict:
         "win_rate": wins / len(trades) * 100,
         "avg_return_pct": sum(returns) / len(returns),
     }
+
+
+@dataclass(frozen=True)
+class ScaleoutTrade:
+    """golden_cross_scaleout一次進場配兩次出場(先賣一半、再賣剩餘一半)，跟Trade
+    「一買配一賣」的形狀不一樣，報酬率用兩次出場價的均價(各半)計算。return_pct跟
+    Trade同名同義，所以summarize_trades()可以直接吃ScaleoutTrade的list，不用另外
+    寫一份summarize邏輯。"""
+
+    entry_ts: object
+    entry_price: float
+    exit1_ts: object
+    exit1_price: float
+    exit2_ts: object
+    exit2_price: float
+
+    @property
+    def blended_exit_price(self) -> float:
+        return (self.exit1_price + self.exit2_price) / 2
+
+    @property
+    def return_pct(self) -> float:
+        return (self.blended_exit_price - self.entry_price) / self.entry_price * 100
+
+
+def simulate_scaleout_trades(events: list[SignalEvent]) -> tuple[list[ScaleoutTrade], dict | None]:
+    """跟simulate_round_trips配對邏輯不一樣：一次BUY要收集到兩次SELL才算平倉(對應
+    golden_cross_scaleout「賣一半、再賣剩餘一半」的兩階段出場)，直接套simulate_round_trips
+    會把第一次半倉出場當成整筆平倉、丟掉第二次出場價格，報酬率會算錯。回傳
+    (trades, still_open)，still_open是資料結束時還沒配滿兩次出場的部位(可能兩次都
+    沒賣、或只賣了一半)：{"entry": SignalEvent, "exits": list[SignalEvent]}。"""
+    trades = []
+    entry = None
+    exits: list[SignalEvent] = []
+    for e in sorted(events, key=lambda e: e.ts):
+        if e.direction == Direction.BUY and entry is None:
+            entry, exits = e, []
+        elif e.direction == Direction.SELL and entry is not None:
+            exits.append(e)
+            if len(exits) == 2:
+                trades.append(
+                    ScaleoutTrade(
+                        entry_ts=entry.ts,
+                        entry_price=entry.price,
+                        exit1_ts=exits[0].ts,
+                        exit1_price=exits[0].price,
+                        exit2_ts=exits[1].ts,
+                        exit2_price=exits[1].price,
+                    )
+                )
+                entry, exits = None, []
+
+    still_open = {"entry": entry, "exits": exits} if entry is not None else None
+    return trades, still_open

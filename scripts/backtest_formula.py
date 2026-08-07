@@ -1,12 +1,9 @@
-"""買/賣訊號公式(buy_formula/sell_formula)的逐筆進出模擬——跟backtest.py的訊號次數
-統計不一樣，這裡實際配對每次買進訊號後最近的一次賣出訊號，算出每筆交易的報酬率、
-勝率跟總報酬率。不寫入signal_events，純分析用。
+"""分策略回測比較：每個NOTIFIABLE_STRATEGIES(進場+出場邏輯完整、可以直接依據行動的策略)
+各自在觀察清單上跑一次逐筆進出模擬，讓使用者能比較「哪個策略比較好」。
 
-模擬規則(單一持股、不重複進場)：
-- 買進訊號觸發時如果手上沒有部位，才建立部位(價格用訊號當天的價格)
-- 賣出訊號觸發時如果手上有部位，才平倉並算報酬率
-- 已經有部位時再出現買進訊號，忽略(不加碼、不重複進場)
-- 資料结束時還持有的部位，另外列出「尚未平倉」，不計入勝率/總報酬率(還沒真正實現損益)
+用strategy_stats.py(跟dashboard「策略歷史勝率」同一套邏輯)算勝率/報酬率，不寫入
+signal_events，純分析用。這幾個策略(atr_breakout/chip_momentum/trend_following/
+breakout)都各自完整定義BUY+SELL，用同一套simulate_round_trips配對邏輯可以直接比較。
 """
 import sys
 from pathlib import Path
@@ -15,98 +12,118 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stocks.config import load_config
 from stocks.db import attach_institutional_flows, bars_to_dataframe, connect, fetch_bars_daily, fetch_institutional_flows, fetch_watchlist
-from stocks.models import Direction
-from stocks.strategies.composite_formula import BuyFormulaStrategy, SellFormulaStrategy
+from stocks.strategies import STRATEGY_REGISTRY
+from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
+from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
+
+STRATEGY_GROUPS = {
+    "ATR動態通道突破(atr_breakout)": ["atr_breakout"],
+    "外資買超動能(chip_momentum)": ["chip_momentum"],
+    "趨勢追蹤(trend_following)": ["trend_following"],
+    "Breakout突破(breakout)": ["breakout"],
+}
 
 
-def simulate(symbol, bars, buy_params, sell_params):
-    signals = sorted(
-        BuyFormulaStrategy().evaluate(symbol, bars, buy_params) + SellFormulaStrategy().evaluate(symbol, bars, sell_params),
-        key=lambda e: e.ts,
-    )
-
-    trades = []
-    open_trade = None
-    for e in signals:
-        if e.direction == Direction.BUY and open_trade is None:
-            open_trade = (e.ts, e.price)
-        elif e.direction == Direction.SELL and open_trade is not None:
-            buy_ts, buy_price = open_trade
-            ret_pct = (e.price - buy_price) / buy_price * 100
-            trades.append(
-                {
-                    "buy_date": buy_ts.strftime("%Y-%m-%d"),
-                    "sell_date": e.ts.strftime("%Y-%m-%d"),
-                    "buy_price": buy_price,
-                    "sell_price": e.price,
-                    "return_pct": ret_pct,
-                }
-            )
-            open_trade = None
-
-    return trades, open_trade
+def compounded_return_pct(trades) -> float:
+    compounded = 1.0
+    for t in trades:
+        compounded *= 1 + t.return_pct / 100
+    return (compounded - 1) * 100
 
 
 def main():
     config = load_config()
-    buy_params = config.strategy_params.get("buy_formula", {})
-    sell_params = config.strategy_params.get("sell_formula", {})
 
     with connect(config.db_path) as conn:
         watchlist = fetch_watchlist(conn)
-        all_trades = {}
-        still_open = {}
+        bars_by_symbol = {}
         for row in watchlist:
-            symbol, name = row["code"], row["name"]
-            bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
+            bars = bars_to_dataframe(fetch_bars_daily(conn, row["code"]), ts_field="date")
             if bars.empty:
                 continue
-            bars = attach_institutional_flows(bars, fetch_institutional_flows(conn, symbol))
-            trades, open_trade = simulate(symbol, bars, buy_params, sell_params)
-            all_trades[(symbol, name)] = trades
-            if open_trade:
-                still_open[(symbol, name)] = open_trade
-
-    print("=== 各股逐筆交易 ===")
-    pooled_returns = []
-    for (symbol, name), trades in all_trades.items():
-        if not trades:
-            print(f"\n{symbol} {name}: 過去一年沒有完整的買賣配對")
-            continue
-        compounded = 1.0
-        wins = 0
-        print(f"\n{symbol} {name}:")
-        for t in trades:
-            compounded *= 1 + t["return_pct"] / 100
-            pooled_returns.append(t["return_pct"])
-            if t["return_pct"] > 0:
-                wins += 1
-            print(
-                f"  {t['buy_date']} 買進@{t['buy_price']:.1f} -> {t['sell_date']} 賣出@{t['sell_price']:.1f}"
-                f"  報酬率 {t['return_pct']:+.1f}%"
+            bars_by_symbol[(row["code"], row["name"])] = attach_institutional_flows(
+                bars, fetch_institutional_flows(conn, row["code"])
             )
-        win_rate = wins / len(trades) * 100
-        print(f"  -- 這檔共{len(trades)}筆交易，勝率{win_rate:.0f}%，若依序把本金投入每一筆的累積報酬率(複利): {(compounded - 1) * 100:+.1f}%")
 
-    if still_open:
-        print("\n=== 目前還持有中(還沒出現賣出訊號，不計入下面的統計) ===")
-        for (symbol, name), (buy_ts, buy_price) in still_open.items():
-            print(f"  {symbol} {name}: {buy_ts.strftime('%Y-%m-%d')} 買進@{buy_price:.1f}，尚未平倉")
+    print("=== 各策略在觀察清單上的回測比較 ===\n")
+    ranking = []
+    for group_label, strategy_names in STRATEGY_GROUPS.items():
+        print(f"--- {group_label} ---")
+        pooled_trades = []
+        for (symbol, name), bars in bars_by_symbol.items():
+            events = []
+            for strat_name in strategy_names:
+                events += STRATEGY_REGISTRY[strat_name].evaluate(symbol, bars, config.strategy_params.get(strat_name, {}))
+            trades, _ = simulate_round_trips(events)
+            if not trades:
+                print(f"  {symbol} {name}: 沒有完整的買賣配對(訊號沒觸發，或觸發了但配不成一組)")
+                continue
+            summary = summarize_trades(trades)
+            pooled_trades += trades
+            print(
+                f"  {symbol} {name}: {summary['n']}筆，勝率{summary['win_rate']:.0f}%，"
+                f"複利報酬{compounded_return_pct(trades):+.1f}%"
+            )
 
-    print("\n=== 整體統計(全部股票的已平倉交易合併計算) ===")
-    if not pooled_returns:
-        print("過去一年整個觀察清單都沒有出現過完整的買賣配對，無法算勝率/總報酬率")
+        overall = summarize_trades(pooled_trades)
+        if overall:
+            print(f"  => 整體(合併{overall['n']}筆): 勝率{overall['win_rate']:.0f}%，平均每筆{overall['avg_return_pct']:+.1f}%")
+            ranking.append((group_label, overall["n"], overall["win_rate"], overall["avg_return_pct"]))
+        else:
+            print("  => 整個觀察清單都沒有出現過完整的買賣配對")
+        print()
+
+    print("=== 策略排名(依整體勝率排序) ===")
+    if not ranking:
+        print("所有策略在整個觀察清單上都沒有出現過完整的買賣配對")
         return
-    wins = sum(1 for r in pooled_returns if r > 0)
-    print(f"總交易筆數: {len(pooled_returns)}")
-    print(f"整體勝率: {wins / len(pooled_returns) * 100:.0f}% ({wins}/{len(pooled_returns)})")
-    print(f"每筆平均報酬率: {sum(pooled_returns) / len(pooled_returns):+.1f}%")
+    for label, n, win_rate, avg_return in sorted(ranking, key=lambda r: -r[2]):
+        print(f"  {label}: {n}筆，勝率{win_rate:.0f}%，平均每筆{avg_return:+.1f}%")
     print(
-        "註：以上是每檔股票各自獨立模擬(假設每檔股票分開撥一筆本金，不是共用同一筆本金"
-        "輪流交易)，「整體勝率/平均報酬率」是把所有股票的交易筆數直接合併計算，不是"
-        "單一資金池的年化報酬率——你的觀察清單只有~1年資料，樣本數也不多，這個結果拿來"
-        "看「訊號抓到的方向對不對」比較有意義，還不到能拿來評估精確報酬率的統計量。"
+        "\n註：每檔股票各自獨立模擬(不是共用同一筆本金輪流交易)，勝率/平均報酬率是把所有股票的"
+        "交易筆數直接合併計算。筆數少的策略(尤其個位數)排名參考價值較低，容易受一兩筆極端交易"
+        "左右——這只適合看「訊號抓到的方向對不對」的粗略比較，不是精確的策略評分。"
     )
+
+    print("\n=== 均線黃金交叉+籌碼、分批出場(golden_cross_scaleout)：另外報告，不放進上面的排名 ===")
+    print("(進出場形狀跟上面幾個不一樣：一次進場配兩次出場，報酬率用兩次出場價的均價計算)\n")
+    scaleout_params = config.strategy_params.get("golden_cross_scaleout", {})
+    pooled_scaleout_trades = []
+    still_open_notes = []
+    for (symbol, name), bars in bars_by_symbol.items():
+        events = GoldenCrossScaleOutStrategy().evaluate(symbol, bars, scaleout_params)
+        trades, still_open = simulate_scaleout_trades(events)
+        if trades:
+            summary = summarize_trades(trades)
+            print(
+                f"  {symbol} {name}: {summary['n']}筆，勝率{summary['win_rate']:.0f}%，"
+                f"複利報酬{compounded_return_pct(trades):+.1f}%"
+            )
+            for t in trades:
+                print(
+                    f"    {t.entry_ts.strftime('%Y-%m-%d')} 買進@{t.entry_price:.1f}"
+                    f" -> 半倉@{t.exit1_price:.1f}({t.exit1_ts.strftime('%Y-%m-%d')})"
+                    f" -> 剩餘@{t.exit2_price:.1f}({t.exit2_ts.strftime('%Y-%m-%d')})"
+                    f"  均價出場報酬率 {t.return_pct:+.1f}%"
+                )
+            pooled_scaleout_trades += trades
+        else:
+            print(f"  {symbol} {name}: 沒有完整的買賣配對")
+        if still_open:
+            exits_done = len(still_open["exits"])
+            still_open_notes.append(f"  {symbol} {name}: {still_open['entry'].ts.strftime('%Y-%m-%d')}買進@{still_open['entry'].price:.1f}，"
+                                     f"目前{'已賣一半，剩餘一半還持有中' if exits_done == 1 else '還沒觸發任何出場，全倉持有中'}")
+
+    if still_open_notes:
+        print("\n  尚未完全平倉(不計入下面的統計):")
+        for note in still_open_notes:
+            print(note)
+
+    overall = summarize_trades(pooled_scaleout_trades)
+    if overall:
+        print(f"\n  => 整體(合併{overall['n']}筆): 勝率{overall['win_rate']:.0f}%，平均每筆{overall['avg_return_pct']:+.1f}%")
+    else:
+        print("\n  整個觀察清單都沒有出現過完整的買賣配對")
 
 
 if __name__ == "__main__":

@@ -251,3 +251,68 @@ def test_fetch_bars_5min_today_excludes_earlier_days(tmp_path):
 
     assert len(rows) == 1
     assert rows[0]["close"] == 100
+
+
+def test_get_setting_returns_none_when_missing(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        assert db.get_setting(conn, "last_data_check") is None
+
+
+def test_set_setting_then_get_setting_roundtrips(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.set_setting(conn, "last_data_check", "2026-08-07T12:00:00")
+        assert db.get_setting(conn, "last_data_check") == "2026-08-07T12:00:00"
+
+
+def test_set_setting_overwrites_previous_value(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.set_setting(conn, "last_data_check", "2026-08-07T09:00:00")
+        db.set_setting(conn, "last_data_check", "2026-08-07T19:05:00")
+        assert db.get_setting(conn, "last_data_check") == "2026-08-07T19:05:00"
+
+
+def test_get_disabled_strategies_returns_empty_list_when_never_set(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        assert db.get_disabled_strategies(conn, "2330") == []
+
+
+def test_get_disabled_strategies_returns_empty_list_for_unknown_symbol(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        assert db.get_disabled_strategies(conn, "9999") == []
+
+
+def test_set_disabled_strategies_then_get_roundtrips(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        db.set_disabled_strategies(conn, "2330", ["trend_following", "atr_breakout"])
+        assert db.get_disabled_strategies(conn, "2330") == ["trend_following", "atr_breakout"]
+
+
+def test_set_disabled_strategies_overwrites_previous_list(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        db.set_disabled_strategies(conn, "2330", ["trend_following"])
+        db.set_disabled_strategies(conn, "2330", [])
+        assert db.get_disabled_strategies(conn, "2330") == []
