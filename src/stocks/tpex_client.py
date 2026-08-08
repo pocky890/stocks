@@ -75,6 +75,16 @@ def fetch_valuations_latest() -> list[dict]:
     return rows
 
 
+def fetch_company_directory() -> list[dict]:
+    """全部上櫃公司的代號/簡稱清單，跟twse_client.fetch_company_directory()同樣用途——
+    給daily_update.add_symbol_to_watchlist的名稱解析用，CompanyAbbreviation才是使用者
+    平常講的簡稱，不是CompanyName那個完整法定登記名稱。"""
+    resp = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=TIMEOUT)
+    resp.raise_for_status()
+    payload = resp.json()
+    return [{"symbol": row["SecuritiesCompanyCode"], "name": row["CompanyAbbreviation"].strip()} for row in payload]
+
+
 def fetch_ex_dividend_schedule() -> list[dict]:
     """上櫃股票除權息預告表：跟twse_client版本一樣是往前看的公告清單，不受「只有最新一天」限制。"""
     resp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_exright_prepost", timeout=TIMEOUT)

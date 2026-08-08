@@ -276,18 +276,19 @@ def build_overview_rows(config: Config) -> list[dict]:
 
 
 def build_strategy_recommendations(config: Config) -> list[dict]:
-    """觀察清單裡每支股票、每個策略目前最後一個事件——不管方向是BUY還是SELL都列出來，
-    一列對應一個策略的訊號(不是把整支股票的好幾個策略塞進同一格文字)。NOTIFIABLE_STRATEGIES
-    這幾個策略進場/出場都是edge-triggered(條件第一天成立才發一次)，觸發後策略自己會追蹤
-    部位直到下一個相反方向事件，不像舊版buy_formula有「持續符合就一直列著」的連續狀態
-    可以看。這裡看的是「這個策略最後一次動作是叫你買還是叫你賣」，不是「條件現在還成立」。
-    每一列的「買進策略」跟「賣出策略」剛好一個有填一個留白(同一個策略同一時間不會又是
-    買又是賣)：最後一次是BUY就填「買進策略」，是SELL就填「賣出策略」。「觸發價格」是
-    那個事件當天的收盤價(那個策略真正判斷買/賣的依據)，「現價」是今天的收盤價，兩個
-    分開放才看得出來「當時觸發之後，現在漲跌多少」。超過MAX_SIGNAL_AGE_DAYS(100天)沒
-    動作的策略直接不列——2026-08-07發現沒有天數限制的話，會把一年多前的舊訊號跟這幾天
-    的新訊號混在一起，使用者確認拿掉超過100天沒動作的，不是保留但改樣式。"""
+    """觀察清單裡每支股票、每個策略在MAX_SIGNAL_AGE_DAYS(100天)內觸發過的每一個事件都各自
+    列一列——不是只留最後一個。2026-08-08使用者指出：只顯示最後一個事件會把「已經出場」
+    的舊買進訊號整個蓋掉，例如8299的chip_momentum 7/21買進、7/29停損賣出，如果只顯示
+    最後一個(賣出)，使用者在「模擬交易紀錄」看到7/21的買進卻在這張表找不到對應，會覺得
+    兩張表對不起來。改成有觸發就留著：一次進出場如果都在100天內，會各自變成一列(一列
+    買進、一列賣出)，不是合併或互相蓋掉。「買進策略」跟「賣出策略」剛好一個有填一個留白
+    (同一個事件不會同時是買又是賣)。「觸發價格」是那天的收盤價(策略真正判斷買/賣的依據)，
+    「現價」是今天的收盤價，兩個分開放才看得出來「當時觸發之後，現在漲跌多少」。
+
+    跟build_paper_trades一樣要跳過disabled_strategies——不然會出現「這支股票這個策略
+    已經被排除、不會實際通知了」，畫面上卻還在建議買進的矛盾。"""
     rows = []
+    now = datetime.now()
     with connect(config.db_path) as conn:
         for symbol_row in fetch_watchlist(conn):
             symbol, name = symbol_row["code"], symbol_row["name"]
@@ -298,30 +299,30 @@ def build_strategy_recommendations(config: Config) -> list[dict]:
             flows = fetch_institutional_flows(conn, symbol)
             merged = attach_institutional_flows(bars, flows)
             current_price = _round_or_none(bars["close"].iloc[-1])
+            disabled = set(get_disabled_strategies(conn, symbol))
 
             for strategy_name in NOTIFIABLE_STRATEGIES:
+                if strategy_name in disabled:
+                    continue
                 strategy = STRATEGY_REGISTRY.get(strategy_name)
                 if strategy is None:
                     continue
                 events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
-                if not events:
-                    continue
-                last_event = max(events, key=lambda e: e.ts)
-                if (datetime.now() - last_event.ts).days > MAX_SIGNAL_AGE_DAYS:
-                    continue  # 這個策略對這支股票太久沒動作了，不算現在有意義的訊號
+                recent_events = [e for e in events if (now - e.ts).days <= MAX_SIGNAL_AGE_DAYS]
 
-                is_buy = last_event.direction == Direction.BUY
-                rows.append(
-                    {
-                        "代號": symbol,
-                        "名稱": name or "—",
-                        "買進策略": strategy_name if is_buy else "",
-                        "賣出策略": strategy_name if not is_buy else "",
-                        "觸發價格": _round_or_none(last_event.price),
-                        "現價": current_price,
-                        "觸發日期": last_event.ts.strftime("%Y-%m-%d"),
-                    }
-                )
+                for event in recent_events:
+                    is_buy = event.direction == Direction.BUY
+                    rows.append(
+                        {
+                            "代號": symbol,
+                            "名稱": name or "—",
+                            "買進策略": strategy_name if is_buy else "",
+                            "賣出策略": strategy_name if not is_buy else "",
+                            "觸發價格": _round_or_none(event.price),
+                            "現價": current_price,
+                            "觸發日期": event.ts.strftime("%Y-%m-%d"),
+                        }
+                    )
 
     return rows
 

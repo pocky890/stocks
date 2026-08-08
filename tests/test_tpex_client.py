@@ -103,3 +103,12 @@ def test_fetch_ex_dividend_schedule_converts_roc_date(monkeypatch):
     assert rows[0]["ex_date"] == "2026-07-27"
     assert rows[0]["cash_dividend"] == pytest.approx(1.40)
     assert rows[0]["detail"] == "除息"
+
+
+def test_fetch_company_directory_uses_abbreviation_not_legal_name(monkeypatch):
+    payload = [{"SecuritiesCompanyCode": "8299", "CompanyName": "群聯電子股份有限公司", "CompanyAbbreviation": "群聯"}]
+    monkeypatch.setattr(tpex_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = tpex_client.fetch_company_directory()
+
+    assert rows == [{"symbol": "8299", "name": "群聯"}]

@@ -16,9 +16,11 @@ MAX_BATCH_SYMBOLS_LISTED = 30
 NOTIFIABLE_STRATEGIES = {
     "atr_breakout",
     "chip_momentum",
+    "trust_momentum",
     "trend_following",
     "breakout",
     "golden_cross_scaleout",
+    "long_swing",
 }
 _MA_PERIODS = (5, 10, 20, 60)
 _MA_NAMES = {20: "月", 60: "季"}  # 5、10維持數字講法，20/60叫月線/季線，跟dashboard命名一致

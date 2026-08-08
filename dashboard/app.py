@@ -79,9 +79,11 @@ STRATEGY_LABELS = {
     "ma_trend": "站上5/20日均線且20日線上揚",
     "atr_breakout": "ATR動態通道突破(創20日新高進場，2倍ATR移動停損出場)",
     "chip_momentum": "外資買超動能(連3日買超+未超買進場，2.5倍ATR移動停損出場)",
+    "trust_momentum": "投信買超動能(近5日≥3天買超且淨額為正+未超買進場，2.5倍ATR移動停損出場)",
     "trend_following": "趨勢追蹤(20>60日均線+站上20日線+爆量進場，跌破20日線/均線反轉出場)",
     "breakout": "Breakout突破(創20日新高+爆量進場，跌破10日最低出場)",
     "golden_cross_scaleout": "均線黃金交叉分批出場(打分制進場≥5分，跌破5日線+量能先賣一半，跌破10日線或死亡交叉賣剩餘)",
+    "long_swing": "中長波段(60>120日均線多頭+法人買超進場，站回20日線且60日線上揚可重新進場，跌破均線3天或3.5倍ATR停損出場)",
 }
 # 進出場邏輯完整、可以直接依據行動的稱為「策略」；其他都只是單一指標的訊號，可信度較低，
 # 稱為「指標訊號」——跟notifier.NOTIFIABLE_STRATEGIES(只有這幾個會推播Telegram)是同一個
@@ -97,7 +99,7 @@ config = load_config()
 init_db(config.db_path)  # 確保schema是最新的(例如app_settings表)，下面馬上要用get_setting()
 
 
-TRACK_RECORD_STRATEGIES = ["chip_momentum", "atr_breakout", "trend_following", "breakout"]  # 這幾個自己的BUY/SELL事件本來就是配好對的
+TRACK_RECORD_STRATEGIES = ["chip_momentum", "trust_momentum", "atr_breakout", "trend_following", "breakout", "long_swing"]  # 這幾個自己的BUY/SELL事件本來就是配好對的
 # golden_cross_scaleout一次進場配兩次出場(先賣一半、再賣剩餘一半)，跟上面幾個「一買配一賣」
 # 的形狀不一樣，直接套simulate_round_trips會把第一次半倉出場當成整筆平倉、報酬率算錯，
 # 要用simulate_scaleout_trades另外配對，所以不放進TRACK_RECORD_STRATEGIES一起迴圈處理。
@@ -116,6 +118,7 @@ def _compute_track_records(_config, symbols: tuple):
     讓使用者知道「這個策略對這支股票表現不好，所以被排除」的理由是什麼。"""
     rows = []
     with connect(_config.db_path) as conn:
+        names = {row["code"]: row["name"] for row in fetch_watchlist(conn)}
         for code in symbols:
             bars = bars_to_dataframe(fetch_bars_daily(conn, code), ts_field="date")
             bars = attach_institutional_flows(bars, fetch_institutional_flows(conn, code))
@@ -125,13 +128,14 @@ def _compute_track_records(_config, symbols: tuple):
 
             def cell_text(name: str, summary: dict | None) -> str:
                 text = (
-                    f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均（{summary['n']}筆）"
+                    f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均 / "
+                    f"{summary['total_return_pct']:+.1f}%加總（{summary['n']}筆）"
                     if summary
                     else "尚無完整交易紀錄"
                 )
                 return f"{text} (已排除)" if name in disabled else text
 
-            row = {"代號": code}
+            row = {"代號": code, "名稱": names.get(code) or "—"}
             for name in TRACK_RECORD_STRATEGIES:
                 events = STRATEGY_REGISTRY[name].evaluate(code, bars, _config.strategy_params.get(name, {}))
                 trades, _ = simulate_round_trips(events)
@@ -187,7 +191,9 @@ if should_check_for_updates(_last_check, _now):
     for error in result["errors"]:
         st.warning(f"⚠️ {error}（不影響其他資料，稍後重新整理再試一次即可）")
 
-tab_watchlist, tab_chart, tab_fundamentals, tab_history = st.tabs(["觀察清單", "K線圖", "籌碼/基本面", "訊號紀錄"])
+tab_watchlist, tab_chart, tab_fundamentals, tab_history, tab_strategy_logic = st.tabs(
+    ["觀察清單", "K線圖", "籌碼/基本面", "訊號紀錄", "策略邏輯"]
+)
 
 with connect(config.db_path) as conn:
     watchlist_rows = fetch_watchlist(conn)
@@ -201,7 +207,7 @@ with tab_watchlist:
     with st.form("add_symbol_form", clear_on_submit=True):
         add_col1, add_col2 = st.columns([3, 1])
         new_code = add_col1.text_input(
-            "新增股票代號", placeholder="輸入股票代號，例如 2603", label_visibility="collapsed"
+            "新增股票代號", placeholder="輸入股票代號或中文名稱，例如 2603 或 華電網", label_visibility="collapsed"
         )
         add_submitted = add_col2.form_submit_button("新增到觀察清單", use_container_width=True)
     if add_submitted and new_code.strip():
@@ -434,12 +440,18 @@ with tab_history:
         by_symbol_df = pd.DataFrame(paper_trades)
         by_symbol = (
             by_symbol_df.groupby(["代號", "名稱"])["報酬率(%)"]
-            .agg(交易筆數="count", 總報酬="mean")
+            .agg(交易筆數="count", 平均報酬="mean", 加總報酬="sum")
             .round(1)
             .reset_index()
-            .sort_values("總報酬", ascending=False)
+            .sort_values("加總報酬", ascending=False)
         )
-        st.caption("「總報酬」是這支股票在這段時間所有策略交易(已平倉+持有中未實現)報酬率的平均，不是加總。")
+        st.caption(
+            "「平均報酬」是這支股票在這段時間所有策略交易(已平倉+持有中未實現)報酬率的平均；"
+            "「加總報酬」是把每一筆報酬率直接加起來(不是複利)，2026-08-08使用者指出只看平均會"
+            "低估——例如2408這段期間漲了16倍，但每筆交易各自進出、只吃到片段的漲幅，平均自然"
+            "遠低於整體漲幅，加總報酬能看出「這些交易合計貢獻了多少」。兩者都不是實際下單報酬，"
+            "只是訊號品質的參考。"
+        )
         st.dataframe(by_symbol, use_container_width=True, hide_index=True)
 
         closed = [r for r in paper_trades if r["狀態"] == "已平倉"]
@@ -458,3 +470,31 @@ with tab_history:
         # 賣出價位維持數字型別(NaN)讓Arrow序列化不會因為跟已平倉的float混在一起而出錯，
         # st.dataframe本身就會把NaN顯示成空白，不需要另外塞"—"字串
         st.dataframe(trades_df, use_container_width=True, hide_index=True)
+
+with tab_strategy_logic:
+    st.subheader("策略邏輯")
+    st.caption(
+        "「策略」進場+出場邏輯完整綁在一起，可以直接依據行動，會推播Telegram，每個策略類別本身的"
+        "docstring就是這裡的說明文字；「指標訊號」單獨一個不構成完整交易系統，只記錄不推播，"
+        "用一行帶過。目前套用的參數(config.json的strategy_params)列在每個策略說明下面。"
+    )
+
+    st.markdown("### 📊 策略（會推播Telegram）")
+    for name in TRACK_RECORD_STRATEGIES + [SCALEOUT_STRATEGY]:
+        strategy = STRATEGY_REGISTRY.get(name)
+        if strategy is None:
+            continue
+        with st.expander(strategy_label(name), expanded=False):
+            st.text((type(strategy).__doc__ or "（沒有說明文件）").strip())
+            params = config.strategy_params.get(name, {})
+            if params:
+                st.caption("目前參數：")
+                st.json(params)
+
+    st.markdown("### 📈 指標訊號（只記錄不推播）")
+    indicator_rows = [
+        {"策略": strategy_label(name), "說明": STRATEGY_LABELS.get(name, name)}
+        for name in STRATEGY_REGISTRY
+        if name not in NOTIFIABLE_STRATEGIES
+    ]
+    st.dataframe(pd.DataFrame(indicator_rows), use_container_width=True, hide_index=True)

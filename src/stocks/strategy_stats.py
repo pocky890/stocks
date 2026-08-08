@@ -51,15 +51,26 @@ def simulate_round_trips(events: list[SignalEvent]) -> tuple[list[Trade], Signal
 
 
 def summarize_trades(trades: list[Trade]) -> dict:
-    """回傳None代表沒有任何一次完整的進出場，勝率/報酬無意義。"""
+    """回傳None代表沒有任何一次完整的進出場，勝率/報酬無意義。
+
+    avg_return_excluding_best_pct：拿掉單筆報酬率最高的那一筆之後剩下的平均——趨勢跟隨型
+    策略(atr_breakout/chip_momentum/trust_momentum等)本來就是靠少數幾筆大波段撐報酬，
+    低勝率不代表不好，但如果拿掉那"一筆"最好的之後剩下全部轉負，代表這個組合的正報酬
+    只是運氣好抓到一次，不是可以重複期待的表現——用來給strategy_selection.py判斷排除
+    時當「這個正報酬夠不夠紮實」的防呆檢查，不是要否定低勝率高賺賠比這種策略類型本身。
+    只有1筆交易時沒有「剩下的」可以算，回傳None。"""
     if not trades:
         return None
     returns = [t.return_pct for t in trades]
     wins = sum(1 for r in returns if r > 0)
+    sorted_returns = sorted(returns, reverse=True)
+    remaining = sorted_returns[1:]
     return {
         "n": len(trades),
         "win_rate": wins / len(trades) * 100,
         "avg_return_pct": sum(returns) / len(returns),
+        "total_return_pct": sum(returns),
+        "avg_return_excluding_best_pct": (sum(remaining) / len(remaining)) if remaining else None,
     }
 
 

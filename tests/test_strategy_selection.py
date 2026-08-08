@@ -1,47 +1,79 @@
 import pandas as pd
 
+from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.strategy_selection import (
     MIN_AVG_RETURN_PCT,
     MIN_TRADES_FOR_RANKING,
-    WIN_RATE_THRESHOLD,
+    MIN_TRADES_OVERRIDES,
     compute_disabled_strategies,
     should_disable,
 )
 
 
-def make_summary(n=10, win_rate=50.0, avg_return_pct=1.0) -> dict:
-    return {"n": n, "win_rate": win_rate, "avg_return_pct": avg_return_pct}
+def make_summary(n=10, win_rate=50.0, avg_return_pct=1.0, avg_return_excluding_best_pct=None) -> dict:
+    return {
+        "n": n,
+        "win_rate": win_rate,
+        "avg_return_pct": avg_return_pct,
+        "avg_return_excluding_best_pct": avg_return_excluding_best_pct,
+    }
 
 
-def test_should_disable_false_when_no_summary():
-    assert should_disable(None) is False
+def test_should_disable_true_when_no_summary():
+    # 2026-08-08使用者確認：完全沒有完整買賣配對，樣本等於0，一樣不可信，該保守排除，
+    # 不是預設保留。
+    assert should_disable(None) is True
 
 
-def test_should_disable_false_when_too_few_trades_even_with_bad_stats():
-    # 樣本太少，勝率/報酬率本身就不可信，不該拿噪音做排除決定
-    summary = make_summary(n=MIN_TRADES_FOR_RANKING - 1, win_rate=0.0, avg_return_pct=-50.0)
-    assert should_disable(summary) is False
-
-
-def test_should_disable_true_when_win_rate_below_threshold():
-    summary = make_summary(win_rate=WIN_RATE_THRESHOLD - 1, avg_return_pct=10.0)
+def test_should_disable_true_when_too_few_trades_even_with_good_stats():
+    # 樣本太少，勝率/報酬率本身就不可信——即使數字好看，一樣該保守排除，不拿雜訊當
+    # 依據推播通知；等累積到MIN_TRADES_FOR_RANKING筆才開始真正判斷。
+    summary = make_summary(n=MIN_TRADES_FOR_RANKING - 1, win_rate=100.0, avg_return_pct=50.0)
     assert should_disable(summary) is True
+
+
+def test_should_disable_false_for_low_win_rate_with_strong_positive_average():
+    # 低勝率+高賺賠比是趨勢跟隨策略的正常樣貌，不該單獨用勝率否決——只要樣本夠、平均
+    # 報酬夠好，就該保留
+    summary = make_summary(n=MIN_TRADES_FOR_RANKING, win_rate=25.0, avg_return_pct=10.0, avg_return_excluding_best_pct=3.0)
+    assert should_disable(summary) is False
 
 
 def test_should_disable_true_when_avg_return_below_cost_threshold_even_with_good_win_rate():
-    # 勝率不錯但平均報酬率沒蓋過交易成本，一樣該排除，不是只看勝率
-    summary = make_summary(win_rate=70.0, avg_return_pct=MIN_AVG_RETURN_PCT - 0.1)
+    # 樣本足夠、勝率不錯，但平均報酬率沒蓋過交易成本，一樣該排除，不是只看勝率
+    summary = make_summary(n=MIN_TRADES_FOR_RANKING, win_rate=70.0, avg_return_pct=MIN_AVG_RETURN_PCT - 0.1)
     assert should_disable(summary) is True
 
 
-def test_should_disable_false_when_both_thresholds_cleared():
-    summary = make_summary(win_rate=WIN_RATE_THRESHOLD, avg_return_pct=MIN_AVG_RETURN_PCT)
+def test_should_disable_false_even_when_positive_average_relies_entirely_on_the_single_best_trade():
+    # 2026-08-08使用者指出：拿掉單筆最賺的那一筆之後轉負，不該自動排除——「靠少數幾筆
+    # 大波段撐報酬」正是這類趨勢跟隨策略設計上要抓的樣貌，不是瑕疵。只要樣本足夠、平均
+    # 報酬蓋過門檻，就該保留，不管扣掉最佳單筆後剩多少。
+    summary = make_summary(n=MIN_TRADES_FOR_RANKING, win_rate=40.0, avg_return_pct=8.0, avg_return_excluding_best_pct=-2.0)
     assert should_disable(summary) is False
 
 
-def test_compute_disabled_strategies_returns_empty_list_on_flat_data_with_no_signals():
-    # 完全持平的資料，NOTIFIABLE_STRATEGIES都不會有任何完整買賣配對(樣本不足)，
-    # 不該排除任何策略——這正是新增股票剛加進來、歷史資料還很少時的真實情境。
+def test_should_disable_false_when_sample_sufficient_and_avg_return_clears_threshold():
+    summary = make_summary(n=MIN_TRADES_FOR_RANKING, win_rate=45.0, avg_return_pct=MIN_AVG_RETURN_PCT, avg_return_excluding_best_pct=None)
+    assert should_disable(summary) is False
+
+
+def test_should_disable_uses_per_strategy_trade_override():
+    # 2026-08-08使用者確認：long_swing持倉數月，交易天生比其他策略少，用同一套5筆門檻
+    # 某些個股要等好幾年才達標，所以long_swing自己的門檻降到3筆——樣本剛好等於override
+    # 門檻就該通過(只要平均報酬也過關)，不是繼續套用全域的MIN_TRADES_FOR_RANKING。
+    override_n = MIN_TRADES_OVERRIDES["long_swing"]
+    summary = make_summary(n=override_n, win_rate=50.0, avg_return_pct=MIN_AVG_RETURN_PCT)
+    assert should_disable(summary, "long_swing") is False
+    # 沒有strategy_name(或是其他沒被override的策略)一樣要用全域門檻擋下來
+    assert should_disable(summary) is True
+    assert should_disable(summary, "chip_momentum") is True
+
+
+def test_compute_disabled_strategies_disables_everything_on_flat_data_with_no_signals():
+    # 2026-08-08使用者確認：完全持平的資料，NOTIFIABLE_STRATEGIES都不會有任何完整買賣
+    # 配對(樣本等於0)，該排除全部策略——這正是新增股票剛加進來、歷史資料還很少時的
+    # 真實情境，新股票會先整組安靜，等資料累積夠了下次重跑才會開始有判斷結果。
     closes = [50] * 10
     dates = pd.date_range("2026-01-02", periods=len(closes), freq="D")
     bars = pd.DataFrame(
@@ -49,4 +81,4 @@ def test_compute_disabled_strategies_returns_empty_list_on_flat_data_with_no_sig
         index=dates,
     )
 
-    assert compute_disabled_strategies("2454", bars, {}) == []
+    assert set(compute_disabled_strategies("2454", bars, {})) == NOTIFIABLE_STRATEGIES

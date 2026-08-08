@@ -166,14 +166,71 @@ def _fetch_name_from_recent_valuations(code: str, latest_date: str) -> str:
     return ""
 
 
+def _contains_chinese(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text)
+
+
+def _resolve_symbol_input(user_input: str) -> tuple[str | None, str]:
+    """使用者在「新增股票代號」欄位除了打代號(例如2330)，也可以直接打中文簡稱(例如
+    台積電)——只要有中文字就查TWSE/TPEx官方公司名錄找對應代號，純代號(數字，可能帶
+    字母，例如特別股)直接照舊當代號用，不用查名錄。回傳(code, error_message)，code是
+    None代表解析失敗，error_message說明原因；解析成功時error_message是空字串。先找
+    完全符合"公司簡稱"的，找不到才退而找「名稱裡包含這段文字」的——如果那樣還是找到
+    多家(例如打「台」這種太短的字會撞到一大堆)，回傳前5家讓使用者換更精確的名稱重試，
+    不要隨便猜一家。
+
+    TWSE/TPEx任一來源連線失敗(TPEx的SSL已知偶爾不穩定，跟run_batch.py同樣的問題)都不該
+    讓整個新增流程當掉——只影響那個市場的名稱查得到查不到，另一個市場正常查。"""
+    text = user_input.strip()
+    if not _contains_chinese(text):
+        return text, ""
+
+    directory = []
+    sources_ok = 0
+    try:
+        directory += twse_client.fetch_company_directory()
+        sources_ok += 1
+    except requests.RequestException:
+        pass
+    try:
+        directory += tpex_client.fetch_company_directory()
+        sources_ok += 1
+    except requests.RequestException:
+        pass
+    if sources_ok == 0:
+        return None, "查詢公司名錄失敗(TWSE/TPEx連線都逾時或出錯)，請直接輸入股票代號，或稍後再試"
+
+    exact = [d for d in directory if d["name"] == text]
+    if exact:
+        return exact[0]["symbol"], ""
+
+    partial = [d for d in directory if text in d["name"]]
+    if len(partial) == 1:
+        return partial[0]["symbol"], ""
+    if len(partial) > 1:
+        candidates = "、".join(f"{d['name']}({d['symbol']})" for d in partial[:5])
+        return None, f"「{text}」對應到多家公司，請輸入更精確的名稱，例如：{candidates}"
+    return None, f"找不到「{text}」對應的股票代號，確認名稱是否正確"
+
+
 def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     """新增一檔股票：自動判斷上市/上櫃，抓近3年股價(跟原本7檔核心觀察清單股票一致)。
-    三大法人買賣超：上櫃透過FinMind直接補到跟股價一樣的3年歷史；上市只先抓最新一天
-    （舊日期籌碼資料因為sync log是以「日期」而非「日期+股票」為單位在追蹤，不會自動幫
-    新股票補齊，需要的話手動跑一次 `python scripts/fetch_market_data.py --full`）。
-    融資融券/估值不管上市上櫃都只先抓最新一天(TPEx官方免費API限制，FinMind有沒有等效
-    資料集還沒查證；TWSE的話同上，要fetch_market_data.py --full補歷史)。"""
-    code = code.strip()
+    三大法人買賣超：不管上市上櫃都透過FinMind直接補到跟股價一樣的3年歷史(FinMind的
+    TaiwanStockInstitutionalInvestorsBuySell資料集兩個市場都涵蓋，一次API呼叫涵蓋整段
+    範圍，不用像TWSE官方API那樣逐日查詢)——原本上市只抓最新一天，是因為sync log是用
+    「日期」而非「日期+股票」為單位在追蹤，其他股票已經讓那些日期標記成「抓過了」，
+    新股票不會自動觸發回頭補值，2026-08-08改成兩個市場都直接用FinMind繞開這個限制，不用
+    再手動跑`fetch_market_data.py --full`才能讓新股票的籌碼類策略(chip_momentum等)有
+    完整樣本可以判斷。FinMind失敗的話(額度/連線問題)退回只抓最新一天，不讓新增股票整個
+    失敗。融資融券/估值兩個市場一樣只先抓最新一天不變——這兩個沒有被任何策略用到(只有
+    dashboard「籌碼/基本面」頁籤顯示用)，之後每天累積即可，不值得為此犧牲新增股票的
+    等待時間。
+
+    code參數也接受中文簡稱(例如「台積電」)，會先透過_resolve_symbol_input()解析成代號
+    再往下走，跟純打代號是同一條路徑、同一個結果。"""
+    code, resolve_error = _resolve_symbol_input(code)
+    if code is None:
+        return {"ok": False, "message": resolve_error}
     init_db(config.db_path)
 
     with connect(config.db_path) as conn:
@@ -193,16 +250,19 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     earliest_date = min(b.ts for b in bars).strftime("%Y-%m-%d")
     latest_date = max(b.ts for b in bars).strftime("%Y-%m-%d")
 
-    if market == "TPEx":
+    try:
         flows = finmind_client.fetch_institutional_flows_for_range(code, earliest_date, latest_date)
+        chips_note = "三大法人已透過FinMind補到近3年歷史；融資融券/估值只先抓最新一天，之後每天累積"
+    except requests.RequestException:
+        flows = []
+        chips_note = "三大法人歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料；融資融券/估值只先抓最新一天"
+
+    if market == "TPEx":
         margins = [r for r in tpex_client.fetch_margin_balances_latest() if r["symbol"] == code]
         valuations = [r for r in tpex_client.fetch_valuations_latest() if r["symbol"] == code]
-        chips_note = "三大法人已透過FinMind補到近3年歷史；融資融券/估值上櫃免費API只能抓最新一天，之後每天累積"
     else:
-        flows = [r for r in twse_client.fetch_institutional_flows_for_date(latest_date) if r["symbol"] == code]
         margins = [r for r in twse_client.fetch_margin_balances_for_date(latest_date) if r["symbol"] == code]
         valuations = [r for r in twse_client.fetch_valuations_for_date(latest_date) if r["symbol"] == code]
-        chips_note = "三大法人/融資融券/估值只先抓最新一天，完整歷史要另外跑 `python scripts/fetch_market_data.py --full` 補齊"
 
     if valuations:
         name = valuations[0]["name"]
@@ -221,11 +281,11 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
         if valuations:
             insert_valuations(conn, valuations)
 
-    # 新增當下立刻跑一次排除評估，不用等到下個月的排程——上櫃股票這時三大法人已經有
-    # 3年歷史(FinMind)，可以馬上判斷；上市股票籌碼還只有最新一天(要另外跑
-    # fetch_market_data.py --full補歷史)，chip_momentum/golden_cross_scaleout這種靠
-    # 籌碼判斷的策略會因為樣本不足而暫時不排除，這是正確的「還不能判斷」，不是「判斷後
-    # 留著」，之後每月排程重跑會隨著資料累積補上真正的排除判斷。
+    # 新增當下立刻跑一次排除評估，不用等到下個月的排程——兩個市場這時三大法人都已經有
+    # 3年歷史(FinMind)，chip_momentum/golden_cross_scaleout這種靠籌碼判斷的策略可以馬上
+    # 判斷；如果FinMind剛好失敗(見上面的try/except)，flows還是只有最新一天，樣本不足就
+    # 先排除(見strategy_selection.should_disable)，等之後每月排程重跑、資料累積夠了才會
+    # 真正開始判斷，不是預設先開著。
     with connect(config.db_path) as conn:
         symbol_bars = bars_to_dataframe(fetch_bars_daily(conn, code), ts_field="date")
         symbol_bars = attach_institutional_flows(symbol_bars, fetch_institutional_flows(conn, code))

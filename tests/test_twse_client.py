@@ -107,3 +107,12 @@ def test_fetch_ex_dividend_schedule_converts_roc_date(monkeypatch):
     assert rows[0]["ex_date"] == "2026-08-05"
     assert rows[0]["cash_dividend"] == pytest.approx(2.75)
     assert rows[0]["symbol"] == "2330"
+
+
+def test_fetch_company_directory_uses_short_name_not_legal_name(monkeypatch):
+    payload = [{"公司代號": "2330", "公司名稱": "台灣積體電路製造股份有限公司", "公司簡稱": "台積電"}]
+    monkeypatch.setattr(twse_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = twse_client.fetch_company_directory()
+
+    assert rows == [{"symbol": "2330", "name": "台積電"}]

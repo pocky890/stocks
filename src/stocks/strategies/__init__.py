@@ -18,6 +18,7 @@ from stocks.strategies.chip_momentum import ChipMomentumStrategy
 from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
+from stocks.strategies.long_swing import LongSwingStrategy
 from stocks.strategies.ma_alignment import MAAlignmentStrategy
 from stocks.strategies.ma_crossover import MACrossoverStrategy
 from stocks.strategies.ma_trend import MATrendStrategy
@@ -25,6 +26,7 @@ from stocks.strategies.macd_strategy import MACDStrategy
 from stocks.strategies.price_alert import PriceAlertStrategy
 from stocks.strategies.rsi_strategy import RSIStrategy
 from stocks.strategies.trend_following import TrendFollowingStrategy
+from stocks.strategies.trust_momentum import TrustMomentumStrategy
 from stocks.strategies.volume_anomaly import VolumeAnomalyStrategy
 
 STRATEGY_REGISTRY: dict[str, Strategy] = {
@@ -40,7 +42,9 @@ STRATEGY_REGISTRY: dict[str, Strategy] = {
     "ma_trend": MATrendStrategy(),
     "atr_breakout": ATRBreakoutStrategy(),
     "chip_momentum": ChipMomentumStrategy(),
+    "trust_momentum": TrustMomentumStrategy(),
     "trend_following": TrendFollowingStrategy(),
     "breakout": BreakoutStrategy(),
     "golden_cross_scaleout": GoldenCrossScaleOutStrategy(),
+    "long_swing": LongSwingStrategy(),
 }

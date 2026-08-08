@@ -6,8 +6,9 @@
 
 不是自動選一個「最強的」，是排掉「明顯不夠好」的：市場狀態會變，選單一個贏家全押的
 風險是贏家換人時卻還押著舊贏家；排除法留著大部分策略繼續跑，只是拉掉墊底的，比較保守。
-也不是每次都硬選幾個排除——樣本不夠(交易次數太少)的策略不排除，因為那個勝率本身
-就不可信，排除它反而是憑噪音做決定。
+2026-08-08使用者確認：樣本不夠(交易次數太少，包括完全沒有完整買賣配對)的策略也排除，
+不給預設保留的寬限期——那個勝率本身就不可信，不可信就該保守排除，不該拿雜訊當依據
+推播通知。新股票/新啟用的策略會先整組安靜，等資料累積夠了下次重跑才會開始有判斷結果。
 
 手動執行，建議每隔一段時間(例如每月)重跑一次，隨著累積更多歷史資料更新排除清單。
 """
@@ -28,7 +29,13 @@ from stocks.db import (
     set_disabled_strategies,
 )
 from stocks.notifier import NOTIFIABLE_STRATEGIES
-from stocks.strategy_selection import MIN_AVG_RETURN_PCT, MIN_TRADES_FOR_RANKING, WIN_RATE_THRESHOLD, should_disable, summarize_strategy
+from stocks.strategy_selection import (
+    MIN_AVG_RETURN_PCT,
+    MIN_TRADES_FOR_RANKING,
+    MIN_TRADES_OVERRIDES,
+    should_disable,
+    summarize_strategy,
+)
 
 
 def main():
@@ -53,18 +60,21 @@ def main():
         newly_disabled = []
         for strategy_name in sorted(NOTIFIABLE_STRATEGIES):
             summary = summarize_strategy(symbol, bars, strategy_name, config.strategy_params.get(strategy_name, {}))
-            if not summary:
-                print(f"  {strategy_name}: 沒有完整的買賣配對")
-                continue
-            if summary["n"] < MIN_TRADES_FOR_RANKING:
-                print(f"  {strategy_name}: {summary['n']}筆(樣本太少，不排除)，勝率{summary['win_rate']:.0f}%")
-                continue
+            disable = should_disable(summary, strategy_name)  # 每種情況都統一交給should_disable判斷，不要各自分支硬寫
+            min_trades = MIN_TRADES_OVERRIDES.get(strategy_name, MIN_TRADES_FOR_RANKING)
 
-            disable = should_disable(summary)
-            print(
-                f"  {strategy_name}: {summary['n']}筆，勝率{summary['win_rate']:.0f}%，"
-                f"平均{summary['avg_return_pct']:+.1f}% -> {'排除' if disable else '保留'}"
-            )
+            if not summary:
+                print(f"  {strategy_name}: 沒有完整的買賣配對 -> {'排除' if disable else '保留'}")
+            elif summary["n"] < min_trades:
+                print(f"  {strategy_name}: {summary['n']}筆(樣本太少) -> {'排除' if disable else '保留'}")
+            else:
+                excl_best = summary.get("avg_return_excluding_best_pct")
+                excl_best_text = f"，拿掉最佳單筆後{excl_best:+.1f}%" if excl_best is not None else ""
+                print(
+                    f"  {strategy_name}: {summary['n']}筆，勝率{summary['win_rate']:.0f}%，"
+                    f"平均{summary['avg_return_pct']:+.1f}%{excl_best_text} -> {'排除' if disable else '保留'}"
+                )
+
             if disable:
                 newly_disabled.append(strategy_name)
 
@@ -77,9 +87,10 @@ def main():
         print()
 
     print(
-        f"完成。門檻: 交易數>={MIN_TRADES_FOR_RANKING}筆時，勝率<{WIN_RATE_THRESHOLD:.0f}%或"
-        f"平均報酬率<{MIN_AVG_RETURN_PCT:+.1f}%(任一觸發)就排除；樣本不足或雙項都達標的策略"
-        "維持照常運作。建議每隔一段時間(例如每月)重跑一次。"
+        f"完成。門檻: 交易數<{MIN_TRADES_FOR_RANKING}筆(樣本不足，含完全沒有完整買賣配對)就排除；"
+        f"樣本足夠時平均報酬率<{MIN_AVG_RETURN_PCT:+.1f}%才排除(不因為報酬集中在少數大波段就排除，"
+        "那是趨勢跟隨策略的正常樣貌)。建議每隔一段時間(例如每月)重跑一次，隨資料累積讓樣本不足的"
+        "策略開始被真正判斷。"
     )
 
 

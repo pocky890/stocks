@@ -296,9 +296,10 @@ def test_build_strategy_recommendations_lists_one_row_per_open_buy_signal(tmp_pa
         assert row["觸發日期"] == dates[-1].strftime("%Y-%m-%d")
 
 
-def test_build_strategy_recommendations_lists_sell_signal_after_a_closed_position(tmp_path):
-    # 先創新高進場，接著大跌觸發ATR停損賣出——最後一個事件變成SELL，那一列該填「賣出
-    # 策略」，「買進策略」留白，且觸發價格/日期要對應到「賣出當天」，不是進場那天。
+def test_build_strategy_recommendations_keeps_both_buy_and_sell_rows_for_a_closed_position(tmp_path):
+    # 先創新高進場，接著大跌觸發ATR停損賣出——2026-08-08使用者指出：買進事件不該被之後
+    # 的賣出事件蓋掉，兩個都在100天內就該各自留一列，不然會跟「模擬交易紀錄」對不起來
+    # (那邊看得到完整的一買一賣，這邊卻只看得到賣出，找不到對應的買進紀錄)。
     closes = [50] * 20 + [60, 40]
     dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
     bars = [
@@ -314,13 +315,16 @@ def test_build_strategy_recommendations_lists_sell_signal_after_a_closed_positio
         db.add_to_watchlist(conn, "2454", name="聯發科")
 
     rows = build_strategy_recommendations(config)
+    atr_rows = [r for r in rows if r["賣出策略"] == "atr_breakout" or r["買進策略"] == "atr_breakout"]
 
-    atr_row = next(r for r in rows if r["賣出策略"] == "atr_breakout" or r["買進策略"] == "atr_breakout")
-    assert atr_row["賣出策略"] == "atr_breakout"
-    assert atr_row["買進策略"] == ""
-    assert atr_row["觸發價格"] == 40
-    assert atr_row["現價"] == 40
-    assert atr_row["觸發日期"] == dates[-1].strftime("%Y-%m-%d")
+    assert len(atr_rows) == 2
+    buy_row = next(r for r in atr_rows if r["買進策略"] == "atr_breakout")
+    sell_row = next(r for r in atr_rows if r["賣出策略"] == "atr_breakout")
+    assert buy_row["觸發價格"] == 60
+    assert buy_row["觸發日期"] == dates[-2].strftime("%Y-%m-%d")
+    assert sell_row["觸發價格"] == 40
+    assert sell_row["觸發日期"] == dates[-1].strftime("%Y-%m-%d")
+    assert buy_row["現價"] == sell_row["現價"] == 40
 
 
 def test_build_strategy_recommendations_omits_signals_older_than_max_age(tmp_path):
@@ -363,6 +367,31 @@ def test_build_strategy_recommendations_excludes_symbol_with_no_signal_at_all(tm
         db.add_to_watchlist(conn, "2454", name="聯發科")
 
     assert build_strategy_recommendations(config) == []
+
+
+def test_build_strategy_recommendations_skips_strategies_disabled_for_that_symbol(tmp_path):
+    # 跟test_build_paper_trades_skips_strategies_disabled_for_that_symbol同一個bug：
+    # 2026-08-08發現這裡漏了套用disabled_strategies，導致已經被排除(不會實際通知)的
+    # 策略還出現在「建議買進」列表，使用者看了會誤以為這個策略還在運作。
+    closes = [50] * 20 + [60]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+        db.set_disabled_strategies(conn, "2454", ["atr_breakout"])
+
+    rows = build_strategy_recommendations(config)
+
+    assert not any(r["買進策略"] == "atr_breakout" or r["賣出策略"] == "atr_breakout" for r in rows)
+    assert any(r["買進策略"] == "golden_cross_scaleout" for r in rows), "沒被排除的策略應該照樣出現"
 
 
 def test_build_paper_trades_lists_closed_round_trip_with_return_pct(tmp_path):

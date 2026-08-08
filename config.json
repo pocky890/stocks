@@ -19,6 +19,7 @@
     "ma_trend": { "fast": 5, "slow": 20 },
     "atr_breakout": { "donchian_period": 20, "atr_period": 14, "atr_multiplier": 2 },
     "chip_momentum": { "chip_streak_days": 3, "rsi_period": 14, "rsi_overbought": 70, "atr_period": 14, "atr_multiplier": 2.5 },
+    "trust_momentum": { "chip_window_days": 5, "chip_min_buy_days": 3, "rsi_period": 14, "rsi_overbought": 70, "atr_period": 14, "atr_multiplier": 2.5 },
     "trend_following": { "fast": 20, "slow": 60, "volume_avg_period": 20, "atr_period": 14, "atr_multiplier": 2 },
     "golden_cross_scaleout": {
       "fast": 5,
@@ -44,6 +45,17 @@
       "volume_multiplier": 1.5,
       "atr_period": 14,
       "atr_multiplier": 2
+    },
+    "long_swing": {
+      "trend_fast": 60,
+      "trend_slow": 120,
+      "atr_period": 20,
+      "atr_multiplier": 3.5,
+      "chip_lookback_days": 20,
+      "exit_confirm_days": 3,
+      "rsi_overbought": 75,
+      "reentry_ma_period": 20,
+      "slope_lookback": 5
     }
   }
 }

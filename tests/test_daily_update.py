@@ -6,6 +6,7 @@ from stocks import daily_update
 from stocks.config import Config
 from stocks.db import add_to_watchlist, connect, get_disabled_strategies, init_db
 from stocks.models import Bar
+from stocks.notifier import NOTIFIABLE_STRATEGIES
 
 
 def make_config(db_path: str) -> Config:
@@ -85,7 +86,7 @@ def test_add_symbol_falls_back_to_earlier_date_when_todays_valuation_report_not_
         return [{"symbol": "2408", "name": "南亞科", "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}]
 
     monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", fake_valuations)
-    monkeypatch.setattr(daily_update.twse_client, "fetch_institutional_flows_for_date", lambda d: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.twse_client, "fetch_margin_balances_for_date", lambda d: [])
 
     result = daily_update.add_symbol_to_watchlist(config, "2408")
@@ -99,9 +100,9 @@ def test_add_symbol_falls_back_to_earlier_date_when_todays_valuation_report_not_
 
 def test_add_symbol_immediately_computes_disabled_strategies(tmp_path, monkeypatch):
     """新增股票不用等下個月的排程，當下就該幫它跑一次排除評估——資料通常還很少(只有
-    1根K棒)，5個NOTIFIABLE_STRATEGIES都湊不出足夠的交易次數，理當全部不排除(空清單)，
-    但disabled_strategies欄位本身要真的被寫入(不是None/從沒被touch過)，證明這條路徑
-    真的執行了，不是被跳過。"""
+    1根K棒)，NOTIFIABLE_STRATEGIES都湊不出足夠的交易次數，2026-08-08使用者確認樣本
+    不足要保守排除(不是給寬限期預設保留)，理當全部排除，新股票會先整組安靜，等資料
+    累積夠了下次重跑才會開始有判斷結果。"""
     db_path = str(tmp_path / "test.db")
     init_db(db_path)
     config = make_config(db_path)
@@ -110,13 +111,13 @@ def test_add_symbol_immediately_computes_disabled_strategies(tmp_path, monkeypat
     bar = Bar(symbol="2408", ts=today, open=10, high=11, low=9, close=10, volume=100)
     monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TWSE"))
     monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", lambda d: [])
-    monkeypatch.setattr(daily_update.twse_client, "fetch_institutional_flows_for_date", lambda d: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.twse_client, "fetch_margin_balances_for_date", lambda d: [])
 
     daily_update.add_symbol_to_watchlist(config, "2408")
 
     with connect(db_path) as conn:
-        assert get_disabled_strategies(conn, "2408") == []
+        assert set(get_disabled_strategies(conn, "2408")) == NOTIFIABLE_STRATEGIES
 
 
 def test_add_symbol_tpex_backfills_three_years_via_finmind(tmp_path, monkeypatch):
@@ -150,6 +151,189 @@ def test_add_symbol_tpex_backfills_three_years_via_finmind(tmp_path, monkeypatch
     with connect(db_path) as conn:
         row = conn.execute("SELECT * FROM institutional_flows WHERE symbol = '8299'").fetchone()
     assert row["foreign_net"] == 100
+
+
+def test_add_symbol_twse_also_backfills_three_years_via_finmind(tmp_path, monkeypatch):
+    """2026-08-08修正：上市股票新增時，三大法人買賣超原本只抓最新一天(sync log用「日期」
+    為單位追蹤，新股票不會自動觸發回頭補值)，改成跟上櫃一樣直接用FinMind一次補到跟股價
+    一樣的3年範圍，不用再手動跑fetch_market_data.py --full。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    bars = [
+        Bar(symbol="2408", ts=datetime(2023, 8, 7), open=10, high=11, low=9, close=10, volume=100),
+        Bar(symbol="2408", ts=datetime(2026, 8, 7), open=12, high=13, low=11, close=12, volume=200),
+    ]
+    monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: (bars, "TWSE"))
+    monkeypatch.setattr(daily_update.twse_client, "fetch_margin_balances_for_date", lambda d: [])
+    monkeypatch.setattr(
+        daily_update.twse_client,
+        "fetch_valuations_for_date",
+        lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
+    )
+
+    captured = {}
+
+    def fake_flows(symbol, start_date, end_date):
+        captured["args"] = (symbol, start_date, end_date)
+        return [{"symbol": symbol, "date": start_date, "foreign_net": 100, "trust_net": 50, "dealer_net": 0, "total_net": 150}]
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", fake_flows)
+
+    result = daily_update.add_symbol_to_watchlist(config, "2408")
+
+    assert result["ok"] is True
+    assert captured["args"] == ("2408", "2023-08-07", "2026-08-07")
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM institutional_flows WHERE symbol = '2408'").fetchone()
+    assert row["foreign_net"] == 100
+
+
+def test_add_symbol_twse_falls_back_to_latest_day_when_finmind_fails(tmp_path, monkeypatch):
+    """FinMind額度用盡/連線失敗不該讓新增股票整個失敗——退回沒有三大法人歷史，之後每天
+    累積即可，跟原本「上市只有最新一天」的舊行為效果一樣，只是這次是意外情況而非設計。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    bar = Bar(symbol="2408", ts=datetime(2026, 8, 7), open=10, high=11, low=9, close=10, volume=100)
+    monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TWSE"))
+    monkeypatch.setattr(daily_update.twse_client, "fetch_margin_balances_for_date", lambda d: [])
+    monkeypatch.setattr(
+        daily_update.twse_client,
+        "fetch_valuations_for_date",
+        lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
+    )
+
+    def raise_error(symbol, start_date, end_date):
+        raise requests.exceptions.ConnectionError("boom")
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", raise_error)
+
+    result = daily_update.add_symbol_to_watchlist(config, "2408")
+
+    assert result["ok"] is True
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM institutional_flows WHERE symbol = '2408'").fetchone()
+    assert row is None
+
+
+def test_resolve_symbol_input_passes_through_plain_numeric_code_unchanged():
+    # 純代號不含中文字，不該去查公司名錄——不mock directory函式，如果誤觸發呼叫會直接
+    # 打真實API連線失敗，測試自然會爆炸(這正是要驗證的行為：完全不呼叫)
+    assert daily_update._resolve_symbol_input("2330") == ("2330", "")
+
+
+def test_resolve_symbol_input_resolves_chinese_name_via_exact_match(monkeypatch):
+    monkeypatch.setattr(
+        daily_update.twse_client, "fetch_company_directory", lambda: [{"symbol": "2330", "name": "台積電"}]
+    )
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [{"symbol": "8299", "name": "群聯"}])
+
+    assert daily_update._resolve_symbol_input("台積電") == ("2330", "")
+
+
+def test_resolve_symbol_input_resolves_via_unique_partial_match(monkeypatch):
+    # 使用者打的名稱不用完全一致，只要在全部候選裡唯一符合部分比對就採用
+    directory = [{"symbol": "2330", "name": "台灣積體電路"}]
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: directory)
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+
+    assert daily_update._resolve_symbol_input("台灣積體") == ("2330", "")
+
+
+def test_resolve_symbol_input_reports_ambiguous_partial_matches(monkeypatch):
+    directory = [{"symbol": "2330", "name": "台積電"}, {"symbol": "6488", "name": "台積寶"}]
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: directory)
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+
+    code, error = daily_update._resolve_symbol_input("台積")
+
+    assert code is None
+    assert "台積電" in error and "台積寶" in error
+
+
+def test_resolve_symbol_input_reports_not_found(monkeypatch):
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+
+    code, error = daily_update._resolve_symbol_input("不存在的公司名稱")
+
+    assert code is None
+    assert "不存在的公司名稱" in error
+
+
+def test_resolve_symbol_input_falls_back_to_twse_when_tpex_directory_fails(monkeypatch):
+    # TPEx的SSL已知偶爾不穩定(跟run_batch.py同樣的問題)——TPEx連線失敗不該讓整個名稱
+    # 解析當掉，只要TWSE那邊查得到一樣要能成功解析
+    monkeypatch.setattr(
+        daily_update.twse_client, "fetch_company_directory", lambda: [{"symbol": "2317", "name": "鴻海"}]
+    )
+
+    def raise_ssl_error():
+        raise requests.exceptions.SSLError("certificate verify failed")
+
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", raise_ssl_error)
+
+    assert daily_update._resolve_symbol_input("鴻海") == ("2317", "")
+
+
+def test_resolve_symbol_input_reports_clear_error_when_both_directories_fail(monkeypatch):
+    def raise_error():
+        raise requests.exceptions.ConnectionError("boom")
+
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", raise_error)
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", raise_error)
+
+    code, error = daily_update._resolve_symbol_input("鴻海")
+
+    assert code is None
+    assert "TWSE" in error or "連線" in error
+
+
+def test_add_symbol_to_watchlist_accepts_chinese_name(tmp_path, monkeypatch):
+    """整合測試：新增時打中文名稱，應該解析成代號後走跟平常打代號完全一樣的流程。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    monkeypatch.setattr(
+        daily_update.twse_client, "fetch_company_directory", lambda: [{"symbol": "2408", "name": "南亞科"}]
+    )
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+
+    bar = Bar(symbol="2408", ts=datetime(2026, 8, 7), open=10, high=11, low=9, close=10, volume=100)
+    monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TWSE"))
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.twse_client, "fetch_margin_balances_for_date", lambda d: [])
+    monkeypatch.setattr(
+        daily_update.twse_client,
+        "fetch_valuations_for_date",
+        lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
+    )
+
+    result = daily_update.add_symbol_to_watchlist(config, "南亞科")
+
+    assert result["ok"] is True
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT code, name FROM symbols WHERE code = '2408'").fetchone()
+    assert row["code"] == "2408"
+    assert row["name"] == "南亞科"
+
+
+def test_add_symbol_to_watchlist_reports_unresolvable_chinese_name(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+
+    result = daily_update.add_symbol_to_watchlist(config, "亂打的名字")
+
+    assert result["ok"] is False
+    assert "亂打的名字" in result["message"]
 
 
 def test_refresh_market_data_tpex_queries_from_day_after_last_synced_date(tmp_path, monkeypatch):

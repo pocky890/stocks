@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 from stocks.models import Direction, SignalEvent
 from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 
@@ -61,10 +63,39 @@ def test_summarize_trades_computes_win_rate_and_avg_return():
     assert summary["n"] == 2
     assert summary["win_rate"] == 50.0
     assert summary["avg_return_pct"] == 0.0
+    assert summary["total_return_pct"] == 0.0
 
 
 def test_summarize_trades_returns_none_when_no_closed_trades():
     assert summarize_trades([]) is None
+
+
+def test_summarize_trades_excludes_only_the_single_best_trade():
+    events = [
+        make_event(Direction.BUY, 100.0, datetime(2026, 1, 1)),
+        make_event(Direction.SELL, 90.0, datetime(2026, 1, 5)),  # -10%
+        make_event(Direction.BUY, 100.0, datetime(2026, 1, 10)),
+        make_event(Direction.SELL, 300.0, datetime(2026, 1, 15)),  # +200%，這筆是最大贏家
+        make_event(Direction.BUY, 100.0, datetime(2026, 1, 20)),
+        make_event(Direction.SELL, 95.0, datetime(2026, 1, 25)),  # -5%
+    ]
+    trades, _ = simulate_round_trips(events)
+
+    summary = summarize_trades(trades)
+
+    assert summary["avg_return_pct"] == pytest.approx((200 - 10 - 5) / 3)
+    # 拿掉+200%那一筆，只剩-10%跟-5%兩筆虧損，平均應該是負的
+    assert summary["avg_return_excluding_best_pct"] == pytest.approx(-7.5)
+
+
+def test_summarize_trades_avg_return_excluding_best_is_none_with_a_single_trade():
+    events = [make_event(Direction.BUY, 100.0, datetime(2026, 1, 1)), make_event(Direction.SELL, 110.0, datetime(2026, 1, 5))]
+    trades, _ = simulate_round_trips(events)
+
+    summary = summarize_trades(trades)
+
+    assert summary["n"] == 1
+    assert summary["avg_return_excluding_best_pct"] is None
 
 
 def test_simulate_scaleout_trades_pairs_one_buy_with_two_sells():

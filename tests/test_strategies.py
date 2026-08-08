@@ -10,6 +10,7 @@ from stocks.strategies.chip_momentum import ChipMomentumStrategy
 from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
+from stocks.strategies.long_swing import LongSwingStrategy
 from stocks.strategies.ma_alignment import MAAlignmentStrategy
 from stocks.strategies.ma_crossover import MACrossoverStrategy
 from stocks.strategies.ma_trend import MATrendStrategy
@@ -18,6 +19,7 @@ from stocks.strategies.price_alert import PriceAlertStrategy
 from stocks.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
 from stocks.strategies.rsi_strategy import RSIStrategy
 from stocks.strategies.trend_following import TrendFollowingStrategy
+from stocks.strategies.trust_momentum import TrustMomentumStrategy
 from stocks.strategies.volume_anomaly import VolumeAnomalyStrategy
 
 
@@ -265,6 +267,84 @@ def test_chip_momentum_enters_on_foreign_buy_streak_and_exits_on_atr_stop():
 def test_chip_momentum_returns_nothing_without_institutional_columns():
     bars = make_bars([10, 11, 12])
     assert ChipMomentumStrategy().evaluate("2330", bars, {}) == []
+
+
+def test_trust_momentum_enters_on_flexible_buy_window_and_exits_on_atr_stop():
+    # 2026-08-08主訊號條件改成「近5日內至少3天買超、且5日淨額加總為正」(不要求連續)，
+    # 用回測驗證過比原本的「連續3天」表現更好才採用。這組trust_net在idx2-4買超、idx0-1
+    # 沒買超：idx4時「近5日(idx0-4)」有3天買超(idx2,3,4)、淨額加總15>0，條件成立且是
+    # 這次才剛滿足(idx3時只有2天買超，還不到3天)，所以idx4是第一次進場的edge。
+    closes = [10, 9, 10, 9, 10, 15, 18, 20, 8]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    trust_net = [0, 0, 5, 5, 5, 0, 0, 0, 0]
+    bars = make_bars(closes, highs=highs, lows=lows)
+    bars["trust_net"] = trust_net
+
+    events = TrustMomentumStrategy().evaluate(
+        "2330",
+        bars,
+        {"chip_window_days": 5, "chip_min_buy_days": 3, "rsi_period": 2, "rsi_overbought": 70, "atr_period": 2, "atr_multiplier": 2},
+    )
+
+    assert len(events) == 2
+    buy, sell = events
+    assert buy.direction == Direction.BUY
+    assert buy.price == 10
+    assert buy.ts == bars.index[4]
+    assert sell.direction == Direction.SELL
+    assert sell.price == 8
+    assert sell.ts == bars.index[8]
+
+
+def test_trust_momentum_returns_nothing_without_institutional_columns():
+    bars = make_bars([10, 11, 12])
+    assert TrustMomentumStrategy().evaluate("2330", bars, {}) == []
+
+
+def test_long_swing_enters_on_regime_start_and_exits_on_ma_break():
+    # 前14天10/11交錯震盪，建立RSI(14)歷史(讓RSI在進場當下維持中性50，不會被超買濾網擋掉)，
+    # 不影響進出場判斷(外資淨額全0，籌碼條件不成立，regime即使中途亂跳也進不了場)。
+    # 接著5天持平、再連漲3天，3日均線在idx19第一次穿越5日均線(regime啟動)且股價站上3日均線，
+    # 同時外資最近2天(idx18-19)累計買超為正，構成首次進場的完整條件。
+    # 之後急跌，連續2天收盤跌破3日均線觸發出場(atr_multiplier設100讓ATR停損不會提前介入，
+    # 單獨驗證均線出場這條件)。
+    closes = [10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 11, 10, 10, 10, 10, 10, 11, 12, 13, 8, 7, 6]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    foreign_net = [0] * 18 + [5, 5] + [0] * 5
+    bars = make_bars(closes, highs=highs, lows=lows)
+    bars["foreign_net"] = foreign_net
+
+    events = LongSwingStrategy().evaluate(
+        "2330",
+        bars,
+        {
+            "trend_fast": 3,
+            "trend_slow": 5,
+            "atr_period": 2,
+            "atr_multiplier": 100,
+            "chip_lookback_days": 2,
+            "exit_confirm_days": 2,
+            "rsi_overbought": 70,
+        },
+    )
+
+    assert len(events) == 2
+    buy, sell = events
+    assert buy.direction == Direction.BUY
+    assert buy.price == 11
+    assert buy.ts == bars.index[19]
+    assert "首次進場" in buy.detail
+    assert sell.direction == Direction.SELL
+    assert sell.price == 7
+    assert sell.ts == bars.index[23]
+    assert "連續2天跌破3日均線" in sell.detail
+
+
+def test_long_swing_returns_nothing_without_institutional_columns():
+    bars = make_bars([10, 11, 12])
+    assert LongSwingStrategy().evaluate("2330", bars, {}) == []
 
 
 def test_trend_following_enters_on_ma_alignment_plus_volume_and_exits_on_ma_break():

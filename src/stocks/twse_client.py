@@ -114,6 +114,16 @@ def fetch_valuations_for_date(date_iso: str, retries: int = RETRIES) -> list[dic
     return rows
 
 
+def fetch_company_directory(retries: int = RETRIES) -> list[dict]:
+    """全部上市公司的代號/簡稱清單(不是逐日查詢，一次拿全部)——不需要知道代號、只知道
+    中文名稱(例如「台積電」)也能查出對應代號，給daily_update.add_symbol_to_watchlist的
+    名稱解析用。"公司簡稱"才是使用者平常講的名字(例如「台積電」)，"公司名稱"是完整法定
+    登記名稱(例如「台灣積體電路製造股份有限公司」)，兩者不一樣，用簡稱才對得上symbols
+    表裡existing的name欄位慣例。"""
+    payload = _get_json("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", retries=retries)
+    return [{"symbol": row["公司代號"], "name": row["公司簡稱"].strip()} for row in payload]
+
+
 def fetch_ex_dividend_schedule(retries: int = RETRIES) -> list[dict]:
     """上市股票除權息預告表：這是往前看的公告清單（不是逐日查詢），一次呼叫拿到所有排定中的除權息。"""
     payload = _get_json("https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL", retries=retries)
