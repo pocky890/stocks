@@ -272,8 +272,8 @@ def test_chip_momentum_returns_nothing_without_institutional_columns():
 def test_trust_momentum_enters_on_flexible_buy_window_and_exits_on_atr_stop():
     # 2026-08-08主訊號條件改成「近5日內至少3天買超、且5日淨額加總為正」(不要求連續)，
     # 用回測驗證過比原本的「連續3天」表現更好才採用。這組trust_net在idx2-4買超、idx0-1
-    # 沒買超：idx4時「近5日(idx0-4)」有3天買超(idx2,3,4)、淨額加總15>0，條件成立且是
-    # 這次才剛滿足(idx3時只有2天買超，還不到3天)，所以idx4是第一次進場的edge。
+    # 沒買超：idx4時「近5日(idx0-4)」有3天買超(idx2,3,4)、淨額加總15>0，條件第一次成立
+    # (idx3時只有2天買超，還不到3天)，所以idx4是第一次進場。
     closes = [10, 9, 10, 9, 10, 15, 18, 20, 8]
     highs = [c + 1 for c in closes]
     lows = [c - 1 for c in closes]
@@ -300,6 +300,35 @@ def test_trust_momentum_enters_on_flexible_buy_window_and_exits_on_atr_stop():
 def test_trust_momentum_returns_nothing_without_institutional_columns():
     bars = make_bars([10, 11, 12])
     assert TrustMomentumStrategy().evaluate("2330", bars, {}) == []
+
+
+def test_trust_momentum_reenters_immediately_after_stop_out_while_streak_still_active():
+    # 2026-08-08改成level-triggered：trust_buy_streak全程維持True(trust_net全部是5，
+    # 買超動能一直沒斷過)，進場後急漲又急跌觸發ATR停損出場，但停損那天(idx5)之後的
+    # 隔天(idx6)訊號條件依然為True，應該要能立刻重新進場，不用等條件重新False→True
+    # 轉一輪——這正是修正前edge-triggered版本會卡住進不了場的情境(long_swing一開始也
+    # 踩過同一種bug)。
+    closes = [10, 9, 10, 11, 20, 6, 9, 15, 20, 9]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    trust_net = [5] * len(closes)
+    bars = make_bars(closes, highs=highs, lows=lows)
+    bars["trust_net"] = trust_net
+
+    events = TrustMomentumStrategy().evaluate(
+        "2330",
+        bars,
+        {"chip_window_days": 3, "chip_min_buy_days": 2, "rsi_period": 2, "rsi_overbought": 90, "atr_period": 2, "atr_multiplier": 2},
+    )
+
+    assert len(events) == 3
+    first_buy, sell, second_buy = events
+    assert first_buy.direction == Direction.BUY
+    assert first_buy.ts == bars.index[2]
+    assert sell.direction == Direction.SELL
+    assert sell.ts == bars.index[5]
+    assert second_buy.direction == Direction.BUY
+    assert second_buy.ts == bars.index[6], "停損隔天訊號仍為True，應該立刻重新進場，不用等條件重新觸發一次edge"
 
 
 def test_long_swing_enters_on_regime_start_and_exits_on_ma_break():
