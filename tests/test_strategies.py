@@ -3,6 +3,7 @@ import math
 import pandas as pd
 
 from stocks.models import Direction
+from stocks.strategies import STRATEGY_LABELS, STRATEGY_REGISTRY, strategy_label
 from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bollinger import BollingerStrategy
 from stocks.strategies.breakout import BreakoutStrategy
@@ -592,3 +593,15 @@ def test_golden_cross_scaleout_rsi_filter_blocks_entry_when_overbought():
     assert len(buys) == 1, "把超買門檻拉高到RSI永遠過關，同一筆資料應該能補上第5分進場"
     assert buys[0].price == 10.5
     assert "RSI未超買" in buys[0].detail
+
+
+def test_every_registered_strategy_has_a_chinese_label():
+    # notifier.py的Telegram通知跟dashboard都靠STRATEGY_LABELS把英文鍵值轉成中文，
+    # 漏掉一個新策略沒補標籤，畫面/通知就會直接顯示英文鍵值(strategy_label的fallback)
+    missing = set(STRATEGY_REGISTRY) - set(STRATEGY_LABELS)
+    assert missing == set(), f"這些策略還沒加中文標籤：{missing}"
+
+
+def test_strategy_label_strips_parenthetical_explanation():
+    assert strategy_label("atr_breakout") == "ATR動態通道突破"
+    assert strategy_label("unknown_strategy") == "unknown_strategy", "沒有標籤的鍵值原樣顯示，不該爆錯"

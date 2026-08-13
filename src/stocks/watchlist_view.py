@@ -129,23 +129,45 @@ def _prev_close(bars_daily_df: pd.DataFrame):
     return before_today["close"].iloc[-1]
 
 
+INTRADAY_FRESH_WITHIN = pd.Timedelta(minutes=15)  # bars_5min超過這個時間沒有新資料就視為
+# 停止更新(run_live.py斷線/沒開)，不能再信任它是「現價」；15分鐘=3根5分K的寬容度，避開
+# 單次盤中小斷線就整欄顯示壞掉。
+
+
+def _current_price(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
+    """現價的單一計算依據，「漲跌」跟「目前價位」/均線比較/RSI/MACD/布林通道都要用
+    同一個數字算，不能各自算出不同的現價看起來自相矛盾。
+
+    2026-08-13發現：不能只看「bars_daily有沒有今天這一列」就直接信任它——daily_update.py
+    的每日檢查(check_and_update)一天只跑一次，但這一次可能發生在盤中(使用者當天第一次
+    打開dashboard的那個時間點，不保證是收盤後)，抓到的yfinance「今天」報價本身就是盤中
+    某一刻的即時快照，之後直到當天19:00那次補檢查前都不會再更新，等於整天凍結在那個
+    時間點——跟2026-08-07那次bars_5min(run_live.py斷線)凍結是同一種問題的另一面。
+    兩個資料源都可能是「某個時間點的快照」，差別在於bars_5min的ts本身就是真實時間點，
+    可以直接跟現在比對新鮮度；bars_daily的「今天」列沒有這種時間戳記可比，所以規則是：
+    bars_5min在INTRADAY_FRESH_WITHIN內有新資料就優先信任它(真的還在即時累積)；否則才退回
+    bars_daily的今天列(假設是收盤後補上的，比凍結的盤中快照可靠)；兩者都沒有才用日線
+    最後一筆(通常是昨天)。"""
+    now = pd.Timestamp.now()
+    if not today_bars_df.empty and (now - today_bars_df.index[-1]) <= INTRADAY_FRESH_WITHIN:
+        return today_bars_df["close"].iloc[-1]
+
+    today = now.normalize()
+    today_daily_row = bars_daily_df[bars_daily_df.index >= today]
+    if not today_daily_row.empty:
+        return today_daily_row["close"].iloc[-1]
+    if not today_bars_df.empty:
+        return today_bars_df["close"].iloc[-1]
+    return bars_daily_df["close"].iloc[-1]
+
+
 def compute_change(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
-    """回傳(change, change_pct)：現價比較昨收的漲跌點數/百分比。優先用bars_daily當天那筆
-    (每天固定更新，最後、最完整的數字)；只有今天的日K還沒進來時才退回today_bars_df
-    (run_live.py即時累積的盤中5分K)——這張表只在run_live.py確實掛著的時候才會有資料，
-    一旦程式停掉，裡面最後一筆會凍結在停掉的那個時間點，不能無條件當作「現價」。"""
+    """回傳(change, change_pct)：現價(見_current_price)比較昨收的漲跌點數/百分比。"""
     prev_close = _prev_close(bars_daily_df)
     if prev_close is None:
         return None, None
 
-    today = pd.Timestamp.now().normalize()
-    today_daily_row = bars_daily_df[bars_daily_df.index >= today]
-    if not today_daily_row.empty:
-        current = today_daily_row["close"].iloc[-1]
-    elif not today_bars_df.empty:
-        current = today_bars_df["close"].iloc[-1]
-    else:
-        current = bars_daily_df["close"].iloc[-1]
+    current = _current_price(bars_daily_df, today_bars_df)
     change = current - prev_close
     change_pct = (change / prev_close * 100) if prev_close else None
     return change, change_pct
@@ -235,7 +257,11 @@ def build_overview_rows(config: Config) -> list[dict]:
             change, change_pct = compute_change(bars, today_bars)
             prev_close = _prev_close(bars)
 
-            close = bars["close"]
+            # bars["close"]最後一筆可能是daily_update盤中抓到、之後整天凍結的快照(見
+            # _current_price docstring)，蓋成跟「漲跌」同一套算法算出來的現價，RSI/MACD/
+            # 布林通道/均線比較才會跟「漲跌」對得起來，不會顯示自相矛盾的數字。
+            close = bars["close"].copy()
+            close.iloc[-1] = _current_price(bars, today_bars)
             latest_close = close.iloc[-1]
             ma_series = {p: sma(close, p) for p in MA_PERIODS}
 

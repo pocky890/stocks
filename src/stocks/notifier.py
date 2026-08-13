@@ -6,6 +6,7 @@ import pandas as pd
 from stocks.config import Config
 from stocks.indicators import sma
 from stocks.models import Direction, SignalEvent
+from stocks.strategies import strategy_label
 from stocks.telegram_client import send_message
 
 DIRECTION_LABEL = {Direction.BUY: "買", Direction.SELL: "賣"}
@@ -95,7 +96,7 @@ def notify_symbol_signals(
         "",
         f"{emoji} 觸發訊號（{len(events)}項）：",
     ]
-    lines += [f"[V] {e.detail or e.strategy}" for e in buy_events + sell_events]
+    lines += [f"[V] {strategy_label(e.strategy)}：{e.detail or e.strategy}" for e in buy_events + sell_events]
 
     trend = _trend_text(daily_bars["close"]) if not daily_bars.empty else ""
     if trend:
@@ -143,7 +144,7 @@ def notify_batch_summary(config: Config, events: list[SignalEvent], watchlist: s
         if i >= MAX_BATCH_SYMBOLS_LISTED:
             lines.append(f"...還有 {len(by_symbol) - MAX_BATCH_SYMBOLS_LISTED} 檔，詳見dashboard")
             break
-        details = "、".join(f"{e.detail} @{e.price:.1f}" for e in symbol_events)
+        details = "、".join(f"{strategy_label(e.strategy)}：{e.detail} @{e.price:.1f}" for e in symbol_events)
         lines.append(f"  {symbol}: {details}")
 
     return send_message(config.telegram_bot_token, config.telegram_chat_id, "\n".join(lines))

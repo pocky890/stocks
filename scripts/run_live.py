@@ -1,8 +1,9 @@
-"""盤中即時5分K訊號監控主迴圈。手動啟動、手動Ctrl+C停止（沒有排程）。
-連線走Shioaji模擬模式（報價/K棒是真實市場資料，只有下單/成交是模擬帳本，
-這個系統本來就不下單）。"""
+"""盤中即時5分K訊號監控主迴圈。平日08:55由Windows排程任務(TWStocks-RunLive)自動啟動，
+也可以手動執行/Ctrl+C停止。連線走Shioaji模擬模式（報價/K棒是真實市場資料，只有下單/
+成交是模擬帳本，這個系統本來就不下單）。"""
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -145,13 +146,20 @@ def main():
         # 檢查全觀察清單一次(不看new_bars，即使某檔今天這一格沒有成交也照樣檢查)，不受
         # 個股tick頻率影響。
         if bucket_end.strftime("%H:%M") == DAILY_CONCEPT_CHECK_HHMM:
+            now = datetime.now()
             for symbol in watchlist:
                 with connect(config.db_path) as conn:
                     daily_bars_with_today = build_daily_bars_with_today(conn, symbol)
                     skip = INTRADAY_STRATEGIES | set(get_disabled_strategies(conn, symbol))
-                    events = evaluate_all(
+                    raw_events = evaluate_all(
                         symbol, daily_bars_with_today, config.strategy_params, tier=Tier.REALTIME, skip_strategies=skip
                     )
+                    # 2026-08-13發現：daily_bars_with_today是對整段歷史重新跑一次edge-trigger，
+                    # 一旦「今天」這筆日K的加入讓ATR/唐奇安通道之類的滾動窗口跟昨天算的不一樣，
+                    # 會回頭冒出幾筆日期是前幾天、但資料庫裡還沒有的「新」事件(不是真的今天發生)
+                    # ——只留日期真的是今天的，且時間戳記換成現在真正檢查的時間(不是bars index
+                    # 構造出來的午夜0點)，通知上才會顯示合理的觸發時間。
+                    events = [replace(e, ts=now) for e in raw_events if e.ts.date() == now.date()]
                     new_events = insert_signal_events(conn, events)
                 if new_events:
                     with connect(config.db_path) as conn:

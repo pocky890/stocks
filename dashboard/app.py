@@ -32,7 +32,7 @@ from stocks.db import (
     set_setting,
 )
 from stocks.shioaji_client import ShioajiClient
-from stocks.strategies import STRATEGY_REGISTRY
+from stocks.strategies import STRATEGY_LABELS, STRATEGY_REGISTRY, strategy_label
 from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 from stocks.watchlist_view import build_overview_rows, build_paper_trades, build_strategy_recommendations
 
@@ -65,35 +65,6 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
-
-STRATEGY_LABELS = {
-    "ma_crossover": "均線交叉 (5/20日)",
-    "rsi": "RSI超買超賣",
-    "macd": "MACD交叉",
-    "bollinger": "布林通道",
-    "volume_anomaly": "成交量異常",
-    "price_alert": "到價提醒",
-    "ma_alignment": "多空排列 (5/10/20日線)",
-    "kd": "KD低檔黃金交叉/高檔死亡交叉",
-    "institutional_streak": "三大法人連續買賣超",
-    "ma_trend": "站上5/20日均線且20日線上揚",
-    "atr_breakout": "ATR動態通道突破(創20日新高進場，2倍ATR移動停損出場)",
-    "chip_momentum": "外資買超動能(連3日買超+未超買進場，2.5倍ATR移動停損出場)",
-    "trust_momentum": "投信買超動能(近5日≥3天買超且淨額為正+未超買進場，2.5倍ATR移動停損出場)",
-    "trend_following": "趨勢追蹤(20>60日均線+站上20日線+爆量進場，跌破20日線/均線反轉出場)",
-    "breakout": "Breakout突破(創20日新高+爆量進場，跌破10日最低出場)",
-    "golden_cross_scaleout": "均線黃金交叉分批出場(打分制進場≥5分，跌破5日線+量能先賣一半，跌破10日線或死亡交叉賣剩餘)",
-    "long_swing": "中長波段(60>120日均線多頭+法人買超進場，站回20日線且60日線上揚可重新進場，跌破均線3天或3.5倍ATR停損出場)",
-}
-# 進出場邏輯完整、可以直接依據行動的稱為「策略」；其他都只是單一指標的訊號，可信度較低，
-# 稱為「指標訊號」——跟notifier.NOTIFIABLE_STRATEGIES(只有這幾個會推播Telegram)是同一個
-# 區分，直接沿用避免兩處各自維護一份清單。
-
-
-def strategy_label(name: str) -> str:
-    """策略/指標的英文鍵值(例如"chip_momentum")只在程式內部跟資料庫用，畫面上一律要顯示
-    中文——STRATEGY_LABELS的中文說明常常後面還帶一段括號解釋參數，這裡只取名稱本體。"""
-    return STRATEGY_LABELS.get(name, name).split("(")[0]
 
 config = load_config()
 init_db(config.db_path)  # 確保schema是最新的(例如app_settings表)，下面馬上要用get_setting()
@@ -165,6 +136,85 @@ def _fetch_today_intraday(_config, symbols: tuple):
         client.disconnect()
 
 
+@st.fragment(run_every="30s")
+def render_watchlist_table(config, symbols: tuple):
+    """總覽表格獨立成fragment，每30秒自己重新跑一次(不影響頁面其他部分)，這樣「目前
+    價位」/「漲跌」/「今日走勢」才會自動反映最新資料，使用者不用手動整頁重新整理——
+    這幾個欄位背後看的是bars_5min(run_live.py即時累積)跟Shioaji現場連線，資料本身
+    是活的，只差頁面沒有自動重新渲染。▲▼/移除按鈕維持原本st.rerun()預設的整頁重新
+    執行(fragment內呼叫st.rerun()預設scope="app"，不用特別處理)。"""
+    overview_rows = build_overview_rows(config)
+    try:
+        intraday_bars = _fetch_today_intraday(config, symbols) if symbols else {}
+    except Exception as exc:
+        intraday_bars = {}
+        st.warning(f"⚠️ 抓即時盤中資料失敗，今日走勢欄位暫時顯示「尚無盤中資料」：{exc}")
+
+    headers = ["", "", "代號", "名稱", "今日走勢", "漲跌", "目前價位", "5日", "10日", "月線", "季線", "RSI", "MACD", "布林通道", "成交量", "KD", "三大法人", ""]
+    widths = [0.35, 0.35, 0.8, 0.9, 1.3, 1.2, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 1.3, 1.6, 0.9]
+
+    header_cols = st.columns(widths, vertical_alignment="center", gap="xxsmall")
+    for col, label in zip(header_cols, headers):
+        if label:
+            col.markdown(f"**{label}**")
+
+    with st.container(key="watchlist_rows"):
+        for i, row in enumerate(overview_rows):
+            cols = st.columns(widths, vertical_alignment="center", gap="xxsmall")
+            code = row["代號"]
+
+            if cols[0].button("▲", key=f"up_{code}", disabled=(i == 0)):
+                with connect(config.db_path) as conn:
+                    move_watchlist_symbol(conn, code, direction=-1)
+                st.rerun()
+            if cols[1].button("▼", key=f"down_{code}", disabled=(i == len(overview_rows) - 1)):
+                with connect(config.db_path) as conn:
+                    move_watchlist_symbol(conn, code, direction=1)
+                st.rerun()
+
+            cols[2].write(row["代號"])
+            cols[3].write(row["名稱"])
+
+            today_bars_raw = intraday_bars.get(code, [])
+            prev_close = row["昨收"]
+            if len(today_bars_raw) >= 2 and prev_close is not None:
+                # 分時線至少要2個點才能畫出一段線，只有1筆的話畫不出東西
+                today_bars = bars_list_to_dataframe(today_bars_raw)
+                cols[4].plotly_chart(
+                    intraday_line_chart(today_bars, prev_close),
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                )
+            else:
+                cols[4].write("尚無盤中資料")
+
+            cols[5].markdown(row["漲跌"], unsafe_allow_html=True)
+            cols[6].markdown(row["目前價位"], unsafe_allow_html=True)
+
+            for col, field in zip(
+                cols[7:15],
+                ["5日", "10日", "月線", "季線", "RSI", "MACD", "布林通道", "成交量"],
+            ):
+                col.markdown(row[field], unsafe_allow_html=True)
+
+            kd_df = row["KD"].dropna()
+            if len(kd_df) >= 2:
+                cols[15].plotly_chart(
+                    kd_chart(kd_df),
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                )
+            else:
+                cols[15].write("—")
+
+            cols[16].markdown(row["三大法人"].replace("\n", "<br>"), unsafe_allow_html=True)
+
+            if cols[17].button("移除", key=f"remove_{code}", use_container_width=True):
+                with connect(config.db_path) as conn:
+                    remove_from_watchlist(conn, code)
+                st.rerun()
+
+
 # st.session_state在瀏覽器重新整理時會重置(每次整頁重新載入=新的session)，靠它做「只檢查
 # 一次」完全沒用，實測每次F5都還是會重打一次API。改成把「上次檢查時間」存進DB(跨session/
 # 跨重新整理都留著)，讓should_check_for_updates()決定今天還要不要再檢查一次。
@@ -225,78 +275,10 @@ with tab_watchlist:
         )
         st.caption(f"📊 策略（會推播Telegram）：{'、'.join(STRATEGY_LABELS[k] for k in strategy_keys)}")
         st.caption(f"📈 指標訊號（只記錄不推播）：{'、'.join(STRATEGY_LABELS[k] for k in indicator_keys)}")
-        st.markdown("#### 總覽（價位/均線/指標，暫用最新收盤價，之後接即時報價會自動換資料源；▲▼可調整順序）")
-
-        overview_rows = build_overview_rows(config)
-        try:
-            intraday_bars = _fetch_today_intraday(config, tuple(symbols)) if symbols else {}
-        except Exception as exc:
-            intraday_bars = {}
-            st.warning(f"⚠️ 抓即時盤中資料失敗，今日走勢欄位暫時顯示「尚無盤中資料」：{exc}")
-
-        headers = ["", "", "代號", "名稱", "今日走勢", "漲跌", "目前價位", "5日", "10日", "月線", "季線", "RSI", "MACD", "布林通道", "成交量", "KD", "三大法人", ""]
-        widths = [0.35, 0.35, 0.8, 0.9, 1.3, 1.2, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 1.3, 1.6, 0.9]
-
-        header_cols = st.columns(widths, vertical_alignment="center", gap="xxsmall")
-        for col, label in zip(header_cols, headers):
-            if label:
-                col.markdown(f"**{label}**")
-
-        with st.container(key="watchlist_rows"):
-            for i, row in enumerate(overview_rows):
-                cols = st.columns(widths, vertical_alignment="center", gap="xxsmall")
-                code = row["代號"]
-
-                if cols[0].button("▲", key=f"up_{code}", disabled=(i == 0)):
-                    with connect(config.db_path) as conn:
-                        move_watchlist_symbol(conn, code, direction=-1)
-                    st.rerun()
-                if cols[1].button("▼", key=f"down_{code}", disabled=(i == len(overview_rows) - 1)):
-                    with connect(config.db_path) as conn:
-                        move_watchlist_symbol(conn, code, direction=1)
-                    st.rerun()
-
-                cols[2].write(row["代號"])
-                cols[3].write(row["名稱"])
-
-                today_bars_raw = intraday_bars.get(code, [])
-                prev_close = row["昨收"]
-                if len(today_bars_raw) >= 2 and prev_close is not None:
-                    # 分時線至少要2個點才能畫出一段線，只有1筆的話畫不出東西
-                    today_bars = bars_list_to_dataframe(today_bars_raw)
-                    cols[4].plotly_chart(
-                        intraday_line_chart(today_bars, prev_close),
-                        use_container_width=True,
-                        config={"displayModeBar": False},
-                    )
-                else:
-                    cols[4].write("尚無盤中資料")
-
-                cols[5].markdown(row["漲跌"], unsafe_allow_html=True)
-                cols[6].markdown(row["目前價位"], unsafe_allow_html=True)
-
-                for col, field in zip(
-                    cols[7:15],
-                    ["5日", "10日", "月線", "季線", "RSI", "MACD", "布林通道", "成交量"],
-                ):
-                    col.markdown(row[field], unsafe_allow_html=True)
-
-                kd_df = row["KD"].dropna()
-                if len(kd_df) >= 2:
-                    cols[15].plotly_chart(
-                        kd_chart(kd_df),
-                        use_container_width=True,
-                        config={"displayModeBar": False},
-                    )
-                else:
-                    cols[15].write("—")
-
-                cols[16].markdown(row["三大法人"].replace("\n", "<br>"), unsafe_allow_html=True)
-
-                if cols[17].button("移除", key=f"remove_{code}", use_container_width=True):
-                    with connect(config.db_path) as conn:
-                        remove_from_watchlist(conn, code)
-                    st.rerun()
+        st.markdown(
+            "#### 總覽（價位/均線/指標，暫用最新收盤價，之後接即時報價會自動換資料源；▲▼可調整順序，每30秒自動更新）"
+        )
+        render_watchlist_table(config, tuple(symbols))
 
         st.markdown("#### 買進/賣出策略訊號（一列一個策略，標示觸發當天的價格/日期，現價供對照；預設依觸發日期新到舊排序）")
         filter_col1, filter_col2, _filter_spacer = st.columns([1, 2, 3])

@@ -171,6 +171,43 @@ def test_build_overview_rows_end_to_end(tmp_path):
     assert len(row["KD"]) <= 20, "KD只給小圖看最近的走勢跟交叉，不用整段歷史"
 
 
+def test_build_overview_rows_uses_fresh_intraday_price_consistently_with_change(tmp_path):
+    # 2026-08-13發現的bug：bars_daily的「今天」列是daily_update盤中抓到、之後整天凍結
+    # 的快照(2210)，但bars_5min還在即時更新(2260，4分鐘前)——「漲跌」欄位當時已經改用
+    # 新鮮的bars_5min算對了，但「目前價位」/均線比較還是直接讀bars["close"]最後一筆
+    # (凍結的2210)，兩欄數字對不起來。這裡驗證兩者現在用同一個現價。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    today = pd.Timestamp.now().normalize()
+    closes = [100 + i * 0.5 for i in range(20)] + [2025.0]  # 昨天收盤2025
+    dates = pd.date_range(end=today - pd.Timedelta(days=1), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="8299", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    frozen_snapshot = Bar(
+        symbol="8299", ts=today.to_pydatetime(), open=2260, high=2260, low=2175, close=2210, volume=100
+    )
+    fresh_tick = Bar(
+        symbol="8299",
+        ts=(pd.Timestamp.now() - pd.Timedelta(minutes=4)).to_pydatetime(),
+        open=2260, high=2265, low=2255, close=2260, volume=50,
+    )
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars + [frozen_snapshot])
+        db.insert_bars_5min(conn, [fresh_tick])
+        db.add_to_watchlist(conn, "8299", name="群聯")
+
+    row = build_overview_rows(config)[0]
+
+    assert "2260" in row["目前價位"], "該用還在更新的bars_5min現價(2260)，不是凍結的daily快照(2210)"
+    assert "+235.0" in row["漲跌"], "跟「目前價位」用同一個現價算出來的漲跌，兩者不該對不起來"
+    assert row["昨收"] == pytest.approx(2025.0)
+
+
 def test_build_overview_rows_handles_symbol_with_no_bars(tmp_path):
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
@@ -204,9 +241,9 @@ def test_compute_change_prefers_todays_intraday_close():
     today = pd.Timestamp.now().normalize()
     yesterday = today - pd.Timedelta(days=1)
     bars_daily = pd.DataFrame({"close": [100.0]}, index=[yesterday])
-    today_bars = pd.DataFrame({"close": [110.0]}, index=[today + pd.Timedelta(hours=10)])
+    fresh_today_bars = pd.DataFrame({"close": [110.0]}, index=[pd.Timestamp.now() - pd.Timedelta(minutes=2)])
 
-    change, change_pct = compute_change(bars_daily, today_bars)
+    change, change_pct = compute_change(bars_daily, fresh_today_bars)
 
     assert change == pytest.approx(10.0)
     assert change_pct == pytest.approx(10.0)
@@ -214,17 +251,34 @@ def test_compute_change_prefers_todays_intraday_close():
 
 def test_compute_change_prefers_daily_close_over_stale_intraday_when_both_have_today():
     # bars_daily已經有今天這筆(daily_update跑過，抓到收盤或最新報價)，但bars_5min是
-    # run_live.py早上開一段時間又停掉留下的舊資料——這時該信bars_daily，不能讓已經
-    # 停更新的盤中5分K蓋掉更完整/更新的日線收盤(這就是實際發生過的8299價格對不上的bug)
+    # run_live.py早上開一段時間又停掉留下的舊資料(超過15分鐘沒更新)——這時該信bars_daily，
+    # 不能讓已經停更新的盤中5分K蓋掉更完整/更新的日線收盤(這就是2026-08-07那次8299
+    # 價格對不上的bug)
     today = pd.Timestamp.now().normalize()
     yesterday = today - pd.Timedelta(days=1)
     bars_daily = pd.DataFrame({"close": [2025.0, 2020.0]}, index=[yesterday, today])
-    stale_today_bars = pd.DataFrame({"close": [2040.0]}, index=[today + pd.Timedelta(hours=1, minutes=15)])
+    stale_today_bars = pd.DataFrame({"close": [2040.0]}, index=[pd.Timestamp.now() - pd.Timedelta(hours=2)])
 
     change, change_pct = compute_change(bars_daily, stale_today_bars)
 
     assert change == pytest.approx(-5.0)
     assert change_pct == pytest.approx(-5.0 / 2025 * 100)
+
+
+def test_compute_change_prefers_fresh_intraday_over_stale_daily_snapshot_when_both_have_today():
+    # 反過來的情境(2026-08-13發現)：bars_daily的「今天」列是daily_update盤中(例如上午)
+    # 剛好跑過一次check_and_update時抓到的即時快照，之後整天不會再更新、凍結在那個
+    # 時間點；但bars_5min是run_live.py持續累積的，現在還在更新(15分鐘內有新資料)——
+    # 這時該信還在跳動的bars_5min，不能讓早上凍結的bars_daily快照蓋掉真正的現價
+    today = pd.Timestamp.now().normalize()
+    yesterday = today - pd.Timedelta(days=1)
+    bars_daily = pd.DataFrame({"close": [2025.0, 2210.0]}, index=[yesterday, today])  # 上午的凍結快照
+    fresh_today_bars = pd.DataFrame({"close": [2260.0]}, index=[pd.Timestamp.now() - pd.Timedelta(minutes=4)])
+
+    change, change_pct = compute_change(bars_daily, fresh_today_bars)
+
+    assert change == pytest.approx(235.0)
+    assert change_pct == pytest.approx(235.0 / 2025 * 100)
 
 
 def test_compute_change_returns_none_without_a_prior_trading_day():

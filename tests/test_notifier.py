@@ -71,7 +71,7 @@ def test_notify_symbol_signals_sends_for_a_single_notifiable_trigger(captured_ca
 
     assert len(captured_calls) == 1
     text = captured_calls[0]["data"]["text"]
-    assert "[V] 創20日新高突破，ATR停損 580.00" in text
+    assert "[V] ATR動態通道突破：創20日新高突破，ATR停損 580.00" in text, "要標明是哪個策略觸發的，跟dashboard上的策略名稱一致"
     assert "2330 台積電" in text
     assert "$600.0" in text
     assert "🟢" in text
