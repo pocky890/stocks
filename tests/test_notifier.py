@@ -6,7 +6,7 @@ import pytest
 from stocks import telegram_client
 from stocks.config import Config
 from stocks.models import Direction, SignalEvent, Tier
-from stocks.notifier import notify_batch_summary, notify_connectivity, notify_symbol_signals
+from stocks.notifier import notify_batch_summary, notify_connectivity, notify_reminder, notify_symbol_signals
 
 EMPTY_BARS = pd.DataFrame(columns=["close"])
 
@@ -146,6 +146,59 @@ def test_notify_symbol_signals_omits_trend_line_when_daily_bars_missing(captured
 
     text = captured_calls[0]["data"]["text"]
     assert "趨勢" not in text, "沒有日線資料(例如新股票剛加進來)就不該印出趨勢那一行"
+
+
+def test_notify_reminder_describes_sell_signal_still_below_trigger(captured_calls):
+    # 2026-08-14使用者要求：9:30跌破ATR停損發過通知，13:20如果現價仍在觸發價之下(還沒
+    # 回升)，代表狀況沒解除，要再提醒一次。使用者後來反饋看不出來是買還是賣，標題跟每
+    # 一行都要清楚標示方向。
+    config = make_config()
+    row = {"strategy": "atr_breakout", "direction": "sell", "price": 100.0, "ts": "2026-08-14T09:30:00"}
+
+    notify_reminder(config, "2330", "台積電", [row], current_price=95.0)
+
+    assert len(captured_calls) == 1
+    text = captured_calls[0]["data"]["text"]
+    assert "賣出訊號還沒解除" in text, "標題要講清楚是買進還是賣出，不能只靠內文的動詞"
+    assert "🔴賣" in text
+    assert "還沒回升" in text
+    assert "09:30" in text
+    assert "ATR動態通道突破" in text, "要用中文策略名稱，跟其他通知一致"
+    assert "$95.0" in text
+
+
+def test_notify_reminder_describes_buy_signal_still_above_trigger(captured_calls):
+    config = make_config()
+    row = {"strategy": "breakout", "direction": "buy", "price": 100.0, "ts": "2026-08-14T09:30:00"}
+
+    notify_reminder(config, "2330", "台積電", [row], current_price=105.0)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "買進訊號還沒解除" in text
+    assert "🟢買" in text
+    assert "還沒跌破" in text
+
+
+def test_notify_reminder_labels_title_when_buy_and_sell_both_still_pending(captured_calls):
+    # 同一檔股票今天不同策略各自留了一個還沒解除的買進/賣出訊號，標題要講清楚兩種都有，
+    # 不能只顯示其中一種方向
+    config = make_config()
+    rows = [
+        {"strategy": "breakout", "direction": "buy", "price": 100.0, "ts": "2026-08-14T09:30:00"},
+        {"strategy": "atr_breakout", "direction": "sell", "price": 200.0, "ts": "2026-08-14T10:00:00"},
+    ]
+
+    notify_reminder(config, "2330", "台積電", rows, current_price=105.0)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "買進+賣出訊號都還沒解除" in text
+    assert "🟢買" in text and "🔴賣" in text
+
+
+def test_notify_reminder_sends_nothing_for_empty_rows(captured_calls):
+    config = make_config()
+    notify_reminder(config, "2330", "台積電", [], current_price=100.0)
+    assert len(captured_calls) == 0
 
 
 def test_notify_connectivity_lost_and_restored(captured_calls):

@@ -350,6 +350,36 @@ def test_build_strategy_recommendations_lists_one_row_per_open_buy_signal(tmp_pa
         assert row["觸發日期"] == dates[-1].strftime("%Y-%m-%d")
 
 
+def test_build_strategy_recommendations_uses_fresh_intraday_price_not_frozen_daily_snapshot(tmp_path):
+    # 2026-08-13使用者發現：這張表的「現價」一直是直接讀bars_daily最後一筆，跟總覽表格
+    # 修好的_current_price邏輯不一致——如果daily_update盤中抓到快照凍結在bars_daily，
+    # 這裡也該像總覽表格一樣改用還在更新的bars_5min現價
+    closes = [50] * 20 + [60]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    fresh_tick = Bar(
+        symbol="2454",
+        ts=(pd.Timestamp.now() - pd.Timedelta(minutes=3)).to_pydatetime(),
+        open=70, high=75, low=65, close=70, volume=50,
+    )
+
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.insert_bars_5min(conn, [fresh_tick])
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+
+    rows = build_strategy_recommendations(config)
+
+    assert all(r["現價"] == 70 for r in rows), "該用還在更新的bars_5min現價(70)，不是bars_daily最後一筆(60)"
+
+
 def test_build_strategy_recommendations_keeps_both_buy_and_sell_rows_for_a_closed_position(tmp_path):
     # 先創新高進場，接著大跌觸發ATR停損賣出——2026-08-08使用者指出：買進事件不該被之後
     # 的賣出事件蓋掉，兩個都在100天內就該各自留一列，不然會跟「模擬交易紀錄」對不起來

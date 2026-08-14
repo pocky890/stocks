@@ -123,11 +123,12 @@ def _compute_track_records(_config, symbols: tuple):
     return rows
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=30, show_spinner=False)
 def _fetch_today_intraday(_config, symbols: tuple):
     """現場連線Shioaji抓觀察清單今天的分K，供「今日走勢」小圖用，不用等run_live.py
-    整天掛著累積。快取60秒——▲▼/移除按鈕每次點擊都會讓整頁重新執行，沒有快取的話
-    每次點擊都要重新登入Shioaji。"""
+    整天掛著累積。快取30秒，跟render_watchlist_table的run_every="30s"對齊，走勢圖才會
+    跟目前價位同一個節奏更新；▲▼/移除按鈕點擊時如果快取還沒過期也會直接沿用，不用
+    每次都重新登入Shioaji。"""
     client = ShioajiClient(_config)
     client.connect()
     try:
@@ -215,6 +216,46 @@ def render_watchlist_table(config, symbols: tuple):
                 st.rerun()
 
 
+@st.fragment(run_every="30s")
+def render_strategy_recommendations(config, watchlist: list[dict]):
+    """跟render_watchlist_table一樣獨立成fragment每30秒自動更新——這張表的「現價」
+    之前沒有跟著自動更新，因為build_strategy_recommendations是在fragment外面呼叫的，
+    只有整頁重新執行(按鈕點擊/手動重新整理)才會重算，2026-08-13使用者發現這裡的現價
+    沒有同步。"""
+    filter_col1, filter_col2, _filter_spacer = st.columns([1, 2, 3])
+    today_only = filter_col1.checkbox("只顯示今天觸發", key="buy_recommendations_today_only")
+    symbol_options = [f"{w['code']} {w['name']}" for w in watchlist]
+    selected_symbols = filter_col2.multiselect(
+        "只看特定股票", symbol_options, key="buy_recommendations_symbol_filter"
+    )
+
+    today_str = date.today().strftime("%Y-%m-%d")
+    recommendations = build_strategy_recommendations(config)
+    if today_only:
+        recommendations = [r for r in recommendations if r["觸發日期"] == today_str]
+    if selected_symbols:
+        selected_codes = {s.split(" ", 1)[0] for s in selected_symbols}
+        recommendations = [r for r in recommendations if r["代號"] in selected_codes]
+    recommendations = sorted(recommendations, key=lambda r: r["觸發日期"], reverse=True)
+
+    if recommendations:
+        display_rows = [
+            {
+                "代號": r["代號"],
+                "名稱": r["名稱"],
+                "買進策略": STRATEGY_LABELS.get(r["買進策略"], r["買進策略"]).split("(")[0] if r["買進策略"] else "",
+                "賣出策略": STRATEGY_LABELS.get(r["賣出策略"], r["賣出策略"]).split("(")[0] if r["賣出策略"] else "",
+                "觸發價格": r["觸發價格"],
+                "現價": r["現價"],
+                "觸發日期": r["觸發日期"],
+            }
+            for r in recommendations
+        ]
+        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("目前沒有股票符合")
+
+
 # st.session_state在瀏覽器重新整理時會重置(每次整頁重新載入=新的session)，靠它做「只檢查
 # 一次」完全沒用，實測每次F5都還是會重打一次API。改成把「上次檢查時間」存進DB(跨session/
 # 跨重新整理都留著)，讓should_check_for_updates()決定今天還要不要再檢查一次。
@@ -280,39 +321,10 @@ with tab_watchlist:
         )
         render_watchlist_table(config, tuple(symbols))
 
-        st.markdown("#### 買進/賣出策略訊號（一列一個策略，標示觸發當天的價格/日期，現價供對照；預設依觸發日期新到舊排序）")
-        filter_col1, filter_col2, _filter_spacer = st.columns([1, 2, 3])
-        today_only = filter_col1.checkbox("只顯示今天觸發", key="buy_recommendations_today_only")
-        symbol_options = [f"{w['code']} {w['name']}" for w in watchlist]
-        selected_symbols = filter_col2.multiselect(
-            "只看特定股票", symbol_options, key="buy_recommendations_symbol_filter"
+        st.markdown(
+            "#### 買進/賣出策略訊號（一列一個策略，標示觸發當天的價格/日期，現價供對照；預設依觸發日期新到舊排序，每30秒自動更新）"
         )
-
-        today_str = date.today().strftime("%Y-%m-%d")
-        recommendations = build_strategy_recommendations(config)
-        if today_only:
-            recommendations = [r for r in recommendations if r["觸發日期"] == today_str]
-        if selected_symbols:
-            selected_codes = {s.split(" ", 1)[0] for s in selected_symbols}
-            recommendations = [r for r in recommendations if r["代號"] in selected_codes]
-        recommendations = sorted(recommendations, key=lambda r: r["觸發日期"], reverse=True)
-
-        if recommendations:
-            display_rows = [
-                {
-                    "代號": r["代號"],
-                    "名稱": r["名稱"],
-                    "買進策略": STRATEGY_LABELS.get(r["買進策略"], r["買進策略"]).split("(")[0] if r["買進策略"] else "",
-                    "賣出策略": STRATEGY_LABELS.get(r["賣出策略"], r["賣出策略"]).split("(")[0] if r["賣出策略"] else "",
-                    "觸發價格": r["觸發價格"],
-                    "現價": r["現價"],
-                    "觸發日期": r["觸發日期"],
-                }
-                for r in recommendations
-            ]
-            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
-        else:
-            st.caption("目前沒有股票符合")
+        render_strategy_recommendations(config, watchlist)
 
         with st.expander("📊 策略歷史勝率參考（不是自動下單依據，只是這個策略在這支股票過去表現如何）"):
             track_records = _compute_track_records(config, tuple(symbols))
@@ -385,8 +397,13 @@ with tab_fundamentals:
 
 with tab_history:
     st.subheader("訊號歷史紀錄")
+    symbol_names = {w["code"]: w["name"] for w in watchlist}
     col_symbol, col_strategy = st.columns(2)
-    filter_symbol = col_symbol.selectbox("篩選股票（可選）", ["全部"] + symbols)
+    filter_symbol = col_symbol.selectbox(
+        "篩選股票（可選）",
+        ["全部"] + symbols,
+        format_func=lambda k: k if k == "全部" else f"{k} {symbol_names.get(k, '')}",
+    )
     filter_strategy = col_strategy.selectbox(
         "篩選訊號/策略（可選）",
         ["全部"] + list(STRATEGY_REGISTRY),
@@ -397,6 +414,7 @@ with tab_history:
             conn,
             symbol=None if filter_symbol == "全部" else filter_symbol,
             strategy=None if filter_strategy == "全部" else filter_strategy,
+            symbols=symbols,
             limit=200,
         )
 
@@ -405,15 +423,29 @@ with tab_history:
     else:
         df = pd.DataFrame([dict(r) for r in rows])
         df["strategy"] = df["strategy"].apply(strategy_label)
-        st.dataframe(df[["ts", "symbol", "strategy", "direction", "price", "detail", "tier"]], use_container_width=True)
+        df["name"] = df["symbol"].map(symbol_names).fillna("—")  # 全市場批次掃描(tier=batch)
+        # 的股票不在觀察清單裡，資料庫沒存名字，查不到就是None——顯示"—"跟其他地方缺值
+        # 的慣例一致，不要讓使用者看到裸的"None"字串
+        st.dataframe(
+            df[["ts", "symbol", "name", "strategy", "direction", "price", "detail", "tier"]], use_container_width=True
+        )
 
     st.markdown("#### 模擬交易紀錄（觀察策略是否可行）")
     st.caption(
         "從下面選的日期開始，每個策略每次BUY訊號當作買進、配對到SELL訊號當作賣出，純粹照訊號模擬記錄，"
         "不是真的下單；「持有中」代表還沒配到出場訊號，報酬率用現價估算(未實現)。"
     )
-    paper_start = st.date_input("模擬起始日期", value=date(2026, 7, 1), key="paper_trades_start")
+    paper_start_col, paper_symbol_col, _paper_spacer = st.columns([1, 2, 3])
+    paper_start = paper_start_col.date_input("模擬起始日期", value=date(2026, 7, 1), key="paper_trades_start")
+    paper_symbol_options = [f"{w['code']} {w['name']}" for w in watchlist]
+    paper_selected_symbols = paper_symbol_col.multiselect(
+        "只看特定股票", paper_symbol_options, key="paper_trades_symbol_filter"
+    )
+
     paper_trades = build_paper_trades(config, start_date=paper_start.strftime("%Y-%m-%d"))
+    if paper_selected_symbols:
+        paper_selected_codes = {s.split(" ", 1)[0] for s in paper_selected_symbols}
+        paper_trades = [r for r in paper_trades if r["代號"] in paper_selected_codes]
 
     if not paper_trades:
         st.info("這段時間沒有任何策略觸發買進訊號")
@@ -441,7 +473,7 @@ with tab_history:
             summary_df = pd.DataFrame(closed)
             summary = (
                 summary_df.groupby("策略")["報酬率(%)"]
-                .agg(筆數="count", 勝率=lambda s: (s > 0).mean() * 100, 平均報酬="mean")
+                .agg(筆數="count", 勝率=lambda s: (s > 0).mean() * 100, 平均報酬="mean", 加總報酬="sum")
                 .round(1)
                 .reset_index()
             )

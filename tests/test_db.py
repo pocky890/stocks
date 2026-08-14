@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -6,9 +6,9 @@ from stocks import db
 from stocks.models import Direction, SignalEvent, Tier
 
 
-def make_event(strategy="ma_crossover", direction=Direction.BUY, ts=None):
+def make_event(strategy="ma_crossover", direction=Direction.BUY, ts=None, symbol="2330"):
     return SignalEvent(
-        symbol="2330",
+        symbol=symbol,
         strategy=strategy,
         direction=direction,
         price=600.0,
@@ -77,6 +77,41 @@ def test_fetch_signal_events_filters_by_strategy(tmp_path):
 
     assert len(rows) == 1
     assert rows[0]["strategy"] == "buy_formula"
+
+
+def test_fetch_signal_events_symbols_restricts_to_that_list(tmp_path):
+    # 2026-08-14使用者要求「訊號歷史紀錄」只留觀察清單——run_batch.py全市場掃描
+    # (~2000檔非觀察清單股票)也會寫進signal_events，symbols參數要把這些篩掉，且要在
+    # SQL查詢裡篩(不是抓出來後用Python篩)，不然LIMIT會先被全市場的紀錄佔滿
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    watchlist_event = make_event(symbol="2330")
+    batch_scan_event = make_event(symbol="1101")
+
+    with db.connect(db_path) as conn:
+        db.insert_signal_events(conn, [watchlist_event, batch_scan_event])
+        rows = db.fetch_signal_events(conn, symbols=["2330"])
+
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "2330"
+
+
+def test_prune_signal_events_deletes_only_records_older_than_retention(tmp_path):
+    # 2026-08-14使用者要求「訊號歷史紀錄」只留3個月——用相對於現在的時間戳記，不要用
+    # 固定日期，不然測試跑的時間點不同，90天前的判斷就會失準
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    old_event = make_event(ts=datetime.now() - timedelta(days=91))
+    recent_event = make_event(ts=datetime.now() - timedelta(days=89))
+
+    with db.connect(db_path) as conn:
+        db.insert_signal_events(conn, [old_event, recent_event])
+        deleted = db.prune_signal_events(conn, retention_days=90)
+        rows = db.fetch_signal_events(conn)
+
+    assert deleted == 1
+    assert len(rows) == 1
+    assert rows[0]["ts"] == recent_event.ts.isoformat()
 
 
 def test_upsert_symbol_without_name_does_not_blank_out_existing_name(tmp_path):

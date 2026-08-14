@@ -31,7 +31,13 @@ def _get_json(url: str, params: dict | None = None, retries: int = RETRIES) -> d
 
 
 def fetch_institutional_flows_for_date(date_iso: str, retries: int = RETRIES) -> list[dict]:
-    """三大法人買賣超日報，全市場一次回來，呼叫端自己篩選要的symbol。"""
+    """三大法人買賣超日報，全市場一次回來，呼叫端自己篩選要的symbol。
+
+    2026-08-14回測拉長到10年時發現：TWSE在2017~2018年之間把「外資」拆成「外陸資(不含
+    外資自營商)」+「外資自營商」兩個欄位，這之後所有欄位的位置都往後移了3格——硬編
+    row[4]/row[7]/row[10]/row[11]/row[18]這種寫法碰到2018年以前的舊格式資料會直接
+    IndexError(舊格式只有16欄，新格式19欄)。改成照fields裡的欄位名稱查值，不管欄位
+    在哪個位置都找得到，同時處理新舊兩種「外資」欄位形狀。"""
     date_str = date_iso.replace("-", "")
     payload = _get_json(
         "https://www.twse.com.tw/rwd/zh/fund/T86",
@@ -41,17 +47,25 @@ def fetch_institutional_flows_for_date(date_iso: str, retries: int = RETRIES) ->
     if payload.get("stat") != "OK":
         return []
 
+    idx = {name: i for i, name in enumerate(payload.get("fields", []))}
+    has_foreign_split = "外資自營商買賣超股數" in idx  # 2018年之後的新格式才有這欄
+
     rows = []
     for row in payload.get("data", []):
-        foreign_net = (to_number(row[4]) or 0) + (to_number(row[7]) or 0)
+        if has_foreign_split:
+            foreign_net = (to_number(row[idx["外陸資買賣超股數(不含外資自營商)"]]) or 0) + (
+                to_number(row[idx["外資自營商買賣超股數"]]) or 0
+            )
+        else:
+            foreign_net = to_number(row[idx["外資買賣超股數"]]) or 0
         rows.append(
             {
                 "symbol": row[0],
                 "date": date_iso,
                 "foreign_net": foreign_net,
-                "trust_net": to_number(row[10]),
-                "dealer_net": to_number(row[11]),
-                "total_net": to_number(row[18]),
+                "trust_net": to_number(row[idx["投信買賣超股數"]]),
+                "dealer_net": to_number(row[idx["自營商買賣超股數"]]),
+                "total_net": to_number(row[idx["三大法人買賣超股數"]]),
             }
         )
     return rows
@@ -90,6 +104,9 @@ def fetch_margin_balances_for_date(date_iso: str, retries: int = RETRIES) -> lis
 
 
 def fetch_valuations_for_date(date_iso: str, retries: int = RETRIES) -> list[dict]:
+    """2018年之前的舊格式只有[代號,名稱,本益比,殖利率,股價淨值比]5欄，2018年之後多了
+    「收盤價」跟「股利年度」2欄，本益比/股價淨值比的位置因此往後移了——一樣改成照欄位
+    名稱查值(見fetch_institutional_flows_for_date同樣的理由)，不是硬編位置。"""
     date_str = date_iso.replace("-", "")
     payload = _get_json(
         "https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d",
@@ -99,6 +116,8 @@ def fetch_valuations_for_date(date_iso: str, retries: int = RETRIES) -> list[dic
     if payload.get("stat") != "OK":
         return []
 
+    idx = {name: i for i, name in enumerate(payload.get("fields", []))}
+
     rows = []
     for row in payload.get("data", []):
         rows.append(
@@ -106,9 +125,9 @@ def fetch_valuations_for_date(date_iso: str, retries: int = RETRIES) -> list[dic
                 "symbol": row[0],
                 "name": row[1],
                 "date": date_iso,
-                "pe_ratio": to_number(row[5], cast=float),
-                "dividend_yield": to_number(row[3], cast=float),
-                "pb_ratio": to_number(row[6], cast=float),
+                "pe_ratio": to_number(row[idx["本益比"]], cast=float),
+                "dividend_yield": to_number(row[idx["殖利率(%)"]], cast=float),
+                "pb_ratio": to_number(row[idx["股價淨值比"]], cast=float),
             }
         )
     return rows

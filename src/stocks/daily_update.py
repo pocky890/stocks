@@ -33,6 +33,7 @@ from stocks.db import (
     insert_margin_balances,
     insert_valuations,
     mark_market_data_synced,
+    prune_signal_events,
     set_disabled_strategies,
     upsert_symbol,
 )
@@ -348,6 +349,9 @@ def check_and_update(config: Config) -> dict:
         otc_synced = _refresh_market_data_tpex(config, tpex_symbols)
     except requests.RequestException as exc:
         errors.append(f"上櫃籌碼更新失敗：{exc}")
+
+    with connect(config.db_path) as conn:
+        prune_signal_events(conn)
 
     return {
         "watchlist_empty": False,

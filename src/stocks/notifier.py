@@ -105,6 +105,42 @@ def notify_symbol_signals(
     return send_message(config.telegram_bot_token, config.telegram_chat_id, "\n".join(lines))
 
 
+def notify_reminder(config: Config, symbol: str, name: str, rows: list, current_price: float) -> bool:
+    """13:20固定提醒：今天已經通知過的訊號，如果現在價格還是跟當時觸發方向一致(BUY還沒
+    跌破、SELL還沒回升)，代表狀況還沒解除，使用者可能還沒處理，額外提醒一次——跟
+    notify_symbol_signals的「新訊號剛觸發」語意不同，這裡是「舊訊號還沒解除」，2026-08-14
+    使用者要求的：盤中觸發就先通知一次，13:20如果還是同一個方向再提醒一次，不用等使用者
+    自己記得回頭看。rows是signal_events查出來的sqlite3.Row(或相容dict)，需要symbol/
+    strategy/direction/price/ts欄位。"""
+    if not rows:
+        return True
+    buy_rows = [r for r in rows if r["direction"] == Direction.BUY.value]
+    sell_rows = [r for r in rows if r["direction"] == Direction.SELL.value]
+    if buy_rows and sell_rows:
+        title = "⏰ 提醒：買進+賣出訊號都還沒解除"
+    elif buy_rows:
+        title = "⏰ 提醒：買進訊號還沒解除"
+    else:
+        title = "⏰ 提醒：賣出訊號還沒解除"
+
+    label = f"{symbol} {name}" if name else symbol
+    lines = [
+        f"【{title}】",
+        f"標的：{label}",
+        f"現價：${current_price:.1f}",
+        "",
+        "今天已經通知過，現在看起來還是同一個方向：",
+    ]
+    for row in buy_rows + sell_rows:
+        is_buy = row["direction"] == Direction.BUY.value
+        tag = "🟢買" if is_buy else "🔴賣"
+        verb = "還沒跌破" if is_buy else "還沒回升"
+        ts_text = row["ts"][11:16] if len(row["ts"]) >= 16 else row["ts"]
+        lines.append(f"[{tag}] {strategy_label(row['strategy'])}：{ts_text}觸發@{row['price']:.1f}，{verb}")
+
+    return send_message(config.telegram_bot_token, config.telegram_chat_id, "\n".join(lines))
+
+
 def notify_connectivity(config: Config, event_type: str, detail: str = "") -> bool:
     label = {"lost": "連線中斷", "restored": "連線已恢復"}.get(event_type, event_type)
     text = f"[系統] {label}"

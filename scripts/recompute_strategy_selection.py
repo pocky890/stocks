@@ -31,6 +31,7 @@ from stocks.db import (
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.strategy_selection import (
     MIN_AVG_RETURN_PCT,
+    MIN_TOTAL_RETURN_PCT,
     MIN_TRADES_FOR_RANKING,
     MIN_TRADES_OVERRIDES,
     should_disable,
@@ -72,7 +73,8 @@ def main():
                 excl_best_text = f"，拿掉最佳單筆後{excl_best:+.1f}%" if excl_best is not None else ""
                 print(
                     f"  {strategy_name}: {summary['n']}筆，勝率{summary['win_rate']:.0f}%，"
-                    f"平均{summary['avg_return_pct']:+.1f}%{excl_best_text} -> {'排除' if disable else '保留'}"
+                    f"平均{summary['avg_return_pct']:+.1f}%，加總{summary['total_return_pct']:+.1f}%"
+                    f"{excl_best_text} -> {'排除' if disable else '保留'}"
                 )
 
             if disable:
@@ -88,9 +90,9 @@ def main():
 
     print(
         f"完成。門檻: 交易數<{MIN_TRADES_FOR_RANKING}筆(樣本不足，含完全沒有完整買賣配對)就排除；"
-        f"樣本足夠時平均報酬率<{MIN_AVG_RETURN_PCT:+.1f}%才排除(不因為報酬集中在少數大波段就排除，"
-        "那是趨勢跟隨策略的正常樣貌)。建議每隔一段時間(例如每月)重跑一次，隨資料累積讓樣本不足的"
-        "策略開始被真正判斷。"
+        f"樣本足夠時平均報酬率<{MIN_AVG_RETURN_PCT:+.1f}%或加總報酬<={MIN_TOTAL_RETURN_PCT:+.1f}%"
+        "任一項沒過就排除(不因為報酬集中在少數大波段就排除，那是趨勢跟隨策略的正常樣貌)。"
+        "建議每隔一段時間(例如每月)重跑一次，隨資料累積讓樣本不足的策略開始被真正判斷。"
     )
 
 

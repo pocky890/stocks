@@ -324,7 +324,8 @@ def build_strategy_recommendations(config: Config) -> list[dict]:
 
             flows = fetch_institutional_flows(conn, symbol)
             merged = attach_institutional_flows(bars, flows)
-            current_price = _round_or_none(bars["close"].iloc[-1])
+            today_bars = bars_to_dataframe(fetch_bars_5min_today(conn, symbol), ts_field="ts")
+            current_price = _round_or_none(_current_price(bars, today_bars))
             disabled = set(get_disabled_strategies(conn, symbol))
 
             for strategy_name in NOTIFIABLE_STRATEGIES:

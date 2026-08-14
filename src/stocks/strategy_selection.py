@@ -9,20 +9,27 @@ from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.strategies import STRATEGY_REGISTRY
 from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 
-MIN_TRADES_FOR_RANKING = 5  # 交易次數太少，勝率/報酬率本身就不可信——2026-08-08使用者
+MIN_TRADES_FOR_RANKING = 15  # 交易次數太少，勝率/報酬率本身就不可信——2026-08-08使用者
 # 確認：不可信就該保守排除，不是給「還不能判斷」的寬限期，避免拿1筆的雜訊當依據推播
 # 通知。代價是新股票/新啟用的策略剛開始會整組沒有任何通知，要等累積到MIN_TRADES_
 # FOR_RANKING筆才會開始有判斷結果——這是使用者接受的取捨(寧可暫時安靜也不要拿雜訊
-# 通知)，不是bug。
+# 通知)，不是bug。原本回測3年時門檻是5筆，2026-08-17回測拉長到10年(約3.3倍長)後，
+# 使用者確認同比例調高到15筆——資料變長理當要求更多筆數才可信，不是資料變多卻還用
+# 同一套寬鬆標準。
 MIN_TRADES_OVERRIDES = {
-    "long_swing": 3,  # 中長波段持倉動輒數月，交易頻率天生遠低於chip_momentum這類策略，
-    # 用同一套5筆門檻某些股票(如3189)要再等3-4年才會達標。2026-08-08使用者確認降到3筆——
-    # 3105(4筆,+95.3%平均)這種因為樣本不足被誤殺的個股可以被啟用，3189(2筆)還是繼續
-    # 排除，不是完全不設門檻，仍要至少3筆才信。
+    "long_swing": 8,  # 中長波段持倉動輒數月，交易頻率天生遠低於chip_momentum這類策略，
+    # 用同一套門檻某些股票要等更久才會達標。2026-08-08使用者確認3年門檻降到3筆，
+    # 2026-08-17回測拉長到10年後同比例調高到8筆(沒有完全按3.3倍的15筆，長波段的觸發
+    # 頻率天生不會跟著資料長度線性成長)。
 }
-MIN_AVG_RETURN_PCT = 5.0  # 低於這個平均報酬率才排除——門檻不是台股來回交易成本(~0.6%)，
+MIN_AVG_RETURN_PCT = 4.0  # 低於這個平均報酬率才排除——門檻不是台股來回交易成本(~0.6%)，
 # 是「值不值得花風險做」：只是沒虧錢但賺很少，一樣不該留著繼續佔用通知額度，2026-08-07
-# 使用者確認改成這個門檻(原本0.6%只濾掉會虧錢的，太寬鬆)。
+# 使用者確認改成5%，2026-08-17再調整成4%(跟MIN_TOTAL_RETURN_PCT一起看，不是單獨這個
+# 數字變寬鬆)。
+MIN_TOTAL_RETURN_PCT = 50.0  # 2026-08-17使用者新增的第二條門檻：加總報酬(每筆報酬率直接
+# 加起來，不是複利)沒超過這個數字也要排除——平均報酬看的是「單筆值不值得做」，加總報酬
+# 看的是「這段時間累積下來對整體有沒有實質貢獻」，兩者都要過關才留著；只看平均可能漏掉
+# 「單筆賺得不錯但這段時間總共只交易1、2次，整體貢獻很小」的策略。
 # 2026-08-08拿掉單獨的勝率門檻：atr_breakout/chip_momentum/trust_momentum這類趨勢跟隨
 # 策略本來就是「靠少數幾筆大波段撐報酬」的樣貌，低勝率(甚至<40%)只要賺賠比夠大、平均
 # 報酬還是正的，一樣是能用的策略，不該被單獨的勝率門檻誤殺。
@@ -52,15 +59,20 @@ def should_disable(summary: dict | None, strategy_name: str | None = None) -> bo
     不足時那個勝率/報酬率本身就不可信，不可信就該保守排除，不該預設保留、拿雜訊當依據
     推播通知。「太少」的門檻預設是MIN_TRADES_FOR_RANKING，但strategy_name若在
     MIN_TRADES_OVERRIDES裡有個別設定(例如long_swing持倉數月、交易天生比較少)就改用
-    該策略自己的門檻。樣本夠的話，只看平均報酬率是否蓋過門檻(<MIN_AVG_RETURN_PCT就
-    排除)。不單獨用勝率當門檻：低勝率+高賺賠比是趨勢跟隨策略的正常樣貌，用勝率否決會
-    錯殺這種類型的策略。也不會因為avg_return_excluding_best_pct(拿掉單筆最賺的那一筆
-    之後還剩什麼)轉負就排除——那正是這類策略設計上要抓的「靠少數幾筆大波段撐報酬」，
-    不是瑕疵，只當參考資訊顯示，不當自動排除依據。"""
+    該策略自己的門檻。樣本夠的話，平均報酬率跟加總報酬要同時過關才留著(任一個沒過就
+    排除)：平均報酬率<MIN_AVG_RETURN_PCT代表單筆不值得做；加總報酬<=MIN_TOTAL_RETURN_PCT
+    代表即使單筆看起來不錯，這段時間累積下來對整體貢獻也不夠——2026-08-17使用者新增這第
+    二條門檻，避免漏掉「平均報酬過關但整體交易次數/累積貢獻太小」的策略。不單獨用勝率
+    當門檻：低勝率+高賺賠比是趨勢跟隨策略的正常樣貌，用勝率否決會錯殺這種類型的策略。
+    也不會因為avg_return_excluding_best_pct(拿掉單筆最賺的那一筆之後還剩什麼)轉負就
+    排除——那正是這類策略設計上要抓的「靠少數幾筆大波段撐報酬」，不是瑕疵，只當參考
+    資訊顯示，不當自動排除依據。"""
     min_trades = MIN_TRADES_OVERRIDES.get(strategy_name, MIN_TRADES_FOR_RANKING)
     if not summary or summary["n"] < min_trades:
         return True
-    return summary["avg_return_pct"] < MIN_AVG_RETURN_PCT
+    if summary["avg_return_pct"] < MIN_AVG_RETURN_PCT:
+        return True
+    return summary["total_return_pct"] <= MIN_TOTAL_RETURN_PCT
 
 
 def compute_disabled_strategies(symbol: str, bars: pd.DataFrame, strategy_params: dict) -> list[str]:

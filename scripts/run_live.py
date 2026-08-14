@@ -21,14 +21,15 @@ from stocks.db import (
     fetch_bars_5min_today,
     fetch_bars_daily,
     fetch_institutional_flows,
+    fetch_signal_events,
     fetch_watchlist,
     get_disabled_strategies,
     init_db,
     insert_bars_5min,
     insert_signal_events,
 )
-from stocks.models import Tier
-from stocks.notifier import notify_connectivity, notify_symbol_signals
+from stocks.models import Direction, Tier
+from stocks.notifier import NOTIFIABLE_STRATEGIES, notify_connectivity, notify_reminder, notify_symbol_signals
 from stocks.shioaji_client import ShioajiClient
 from stocks.signal_engine import evaluate_all
 from stocks.strategies import STRATEGY_REGISTRY
@@ -36,21 +37,35 @@ from stocks.strategies import STRATEGY_REGISTRY
 # atr_breakout/trend_following/breakout/golden_cross_scaleout是用「N日」概念設計、只拿
 # 日線資料驗證過──直接餵5分K的話「10日均線」其實變成10根5分K(~50分鐘)算出來的均線，
 # 跟真正的10日均線是兩個不同的數字(曾經導致通知內容自相矛盾：訊號說「跌破10日均線」，
-# 趨勢那行卻說「站上10日線」)。這幾個策略改成額外用「歷史日線+今天累積到目前的partial
-# 日K」重新評估(見build_daily_bars_with_today)，讓使用者盤中就能收到以真正日線尺度算出來
-# 的訊號、有時間下單，不用等收盤。其他單一指標策略(RSI/MACD/KD/均線交叉...)維持吃5分K，
-# 那是原始設計就要它們抓盤中短週期訊號，不受這次修正影響。
-DAILY_CONCEPT_STRATEGIES = {
-    "atr_breakout",
-    "trend_following",
-    "breakout",
-    "golden_cross_scaleout",
-}
-INTRADAY_STRATEGIES = set(STRATEGY_REGISTRY) - DAILY_CONCEPT_STRATEGIES
-# 13:20收盤前10分鐘檢查一次就好，不用每5分鐘都重算：這幾個策略是日線尺度的訊號，
-# 一天有一次明確的檢查時間點更好理解，也讓使用者統一在這個時間點知道今天要不要下單，
-# 同時保留收盤前的下單時間。
-DAILY_CONCEPT_CHECK_HHMM = "13:20"
+# 趨勢那行卻說「站上10日線」)。chip_momentum/trust_momentum/long_swing則是需要
+# foreign_net/trust_net(三大法人日資料，只有日線join得到)，餵5分K會直接優雅降級回傳
+# 空清單。這7個NOTIFIABLE_STRATEGIES因此都改成用「歷史日線(已接上三大法人資料)+今天
+# 累積到目前的partial日K」重新評估(見build_daily_bars_with_today)。2026-08-14使用者要求
+# 盤中一旦觸發就立即通知(不等收盤前才檢查)，改成每個5分K tick都重新檢查一次全觀察清單，
+# 不限制同一天同一檔同一策略只能通知一次——如果股價來回穿越觸發條件，一天可能收到同一
+# 策略好幾次通知，這是刻意選擇的行為(run_batch.py收盤後對觀察清單股票不再重複評估這幾個
+# 策略，避免收盤後又跟盤中的通知重複)。
+DAILY_CONCEPT_STRATEGIES = NOTIFIABLE_STRATEGIES
+INTRADAY_STRATEGIES = set(STRATEGY_REGISTRY) - DAILY_CONCEPT_STRATEGIES  # 日線尺度檢查要跳過的集合
+
+# 2026-08-14發現：其他單一指標策略(ma_crossover/rsi/macd/bollinger/volume_anomaly/
+# ma_alignment/kd/ma_trend)的期數(5/10/20/60)也是校準給日線用的，一樣被塞進5分K即時
+# 迴圈算會失真——「5/10/20日均線」變成「5/10/20根5分K(25/50/100分鐘)均線」，盤中小幅
+# 震盪就會頻繁誤觸發(例如多空排列在20分鐘內來回觸發好幾次買賣，看起來莫名其妙)。
+# chip_momentum/trust_momentum/long_swing需要foreign_net(只有日線join到三大法人資料)，
+# 餵5分K會直接優雅降級回傳空清單，也不該留在這裡跑。5分K即時迴圈只留price_alert：它是
+# 「有沒有跨過某個固定價格」，跟granularity無關，任何頻率算都是同一個意思，是唯一真正
+# 適合5分K即時評估的策略。其他NOTIFIABLE_STRATEGIES正確的評估路徑是下面每個tick都跑一次
+# 的日線尺度檢查，純指標訊號(ma_crossover/rsi/macd/...)則是run_batch.py/dashboard分析裡
+# 用真正的日K。
+INTRADAY_LIVE_STRATEGIES = {"price_alert"}
+
+# 2026-08-14使用者要求：盤中觸發的通知不代表使用者當下就會照做(可能沒看到/決定先觀望)，
+# 系統本身也沒有真的下單、不知道使用者實際上有沒有處理——所以13:20固定再檢查一次「今天
+# 通知過的訊號，現在的方向是不是還一樣」(BUY:現價還在觸發價之上；SELL:現價還在觸發價
+# 之下)，還一樣就代表狀況沒解除，額外提醒一次，避免使用者忘記處理。這跟前面的即時檢查是
+# 兩件獨立的事：即時檢查負責「發現新訊號」，這裡負責「提醒還沒處理的舊訊號」。
+REMINDER_CHECK_HHMM = "13:20"
 
 
 def sleep_until(target: datetime) -> None:
@@ -133,7 +148,7 @@ def main():
             with connect(config.db_path) as conn:
                 insert_bars_5min(conn, [bar])
                 bars = bars_to_dataframe(fetch_bars_5min(conn, symbol, limit=200), ts_field="ts")
-                skip = DAILY_CONCEPT_STRATEGIES | set(get_disabled_strategies(conn, symbol))
+                skip = (set(STRATEGY_REGISTRY) - INTRADAY_LIVE_STRATEGIES) | set(get_disabled_strategies(conn, symbol))
                 events = evaluate_all(symbol, bars, config.strategy_params, tier=Tier.REALTIME, skip_strategies=skip)
                 new_events = insert_signal_events(conn, events)
             if new_events:
@@ -142,30 +157,59 @@ def main():
                 notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), new_events, daily_bars)
                 print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(new_events)} 個訊號")
 
-        # atr_breakout/trend_following/breakout/golden_cross_scaleout只在13:20這個時間點
-        # 檢查全觀察清單一次(不看new_bars，即使某檔今天這一格沒有成交也照樣檢查)，不受
-        # 個股tick頻率影響。
-        if bucket_end.strftime("%H:%M") == DAILY_CONCEPT_CHECK_HHMM:
-            now = datetime.now()
+        # 2026-08-14使用者確認：NOTIFIABLE_STRATEGIES(日線尺度)改成每個5分K tick都檢查
+        # 全觀察清單一次(不看new_bars，即使某檔這一格沒有成交也照樣檢查)，觸發就立即通知，
+        # 不等13:20——使用者要的是「盤中觸發就先送一次」，不限制同一天同一檔同一策略只能
+        # 通知一次；如果股價來回穿越觸發條件，一天可能收到同一策略好幾次通知，這是使用者
+        # 明確選擇的行為，不是bug。
+        now = datetime.now()
+        for symbol in watchlist:
+            with connect(config.db_path) as conn:
+                daily_bars_with_today = build_daily_bars_with_today(conn, symbol)
+                skip = INTRADAY_STRATEGIES | set(get_disabled_strategies(conn, symbol))
+                raw_events = evaluate_all(
+                    symbol, daily_bars_with_today, config.strategy_params, tier=Tier.REALTIME, skip_strategies=skip
+                )
+                # 2026-08-13發現：daily_bars_with_today是對整段歷史重新跑一次edge-trigger，
+                # 一旦「今天」這筆日K的加入讓ATR/唐奇安通道之類的滾動窗口跟昨天算的不一樣，
+                # 會回頭冒出幾筆日期是前幾天、但資料庫裡還沒有的「新」事件(不是真的今天發生)
+                # ——只留日期真的是今天的，且時間戳記換成現在真正檢查的時間(不是bars index
+                # 構造出來的午夜0點)，通知上才會顯示合理的觸發時間。
+                events = [replace(e, ts=now) for e in raw_events if e.ts.date() == now.date()]
+                new_events = insert_signal_events(conn, events)
+            if new_events:
+                with connect(config.db_path) as conn:
+                    daily_bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
+                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), new_events, daily_bars)
+                print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(new_events)} 個訊號(日線)")
+
+        if bucket_end.strftime("%H:%M") == REMINDER_CHECK_HHMM:
+            today_str = now.date().isoformat()
             for symbol in watchlist:
                 with connect(config.db_path) as conn:
+                    todays_rows = [
+                        r
+                        for r in fetch_signal_events(conn, symbol=symbol, limit=500)
+                        if r["ts"].startswith(today_str) and r["strategy"] in NOTIFIABLE_STRATEGIES
+                    ]
+                    # 同一個策略今天可能已經觸發過幾次(BUY/SELL來回)，只看最後一次的方向
+                    # 才代表「現在」該提醒什麼，不是每一次舊觸發都各提醒一遍。
+                    latest_per_strategy = {}
+                    for r in sorted(todays_rows, key=lambda r: r["ts"]):
+                        latest_per_strategy[r["strategy"]] = r
                     daily_bars_with_today = build_daily_bars_with_today(conn, symbol)
-                    skip = INTRADAY_STRATEGIES | set(get_disabled_strategies(conn, symbol))
-                    raw_events = evaluate_all(
-                        symbol, daily_bars_with_today, config.strategy_params, tier=Tier.REALTIME, skip_strategies=skip
-                    )
-                    # 2026-08-13發現：daily_bars_with_today是對整段歷史重新跑一次edge-trigger，
-                    # 一旦「今天」這筆日K的加入讓ATR/唐奇安通道之類的滾動窗口跟昨天算的不一樣，
-                    # 會回頭冒出幾筆日期是前幾天、但資料庫裡還沒有的「新」事件(不是真的今天發生)
-                    # ——只留日期真的是今天的，且時間戳記換成現在真正檢查的時間(不是bars index
-                    # 構造出來的午夜0點)，通知上才會顯示合理的觸發時間。
-                    events = [replace(e, ts=now) for e in raw_events if e.ts.date() == now.date()]
-                    new_events = insert_signal_events(conn, events)
-                if new_events:
-                    with connect(config.db_path) as conn:
-                        daily_bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
-                    notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), new_events, daily_bars)
-                    print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(new_events)} 個訊號(日線)")
+                if not latest_per_strategy or daily_bars_with_today.empty:
+                    continue
+                current_price = daily_bars_with_today["close"].iloc[-1]
+                still_valid = [
+                    r
+                    for r in latest_per_strategy.values()
+                    if (r["direction"] == Direction.BUY.value and current_price >= r["price"])
+                    or (r["direction"] == Direction.SELL.value and current_price <= r["price"])
+                ]
+                if still_valid:
+                    notify_reminder(config, symbol, symbol_names.get(symbol, ""), still_valid, current_price)
+                    print(f"  {symbol} {bucket_end.strftime('%H:%M')} 提醒 {len(still_valid)} 個尚未解除的訊號")
 
     client.disconnect()
     print("收盤，連線已關閉")

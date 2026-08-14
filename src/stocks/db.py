@@ -194,13 +194,24 @@ def insert_signal_events(conn: sqlite3.Connection, events: list[SignalEvent]) ->
 
 
 def fetch_signal_events(
-    conn: sqlite3.Connection, symbol: str | None = None, strategy: str | None = None, limit: int = 200
+    conn: sqlite3.Connection,
+    symbol: str | None = None,
+    strategy: str | None = None,
+    limit: int = 200,
+    symbols: list[str] | None = None,
 ):
+    """symbols(可選)把結果限制在這份清單裡——dashboard的「訊號歷史紀錄」只想看觀察清單，
+    不想看run_batch.py全市場掃描(~2000檔非觀察清單股票，tier=batch)留下的紀錄，2026-08-14
+    使用者確認只留觀察清單。要限制在查詢裡做(不是查出來再用Python篩)，不然LIMIT會先
+    被全市場那些更新的紀錄佔滿，篩完可能剩沒幾筆。"""
     conditions = []
     params: list = []
     if symbol:
         conditions.append("symbol = ?")
         params.append(symbol)
+    if symbols:
+        conditions.append(f"symbol IN ({','.join('?' for _ in symbols)})")
+        params.extend(symbols)
     if strategy:
         conditions.append("strategy = ?")
         params.append(strategy)
@@ -211,6 +222,19 @@ def fetch_signal_events(
     query += " ORDER BY ts DESC LIMIT ?"
     params.append(limit)
     return conn.execute(query, params).fetchall()
+
+
+SIGNAL_EVENTS_RETENTION_DAYS = 90  # 2026-08-14使用者要求「訊號歷史紀錄」只留3個月，
+# 不然signal_events會一直累積(尤其是每5分鐘一次的指標訊號)。build_paper_trades/
+# build_strategy_recommendations/_compute_track_records都是直接從bars_daily重新評估策略，
+# 不讀signal_events，所以刪掉舊紀錄不影響任何分析功能，純粹只是「訊號歷史紀錄」這個
+# 顯示/稽核用的log表。
+
+
+def prune_signal_events(conn: sqlite3.Connection, retention_days: int = SIGNAL_EVENTS_RETENTION_DAYS) -> int:
+    """刪掉超過retention_days天的舊訊號紀錄，回傳刪除的筆數。"""
+    cur = conn.execute("DELETE FROM signal_events WHERE ts < datetime('now', ?)", (f"-{retention_days} days",))
+    return cur.rowcount
 
 
 def upsert_symbol(conn: sqlite3.Connection, code: str, name: str = "", market: str = "", is_watchlist: bool = False) -> None:

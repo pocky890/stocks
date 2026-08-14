@@ -1,11 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
 from stocks import daily_update
 from stocks.config import Config
-from stocks.db import add_to_watchlist, connect, get_disabled_strategies, init_db
-from stocks.models import Bar
+from stocks.db import add_to_watchlist, connect, fetch_signal_events, get_disabled_strategies, init_db, insert_signal_events
+from stocks.models import Bar, Direction, SignalEvent, Tier
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 
 
@@ -66,6 +66,31 @@ def test_check_and_update_reports_no_errors_when_everything_succeeds(tmp_path, m
     result = daily_update.check_and_update(config)
 
     assert result["errors"] == []
+
+
+def test_check_and_update_prunes_signal_events_older_than_retention(tmp_path, monkeypatch):
+    # 2026-08-14使用者要求「訊號歷史紀錄」只留3個月——每次check_and_update跑(一天最多
+    # 兩次)順便清掉超過保留期限的舊紀錄，不用另外排一個獨立的清理排程
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    with connect(db_path) as conn:
+        add_to_watchlist(conn, "2330", market="TWSE")
+        old_event = SignalEvent(
+            symbol="2330", strategy="ma_crossover", direction=Direction.BUY, price=600.0,
+            ts=datetime.now() - timedelta(days=91), detail="old", tier=Tier.REALTIME,
+        )
+        insert_signal_events(conn, [old_event])
+
+    config = make_config(db_path)
+    monkeypatch.setattr(daily_update, "_refresh_price_data", lambda cfg, symbols: 0)
+    monkeypatch.setattr(daily_update, "_refresh_market_data_twse", lambda cfg, symbols: 0)
+    monkeypatch.setattr(daily_update, "_refresh_market_data_tpex", lambda cfg, symbols: False)
+
+    daily_update.check_and_update(config)
+
+    with connect(db_path) as conn:
+        rows = fetch_signal_events(conn)
+    assert rows == []
 
 
 def test_add_symbol_falls_back_to_earlier_date_when_todays_valuation_report_not_out_yet(tmp_path, monkeypatch):
