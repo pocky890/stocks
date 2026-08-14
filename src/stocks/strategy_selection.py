@@ -7,7 +7,7 @@ import pandas as pd
 from stocks.models import SignalEvent
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.strategies import STRATEGY_REGISTRY
-from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
+from stocks.strategy_stats import simulate_round_trips, summarize_trades
 
 MIN_TRADES_FOR_RANKING = 15  # 交易次數太少，勝率/報酬率本身就不可信——2026-08-08使用者
 # 確認：不可信就該保守排除，不是給「還不能判斷」的寬限期，避免拿1筆的雜訊當依據推播
@@ -46,18 +46,19 @@ MIN_PROFIT_FACTOR = 2.0  # 2026-08-17使用者拿10年真實回測數字比較�
 # 才是真正該排除的。完全沒有虧損時profit_factor是None(不是0)，這裡不排除——那是最好的
 # 情況，不是資料不足。目前只加獲利因子門檻，MDD本身暫不單獨設門檻(套10年實測資料發現
 # MDD>35%會誤殺58%現有保留的策略，且MDD跟策略好壞沒有乾淨的對應關係，不像獲利因子)。
-SCALEOUT_STRATEGY = "golden_cross_scaleout"
 
 
 def summarize_strategy(symbol: str, bars: pd.DataFrame, strategy_name: str, params: dict) -> dict | None:
+    """所有NOTIFIABLE_STRATEGIES現在都是一買配一賣的形狀，統一用simulate_round_trips
+    配對。golden_cross_scaleout 2026-08-15前预设是一買配兩賣(分批出場)，需要另外用
+    simulate_scaleout_trades配對；換成單一15%移動停損全出當預設後不再需要特殊處理，
+    如果之後又手動把params的stop_mode改回"ma_scaleout"，呼叫端要自己改用
+    simulate_scaleout_trades，這裡不會自動偵測。"""
     strategy = STRATEGY_REGISTRY.get(strategy_name)
     if strategy is None:
         return None
     events: list[SignalEvent] = strategy.evaluate(symbol, bars, params)
-    if strategy_name == SCALEOUT_STRATEGY:
-        trades, _ = simulate_scaleout_trades(events)
-    else:
-        trades, _ = simulate_round_trips(events)
+    trades, _ = simulate_round_trips(events)
     return summarize_trades(trades)
 
 

@@ -17,9 +17,12 @@
     "kd": { "rsv_period": 9, "k_smooth": 3, "d_smooth": 3, "oversold": 20, "overbought": 80 },
     "institutional_streak": { "threshold_days": 3 },
     "ma_trend": { "fast": 5, "slow": 20 },
-    "atr_breakout": { "donchian_period": 20, "atr_period": 14, "atr_multiplier": 2 },
-    "chip_momentum": { "chip_streak_days": 3, "rsi_period": 14, "rsi_overbought": 70, "atr_period": 14, "atr_multiplier": 2.5 },
-    "trust_momentum": { "chip_window_days": 5, "chip_min_buy_days": 3, "rsi_period": 14, "rsi_overbought": 70, "atr_period": 14, "atr_multiplier": 2.5 },
+    "atr_breakout": { "donchian_period": 20, "stop_mode": "pct", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2 },
+    "chip_momentum": { "chip_streak_days": 3, "rsi_period": 14, "rsi_overbought": 70, "stop_mode": "pct", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2.5 },
+    "trust_momentum": { "chip_window_days": 5, "chip_min_buy_days": 3, "rsi_period": 14, "rsi_overbought": 70, "stop_mode": "pct", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2.5 },
+    "bullish_divergence": { "lookback_days": 20, "rsi_period": 14, "rsi_ceiling": 40, "stop_mode": "pct", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2.5 },
+    "capitulation_reversal": { "drop_threshold_pct": -5.0, "volume_multiplier": 2.0, "avg_volume_period": 20, "stop_mode": "pct", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2.5 },
+    "chip_reversal_fast": { "sell_streak_days": 3, "stop_mode": "pct", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2.5 },
     "trend_following": { "fast": 20, "slow": 60, "volume_avg_period": 20, "atr_period": 14, "atr_multiplier": 2 },
     "golden_cross_scaleout": {
       "fast": 5,
@@ -36,7 +39,9 @@
       "score_rsi": 1,
       "rsi_period": 14,
       "rsi_overbought": 70,
-      "score_threshold": 5
+      "score_threshold": 5,
+      "stop_mode": "pct",
+      "stop_pct": 0.15
     },
     "breakout": {
       "high_lookback_days": 20,

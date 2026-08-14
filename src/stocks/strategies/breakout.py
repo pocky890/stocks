@@ -20,6 +20,10 @@ class BreakoutStrategy:
         volume_multiplier = params.get("volume_multiplier", 1.5)
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2)
+        stop_mode = params.get("stop_mode", "atr")  # "atr"(進場後固定不動) 或 "pct"(移動停損)，
+        # 2026-08-15新增供實測比較用——pct模式會把停損改成會跟漲上移的移動停損，跟原本
+        # 進場後就固定不動的ATR停損是不同行為，不是單純換算距離的公式而已。
+        stop_pct = params.get("stop_pct", 0.15)
 
         close = bars["close"]
         donchian_upper = bars["high"].rolling(window=high_lookback_days).max().shift(1)
@@ -30,6 +34,13 @@ class BreakoutStrategy:
         entry_condition = (close > donchian_upper) & (bars["volume"] > volume_multiplier * avg_volume)
         prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
         entry_edge = entry_condition & ~prev_entry
+
+        def next_stop(c: float, t) -> float:
+            if stop_mode == "pct":
+                return c * (1 - stop_pct)
+            return c - atr_multiplier * atr_value[t]
+
+        stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "停損"
 
         events: list[SignalEvent] = []
         in_position = False
@@ -42,13 +53,15 @@ class BreakoutStrategy:
                 if not pd.isna(donchian_lower[t]) and c < donchian_lower[t]:
                     reasons.append(f"跌破前{low_lookback_days}日最低{donchian_lower[t]:.2f}")
                 if c < stop:
-                    reasons.append(f"跌破停損{stop:.2f}")
+                    reasons.append(f"跌破{stop_label}{stop:.2f}")
                 if reasons:
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, "、".join(reasons)))
                     in_position = False
                     stop = None
-            elif entry_edge[t] and not pd.isna(atr_value[t]) and not pd.isna(donchian_upper[t]):
-                stop = c - atr_multiplier * atr_value[t]
+                elif stop_mode == "pct":
+                    stop = max(stop, next_stop(c, t))
+            elif entry_edge[t] and not pd.isna(donchian_upper[t]) and (stop_mode == "pct" or not pd.isna(atr_value[t])):
+                stop = next_stop(c, t)
                 events.append(
                     SignalEvent(
                         symbol,
@@ -56,7 +69,7 @@ class BreakoutStrategy:
                         Direction.BUY,
                         c,
                         t,
-                        f"創{high_lookback_days}日新高且量>{volume_multiplier}倍均量，停損{stop:.2f}",
+                        f"創{high_lookback_days}日新高且量>{volume_multiplier}倍均量，{stop_label}{stop:.2f}",
                     )
                 )
                 in_position = True

@@ -46,7 +46,7 @@ from stocks.strategy_selection import (
     MIN_TRADES_FOR_RANKING,
     MIN_TRADES_OVERRIDES,
 )
-from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
+from stocks.strategy_stats import simulate_round_trips, summarize_trades
 from stocks.watchlist_view import build_overview_rows, build_paper_trades, build_strategy_recommendations
 
 st.set_page_config(page_title="台股訊號監控", layout="wide")
@@ -92,11 +92,11 @@ with connect(config.db_path) as conn:
     import_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
 
 
-TRACK_RECORD_STRATEGIES = ["chip_momentum", "trust_momentum", "atr_breakout", "trend_following", "breakout", "long_swing"]  # 這幾個自己的BUY/SELL事件本來就是配好對的
-# golden_cross_scaleout一次進場配兩次出場(先賣一半、再賣剩餘一半)，跟上面幾個「一買配一賣」
-# 的形狀不一樣，直接套simulate_round_trips會把第一次半倉出場當成整筆平倉、報酬率算錯，
-# 要用simulate_scaleout_trades另外配對，所以不放進TRACK_RECORD_STRATEGIES一起迴圈處理。
-SCALEOUT_STRATEGY = "golden_cross_scaleout"
+# 「策略歷史勝率」表格要列的策略——2026-08-15前golden_cross_scaleout是一買配兩賣的
+# 分批出場，要用simulate_scaleout_trades另外配對，特別排除在外處理；換成單一停損全出
+# 當預設後，所有NOTIFIABLE_STRATEGIES都是一買配一賣，直接用同一份清單、同一套
+# simulate_round_trips迴圈處理即可，不用再特殊分流。
+TRACK_RECORD_STRATEGIES = sorted(NOTIFIABLE_STRATEGIES)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -138,14 +138,6 @@ def _compute_track_record_for_symbol(_config, code: str) -> dict | None:
         events = STRATEGY_REGISTRY[name].evaluate(code, bars, _config.strategy_params.get(name, {}))
         trades, _ = simulate_round_trips(events)
         row[STRATEGY_LABELS[name].split("(")[0]] = cell_text(name, summarize_trades(trades))
-
-    scaleout_events = STRATEGY_REGISTRY[SCALEOUT_STRATEGY].evaluate(
-        code, bars, _config.strategy_params.get(SCALEOUT_STRATEGY, {})
-    )
-    scaleout_trades, _ = simulate_scaleout_trades(scaleout_events)
-    row[STRATEGY_LABELS[SCALEOUT_STRATEGY].split("(")[0]] = cell_text(
-        SCALEOUT_STRATEGY, summarize_trades(scaleout_trades)
-    )
     return row
 
 
@@ -680,7 +672,7 @@ with tab_strategy_logic:
     )
 
     st.markdown("### 📊 策略（會推播Telegram）")
-    for name in TRACK_RECORD_STRATEGIES + [SCALEOUT_STRATEGY]:
+    for name in TRACK_RECORD_STRATEGIES:
         strategy = STRATEGY_REGISTRY.get(name)
         if strategy is None:
             continue

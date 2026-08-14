@@ -59,6 +59,11 @@ class LongSwingStrategy:
         rsi_overbought = params.get("rsi_overbought", 75)
         reentry_ma_period = params.get("reentry_ma_period", 20)
         slope_lookback = params.get("slope_lookback", 5)
+        stop_mode = params.get("stop_mode", "atr")  # "atr" 或 "pct"，2026-08-15新增供實測比較用——
+        # 注意本策略docstring第20-24行已經記錄過「獲利提前鎖利收緊停損」實測後總報酬變差
+        # (會系統性砍掉少數抱到滿500%+的巨大波段，這是這支策略的獲利來源，不是缺陷)，
+        # 固定15%停損是否會踩到同樣的問題要看實測，不要預設一定更好。
+        stop_pct = params.get("stop_pct", 0.15)
 
         close = bars["close"]
         ma_fast = sma(close, trend_fast)
@@ -81,6 +86,13 @@ class LongSwingStrategy:
         below_streak = below_fast.groupby(group_id).cumcount() + 1
         exit_confirmed = below_fast & (below_streak >= exit_confirm_days)
 
+        def next_stop(c: float, t) -> float:
+            if stop_mode == "pct":
+                return c * (1 - stop_pct)
+            return c - atr_multiplier * atr_value[t]
+
+        stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else f"{atr_multiplier}倍ATR停損"
+
         events: list[SignalEvent] = []
         in_position = False
         stop = None
@@ -88,7 +100,7 @@ class LongSwingStrategy:
 
         for t in bars.index:
             c = close[t]
-            if pd.isna(ma_slow[t]) or pd.isna(atr_value[t]) or pd.isna(trend_strong[t]):
+            if pd.isna(ma_slow[t]) or (stop_mode == "atr" and pd.isna(atr_value[t])) or pd.isna(trend_strong[t]):
                 continue
             if not regime_active[t]:
                 had_entry_this_regime = False
@@ -100,16 +112,16 @@ class LongSwingStrategy:
                     if exit_confirmed[t]:
                         reasons.append(f"連續{exit_confirm_days}天跌破{trend_fast}日均線")
                     if exit_stop:
-                        reasons.append(f"跌破{atr_multiplier}倍ATR停損 {stop:.2f}")
+                        reasons.append(f"跌破{stop_label} {stop:.2f}")
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, "、".join(reasons)))
                     in_position = False
                     stop = None
                 else:
-                    stop = max(stop, c - atr_multiplier * atr_value[t])
+                    stop = max(stop, next_stop(c, t))
             elif regime_active[t] and price_above_fast[t]:
                 if not had_entry_this_regime:
                     if chip_support[t] and not_overbought[t]:
-                        stop = c - atr_multiplier * atr_value[t]
+                        stop = next_stop(c, t)
                         in_position = True
                         had_entry_this_regime = True
                         events.append(
@@ -123,7 +135,7 @@ class LongSwingStrategy:
                             )
                         )
                 elif price_above_reentry[t] and trend_strong[t]:
-                    stop = c - atr_multiplier * atr_value[t]
+                    stop = next_stop(c, t)
                     in_position = True
                     events.append(
                         SignalEvent(
@@ -136,7 +148,7 @@ class LongSwingStrategy:
                         )
                     )
                 elif price_above_reentry[t] and chip_support[t] and not_overbought[t]:
-                    stop = c - atr_multiplier * atr_value[t]
+                    stop = next_stop(c, t)
                     in_position = True
                     events.append(
                         SignalEvent(

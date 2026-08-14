@@ -220,7 +220,7 @@ def test_atr_breakout_enters_on_donchian_breakout_and_trails_stop_up_before_exit
     bars = make_bars(closes, highs=highs, lows=lows)
 
     events = ATRBreakoutStrategy().evaluate(
-        "2330", bars, {"donchian_period": 3, "atr_period": 2, "atr_multiplier": 2}
+        "2330", bars, {"donchian_period": 3, "stop_mode": "atr", "atr_period": 2, "atr_multiplier": 2}
     )
 
     assert len(events) == 2
@@ -252,7 +252,9 @@ def test_chip_momentum_enters_on_foreign_buy_streak_and_exits_on_atr_stop():
     bars["foreign_net"] = foreign_net
 
     events = ChipMomentumStrategy().evaluate(
-        "2330", bars, {"chip_streak_days": 3, "rsi_period": 2, "rsi_overbought": 70, "atr_period": 2, "atr_multiplier": 2}
+        "2330",
+        bars,
+        {"chip_streak_days": 3, "rsi_period": 2, "rsi_overbought": 70, "stop_mode": "atr", "atr_period": 2, "atr_multiplier": 2},
     )
 
     assert len(events) == 2
@@ -285,7 +287,15 @@ def test_trust_momentum_enters_on_flexible_buy_window_and_exits_on_atr_stop():
     events = TrustMomentumStrategy().evaluate(
         "2330",
         bars,
-        {"chip_window_days": 5, "chip_min_buy_days": 3, "rsi_period": 2, "rsi_overbought": 70, "atr_period": 2, "atr_multiplier": 2},
+        {
+            "chip_window_days": 5,
+            "chip_min_buy_days": 3,
+            "rsi_period": 2,
+            "rsi_overbought": 70,
+            "stop_mode": "atr",
+            "atr_period": 2,
+            "atr_multiplier": 2,
+        },
     )
 
     assert len(events) == 2
@@ -319,7 +329,15 @@ def test_trust_momentum_reenters_immediately_after_stop_out_while_streak_still_a
     events = TrustMomentumStrategy().evaluate(
         "2330",
         bars,
-        {"chip_window_days": 3, "chip_min_buy_days": 2, "rsi_period": 2, "rsi_overbought": 90, "atr_period": 2, "atr_multiplier": 2},
+        {
+            "chip_window_days": 3,
+            "chip_min_buy_days": 2,
+            "rsi_period": 2,
+            "rsi_overbought": 90,
+            "stop_mode": "atr",
+            "atr_period": 2,
+            "atr_multiplier": 2,
+        },
     )
 
     assert len(events) == 3
@@ -485,7 +503,16 @@ def test_breakout_stays_flat_generates_no_signal():
     assert events == []
 
 
-SCALEOUT_PARAMS = {"fast": 3, "mid": 5, "slow": 7, "chip_lookback_days": 5, "high_lookback_days": 5, "volume_avg_period": 3}
+SCALEOUT_PARAMS = {
+    "fast": 3,
+    "mid": 5,
+    "slow": 7,
+    "chip_lookback_days": 5,
+    "high_lookback_days": 5,
+    "volume_avg_period": 3,
+    "stop_mode": "ma_scaleout",  # 2026-08-15後預設改成單一15%停損全出，這批測試專門驗證
+    # 原本的均線分批出場行為，要明確指定，不能依賴預設值。
+}
 
 
 def test_golden_cross_scaleout_enters_on_full_score_then_exits_in_two_stages_on_separate_days():

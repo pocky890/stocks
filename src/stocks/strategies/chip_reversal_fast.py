@@ -1,30 +1,27 @@
 import pandas as pd
 
-from stocks.indicators import atr, rsi
+from stocks.indicators import atr
 from stocks.models import Direction, SignalEvent
 
 
-class ChipMomentumStrategy:
-    """外資連續買超為主訊號、RSI避免追高當濾網——用觀察清單7檔股票3年資料驗證過：
-    2330/2454/2408/3450上都有>50%勝率+正報酬，不是只對單一股票過度配適，但3189不適用，
-    8299/5439因為上櫃籌碼歷史資料不足還無法驗證(見chip_momentum相關分析)。
-    出場預設用固定15%移動停損(stop_mode="pct")，也支援2.5倍ATR移動停損(stop_mode=
-    "atr")——2026-08-15用scripts/backtest_stop_comparison.py全觀察清單10年回測比較過：
-    這支策略沒有其他出場條件、只靠停損，改成固定15%後平均報酬/加總報酬/獲利因子全面
-    提升(獲利因子2.54→3.22)，才改成15%當預設(ATR倍數2.5倍的由來：2倍在高波動股上
-    太容易被正常回檔洗出去，3倍雖然平均報酬更高但幾乎全靠少數幾筆極端波段撐起來，
-    2.5倍是當初驗證後比較平衡的取捨，stop_mode="atr"時仍沿用)。沒有foreign_net欄位
-    (bars沒join到institutional_flows)就直接跳過，跟institutional_streak一樣的防護。"""
+class ChipReversalFastStrategy:
+    """跟trust_momentum(近5日視窗累積確認買超動能)用同一個籌碼欄位(trust_net)，但邏輯
+    方向相反：這支抓的是「連續N天賣超之後，第一天轉買超」就立刻進場，不等視窗累積確認，
+    目的是搶在trust_momentum那種落後型確認之前卡位(trust_momentum常常等確認完，股價
+    已經漲一段)。代價是誤判成本更高——連續賣超中間偶爾一天翻正很可能只是雜訊，隔天可能
+    繼續賣。跟trust_momentum直接對照可以看出「快但容易被巴」vs「慢但確認度高」在同一組
+    籌碼資料上的實際取捨。出場預設用固定15%移動停損(stop_mode="pct")，也支援ATR移動
+    停損(stop_mode="atr")跟分批停損(stop_mode="tiered_pct")——實測比較結果跟改預設值
+    的理由見bullish_divergence.py同一段註解(2026-08-15 backtest_bottom_pickers.py
+    三支策略一起測出來的結論)。"""
 
-    name = "chip_momentum"
+    name = "chip_reversal_fast"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:
-        if "foreign_net" not in bars.columns:
+        if "trust_net" not in bars.columns:
             return []
 
-        chip_streak_days = params.get("chip_streak_days", 3)
-        rsi_period = params.get("rsi_period", 14)
-        rsi_overbought = params.get("rsi_overbought", 70)
+        sell_streak_days = params.get("sell_streak_days", 3)
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2.5)
         stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct" 或 "tiered_pct"
@@ -33,16 +30,16 @@ class ChipMomentumStrategy:
         stop_pct_full = params.get("stop_pct_full", 0.15)
 
         close = bars["close"]
-        foreign_net = bars["foreign_net"].fillna(0)
-        sign = foreign_net.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+        trust_net = bars["trust_net"].fillna(0)
+        sign = trust_net.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
         group_id = (sign != sign.shift()).cumsum()
         streak = sign.groupby(group_id).cumcount() + 1
-        foreign_buy_streak = (sign == 1) & (streak == chip_streak_days)
+        prev_sign = sign.shift(1)
+        prev_streak = streak.shift(1)
 
-        not_overbought = rsi(close, rsi_period) < rsi_overbought
-        entry_condition = foreign_buy_streak & not_overbought
-        prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
-        entry_edge = entry_condition & ~prev_entry
+        # 前一天是「連續>=sell_streak_days天賣超」的streak尾端，今天符號轉正——今天就是
+        # 轉買超的第一天，跟trust_momentum等5日視窗累積轉正不同，這裡不等累積，看到就進場。
+        just_reversed = (prev_sign == -1) & (prev_streak >= sell_streak_days) & (sign == 1)
 
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []
@@ -71,7 +68,7 @@ class ChipMomentumStrategy:
                         half_sold = False
                         stop_half = None
                         stop_full = None
-                elif entry_edge[t]:
+                elif just_reversed[t]:
                     stop_half = c * (1 - stop_pct_half)
                     stop_full = c * (1 - stop_pct_full)
                     in_position = True
@@ -83,7 +80,8 @@ class ChipMomentumStrategy:
                             Direction.BUY,
                             c,
                             t,
-                            f"外資連{chip_streak_days}日買超(未超買)，分批停損{stop_pct_half * 100:.0f}%/{stop_pct_full * 100:.0f}%",
+                            f"投信連{sell_streak_days}日賣超後首日轉買超，"
+                            f"分批停損{stop_pct_half * 100:.0f}%/{stop_pct_full * 100:.0f}%",
                         )
                     )
 
@@ -111,10 +109,17 @@ class ChipMomentumStrategy:
                     stop = None
                 elif stop_mode == "pct" or not pd.isna(atr_value[t]):
                     stop = max(stop, next_stop(c, t))
-            elif entry_edge[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
+            elif just_reversed[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
                 stop = next_stop(c, t)
                 events.append(
-                    SignalEvent(symbol, self.name, Direction.BUY, c, t, f"外資連{chip_streak_days}日買超(未超買)，{stop_label} {stop:.2f}")
+                    SignalEvent(
+                        symbol,
+                        self.name,
+                        Direction.BUY,
+                        c,
+                        t,
+                        f"投信連{sell_streak_days}日賣超後首日轉買超，{stop_label} {stop:.2f}",
+                    )
                 )
                 in_position = True
 

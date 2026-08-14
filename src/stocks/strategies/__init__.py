@@ -14,7 +14,10 @@ class Strategy(Protocol):
 from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bollinger import BollingerStrategy
 from stocks.strategies.breakout import BreakoutStrategy
+from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
+from stocks.strategies.capitulation_reversal import CapitulationReversalStrategy
 from stocks.strategies.chip_momentum import ChipMomentumStrategy
+from stocks.strategies.chip_reversal_fast import ChipReversalFastStrategy
 from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
@@ -47,6 +50,9 @@ STRATEGY_REGISTRY: dict[str, Strategy] = {
     "breakout": BreakoutStrategy(),
     "golden_cross_scaleout": GoldenCrossScaleOutStrategy(),
     "long_swing": LongSwingStrategy(),
+    "bullish_divergence": BullishDivergenceStrategy(),
+    "capitulation_reversal": CapitulationReversalStrategy(),
+    "chip_reversal_fast": ChipReversalFastStrategy(),
 }
 
 STRATEGY_LABELS: dict[str, str] = {
@@ -67,6 +73,9 @@ STRATEGY_LABELS: dict[str, str] = {
     "breakout": "Breakout突破(創20日新高+爆量進場，跌破10日最低出場)",
     "golden_cross_scaleout": "均線黃金交叉分批出場(打分制進場≥5分，跌破5日線+量能先賣一半，跌破10日線或死亡交叉賣剩餘)",
     "long_swing": "中長波段(60>120日均線多頭+法人買超進場，站回20日線且60日線上揚可重新進場，跌破均線3天或3.5倍ATR停損出場)",
+    "bullish_divergence": "背離抄底(價格創20日新低但RSI未破底+未超買進場，15%移動停損出場)",
+    "capitulation_reversal": "爆量急殺止穩(單日重挫5%+爆量2倍，隔日不破低確認進場，15%移動停損出場)",
+    "chip_reversal_fast": "投信轉買超搶進(連3日賣超後首日轉買超立即進場，15%移動停損出場)",
 }
 # 放這裡(不是dashboard/app.py)是因為notifier.py的Telegram通知也要用同一份中文名稱，
 # 兩處各自維護一份很容易一邊改了忘了改另一邊——策略名稱本身算strategy的metadata，

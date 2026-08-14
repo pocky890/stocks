@@ -6,9 +6,13 @@ from stocks.models import Direction, SignalEvent
 
 class TrustMomentumStrategy:
     """跟chip_momentum同一套邏輯，主訊號換成投信(trust_net)買超——投信對中小型股的訊號
-    通常比外資更敏感(外資很多時候是被動跟指數走，投信才是主動選股)，用同樣的RSI濾網跟
-    ATR移動停損出場，方便跟chip_momentum直接對照哪個籌碼來源在哪支股票上更好用。
-    沒有trust_net欄位就直接跳過，跟chip_momentum一樣的防護。
+    通常比外資更敏感(外資很多時候是被動跟指數走，投信才是主動選股)，用同樣的RSI濾網，
+    方便跟chip_momentum直接對照哪個籌碼來源在哪支股票上更好用。出場預設用固定15%移動
+    停損(stop_mode="pct")，也支援2.5倍ATR移動停損(stop_mode="atr")——2026-08-15用
+    scripts/backtest_stop_comparison.py全觀察清單10年回測比較過，這支策略沒有其他出場
+    條件、只靠停損，改成固定15%後平均報酬/加總報酬/獲利因子全面提升(獲利因子2.30→3.01，
+    連最大回撤都變淺)，才改成15%當預設。沒有trust_net欄位就直接跳過，跟chip_momentum
+    一樣的防護。
 
     主訊號條件2026-08-08調整：從「連續N天買超」改成「近chip_window天內有至少
     chip_min_buy_days天買超、且淨額加總為正」——連續買超太剛性，投信「買、觀望、再買」
@@ -40,6 +44,10 @@ class TrustMomentumStrategy:
         rsi_overbought = params.get("rsi_overbought", 70)
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2.5)
+        stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct" 或 "tiered_pct"
+        stop_pct = params.get("stop_pct", 0.15)
+        stop_pct_half = params.get("stop_pct_half", 0.08)
+        stop_pct_full = params.get("stop_pct_full", 0.15)
 
         close = bars["close"]
         trust_net = bars["trust_net"].fillna(0)
@@ -50,7 +58,60 @@ class TrustMomentumStrategy:
         not_overbought = rsi(close, rsi_period) < rsi_overbought
         entry_condition = trust_buy_streak & not_overbought
 
+        if stop_mode == "tiered_pct":
+            events: list[SignalEvent] = []
+            in_position = False
+            half_sold = False
+            stop_half = None
+            stop_full = None
+
+            for t in bars.index:
+                c = close[t]
+                if in_position:
+                    if not half_sold:
+                        stop_half = max(stop_half, c * (1 - stop_pct_half))
+                    stop_full = max(stop_full, c * (1 - stop_pct_full))
+
+                    if not half_sold and c < stop_half:
+                        events.append(
+                            SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_pct_half * 100:.0f}%停損，賣出一半")
+                        )
+                        half_sold = True
+                    if half_sold and c < stop_full:
+                        events.append(
+                            SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_pct_full * 100:.0f}%停損，賣出剩餘一半")
+                        )
+                        in_position = False
+                        half_sold = False
+                        stop_half = None
+                        stop_full = None
+                elif entry_condition[t]:
+                    stop_half = c * (1 - stop_pct_half)
+                    stop_full = c * (1 - stop_pct_full)
+                    in_position = True
+                    half_sold = False
+                    events.append(
+                        SignalEvent(
+                            symbol,
+                            self.name,
+                            Direction.BUY,
+                            c,
+                            t,
+                            f"投信近{chip_window_days}日{chip_min_buy_days}天以上買超(未超買)，"
+                            f"分批停損{stop_pct_half * 100:.0f}%/{stop_pct_full * 100:.0f}%",
+                        )
+                    )
+
+            return events
+
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
+
+        def next_stop(c: float, t) -> float:
+            if stop_mode == "pct":
+                return c * (1 - stop_pct)
+            return c - atr_multiplier * atr_value[t]
+
+        stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "ATR移動停損"
 
         events: list[SignalEvent] = []
         in_position = False
@@ -60,13 +121,13 @@ class TrustMomentumStrategy:
             c = close[t]
             if in_position:
                 if c < stop:
-                    events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破ATR移動停損 {stop:.2f}"))
+                    events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_label} {stop:.2f}"))
                     in_position = False
                     stop = None
-                elif not pd.isna(atr_value[t]):
-                    stop = max(stop, c - atr_multiplier * atr_value[t])
-            elif entry_condition[t] and not pd.isna(atr_value[t]):
-                stop = c - atr_multiplier * atr_value[t]
+                elif stop_mode == "pct" or not pd.isna(atr_value[t]):
+                    stop = max(stop, next_stop(c, t))
+            elif entry_condition[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
+                stop = next_stop(c, t)
                 events.append(
                     SignalEvent(
                         symbol,
@@ -74,7 +135,7 @@ class TrustMomentumStrategy:
                         Direction.BUY,
                         c,
                         t,
-                        f"投信近{chip_window_days}日{chip_min_buy_days}天以上買超(未超買)，ATR停損 {stop:.2f}",
+                        f"投信近{chip_window_days}日{chip_min_buy_days}天以上買超(未超買)，{stop_label} {stop:.2f}",
                     )
                 )
                 in_position = True

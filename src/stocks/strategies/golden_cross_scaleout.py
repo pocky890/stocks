@@ -26,16 +26,19 @@ class GoldenCrossScaleOutStrategy:
       天數)，跟其他項一樣是加分項，不是硬性關卡，所以缺一項(例如籌碼沒過)只要其他項夠強
       還是能靠分數補上。
 
-    出場(2026-08-07定案版，用回測比較過6種進場/出場組合後確認這版勝率/平均報酬最高，
-    比賣出打分制(嘗試過6項加權)、2日確認+20日均線全出(嘗試過)兩版實測都好，回退到這版
-    固定為現行版本)，分兩階段、不是一次全出：
+    出場預設(2026-08-15起)用單一15%移動停損全出(stop_mode="pct")，一買配一賣，跟其他
+    策略同樣的形狀，用simulate_round_trips配對即可。
+
+    也支援stop_mode="ma_scaleout"切回原本(2026-08-07定案版，當時用回測比較過6種進場/
+    出場組合後確認這版勝率/平均報酬最高，比賣出打分制(嘗試過6項加權)、2日確認+20日均線
+    全出(嘗試過)兩版實測都好)的均線分批出場，分兩階段、不是一次全出：
       階段1(賣一半)：收盤跌破5日均線，且當天成交量 > 20日均量(量能確認的真跌破，不是量縮
         小回檔)
       階段2(賣剩餘一半)：收盤跌破10日均線，或5日均線跌破20日均線(死亡交叉)，兩者任一即可
 
-    用兩個獨立的SELL事件代表兩次出場動作，detail會標明「賣出一半」/「賣出剩餘一半」——
-    跟其他策略「一次全出」的形狀不一樣，backtest_formula.py要用專門的配對邏輯
-    (simulate_scaleout_trades)才能正確算報酬率，不能直接套strategy_stats的一買配一賣。"""
+    ma_scaleout模式用兩個獨立的SELL事件代表兩次出場動作，detail會標明「賣出一半」/
+    「賣出剩餘一半」——跟pct模式「一次全出」的形狀不一樣，要用simulate_scaleout_trades
+    才能正確配對算報酬率，不能直接套simulate_round_trips的一買配一賣。"""
 
     name = "golden_cross_scaleout"
 
@@ -55,6 +58,13 @@ class GoldenCrossScaleOutStrategy:
         rsi_period = params.get("rsi_period", 14)
         rsi_overbought = params.get("rsi_overbought", 70)
         score_threshold = params.get("score_threshold", 5)
+        stop_mode = params.get("stop_mode", "pct")  # "pct"(單一15%移動停損全出) 或
+        # "ma_scaleout"(原本的均線分批出場)——2026-08-15用scripts/backtest_golden_cross_stop.py
+        # 全觀察清單10年回測比較過：ma_scaleout勝率較高(52%)但獲利因子/平均報酬/加總報酬
+        # 全面輸給pct15%(獲利因子2.31→3.06)，才把預設換成pct。"pct"模式回傳一買配一賣的
+        # 事件形狀，要用simulate_round_trips配對；"ma_scaleout"模式維持一買配兩賣，要用
+        # simulate_scaleout_trades配對——呼叫端要注意這個差異，不能對兩種模式的事件套同一種配對邏輯。
+        stop_pct = params.get("stop_pct", 0.15)
 
         close = bars["close"]
         ma_fast = sma(close, fast)
@@ -84,6 +94,50 @@ class GoldenCrossScaleOutStrategy:
             + not_overbought.astype(int) * score_rsi
         )
         entry_state = score >= score_threshold
+
+        if stop_mode == "pct":
+            events: list[SignalEvent] = []
+            in_position = False
+            stop = None
+
+            for t in bars.index:
+                c = close[t]
+                if in_position:
+                    if c < stop:
+                        events.append(
+                            SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_pct * 100:.0f}%移動停損 {stop:.2f}")
+                        )
+                        in_position = False
+                        stop = None
+                    else:
+                        stop = max(stop, c * (1 - stop_pct))
+                elif entry_state[t]:
+                    stop = c * (1 - stop_pct)
+                    hits = [
+                        label
+                        for label, series in [
+                            (f"MA{fast}>MA{slow}", ma_cross_up),
+                            (f"站上MA{slow}", above_slow),
+                            (f"法人近{chip_lookback_days}日買超", chip_backed),
+                            (f"突破{high_lookback_days}日新高", breakout_high),
+                            ("量增", volume_confirm),
+                            (f"RSI未超買(<{rsi_overbought})", not_overbought),
+                        ]
+                        if series[t]
+                    ]
+                    events.append(
+                        SignalEvent(
+                            symbol,
+                            self.name,
+                            Direction.BUY,
+                            c,
+                            t,
+                            f"打分{score[t]}分達標({'、'.join(hits)})，{stop_pct * 100:.0f}%移動停損 {stop:.2f}",
+                        )
+                    )
+                    in_position = True
+
+            return events
 
         below_fast_confirmed = (close < ma_fast) & volume_confirm
         prev_below_fast_confirmed = below_fast_confirmed.shift(1).fillna(False).astype(bool)

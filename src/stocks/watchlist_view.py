@@ -19,8 +19,7 @@ from stocks.indicators import bollinger_bands, macd, rolling_avg_volume, rsi, sm
 from stocks.models import Direction
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.strategies import STRATEGY_REGISTRY
-from stocks.strategy_selection import SCALEOUT_STRATEGY
-from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades
+from stocks.strategy_stats import simulate_round_trips
 
 MAX_SIGNAL_AGE_DAYS = 100  # 超過這個天數的舊訊號直接不列(不是變灰/變淡)——那個策略對這支
 # 股票已經一段時間沒有任何動作，不管上次是買還是賣都不算「現在還有意義的訊號」，2026-08-07
@@ -381,14 +380,15 @@ def build_strategy_recommendations(config: Config) -> list[dict]:
 
 
 def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[dict]:
-    """模擬交易紀錄：從start_date開始，NOTIFIABLE_STRATEGIES每個策略每次BUY訊號就當作
-    買進、配對到下一個SELL訊號(或golden_cross_scaleout兩次SELL)就當作賣出，純粹照著
-    訊號模擬記錄買賣價位跟報酬率，不是真的下單——給使用者觀察這幾個策略實際表現用。
-    start_date當天之前已經在場內的部位不算(從那天開始當作空手重新起算，跟
-    simulate_round_trips/simulate_scaleout_trades本來的配對邏輯一致：先篩選事件範圍
+    """模擬交易紀錄：從start_date開始，NOTIFIABLE_STRATEGIES每個策略每次BUY訊號配對到
+    下一個SELL訊號就當作賣出，純粹照著訊號模擬記錄買賣價位跟報酬率，不是真的下單——
+    給使用者觀察這幾個策略實際表現用。start_date當天之前已經在場內的部位不算(從那天
+    開始當作空手重新起算，跟simulate_round_trips本來的配對邏輯一致：先篩選事件範圍
     再配對)。還沒配到出場的部位標記「持有中」，「賣出價位」留空(還沒真的賣)，另外用
     「現價」欄位算未實現報酬率——兩者分開列，不能讓「持有中」那列的賣出價位看起來
-    像已經賣掉了。
+    像已經賣掉了。所有NOTIFIABLE_STRATEGIES現在都是一買配一賣的形狀(golden_cross_scaleout
+    2026-08-15起預設也改成單一停損全出，不再是一買配兩賣)，統一用simulate_round_trips
+    配對，不用再區分策略特殊處理。
 
     這裡跟_compute_track_records不一樣：那裡是故意忽略排除清單(給使用者看「為什麼」
     被排除的歷史全貌)，這裡是模擬「照現在的設定實際會不會被通知」，所以個股已經被
@@ -422,65 +422,34 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
 
                 base_row = {"代號": symbol, "名稱": name or "—", "策略": strategy_name}
 
-                if strategy_name == SCALEOUT_STRATEGY:
-                    trades, still_open = simulate_scaleout_trades(events_since)
-                    for t in trades:
-                        rows.append(
-                            {
-                                **base_row,
-                                "買進日期": t.entry_ts.strftime("%Y-%m-%d"),
-                                "買進價位": _round_or_none(t.entry_price),
-                                "賣出日期": t.exit2_ts.strftime("%Y-%m-%d"),
-                                "賣出價位": _round_or_none(t.blended_exit_price),
-                                "現價": _round_or_none(current_price),
-                                "報酬率(%)": _round_or_none(t.return_pct),
-                                "狀態": "已平倉",
-                            }
-                        )
-                    if still_open:
-                        entry, exits = still_open["entry"], still_open["exits"]
-                        unrealized_price = (exits[0].price + current_price) / 2 if exits else current_price
-                        rows.append(
-                            {
-                                **base_row,
-                                "買進日期": entry.ts.strftime("%Y-%m-%d"),
-                                "買進價位": _round_or_none(entry.price),
-                                "賣出日期": None,
-                                "賣出價位": None,
-                                "現價": _round_or_none(current_price),
-                                "報酬率(%)": _round_or_none((unrealized_price - entry.price) / entry.price * 100),
-                                "狀態": "持有中(未實現)",
-                            }
-                        )
-                else:
-                    trades, open_position = simulate_round_trips(events_since)
-                    for t in trades:
-                        rows.append(
-                            {
-                                **base_row,
-                                "買進日期": t.entry_ts.strftime("%Y-%m-%d"),
-                                "買進價位": _round_or_none(t.entry_price),
-                                "賣出日期": t.exit_ts.strftime("%Y-%m-%d"),
-                                "賣出價位": _round_or_none(t.exit_price),
-                                "現價": _round_or_none(current_price),
-                                "報酬率(%)": _round_or_none(t.return_pct),
-                                "狀態": "已平倉",
-                            }
-                        )
-                    if open_position:
-                        rows.append(
-                            {
-                                **base_row,
-                                "買進日期": open_position.ts.strftime("%Y-%m-%d"),
-                                "買進價位": _round_or_none(open_position.price),
-                                "賣出日期": None,
-                                "賣出價位": None,
-                                "現價": _round_or_none(current_price),
-                                "報酬率(%)": _round_or_none(
-                                    (current_price - open_position.price) / open_position.price * 100
-                                ),
-                                "狀態": "持有中(未實現)",
-                            }
-                        )
+                trades, open_position = simulate_round_trips(events_since)
+                for t in trades:
+                    rows.append(
+                        {
+                            **base_row,
+                            "買進日期": t.entry_ts.strftime("%Y-%m-%d"),
+                            "買進價位": _round_or_none(t.entry_price),
+                            "賣出日期": t.exit_ts.strftime("%Y-%m-%d"),
+                            "賣出價位": _round_or_none(t.exit_price),
+                            "現價": _round_or_none(current_price),
+                            "報酬率(%)": _round_or_none(t.return_pct),
+                            "狀態": "已平倉",
+                        }
+                    )
+                if open_position:
+                    rows.append(
+                        {
+                            **base_row,
+                            "買進日期": open_position.ts.strftime("%Y-%m-%d"),
+                            "買進價位": _round_or_none(open_position.price),
+                            "賣出日期": None,
+                            "賣出價位": None,
+                            "現價": _round_or_none(current_price),
+                            "報酬率(%)": _round_or_none(
+                                (current_price - open_position.price) / open_position.price * 100
+                            ),
+                            "狀態": "持有中(未實現)",
+                        }
+                    )
 
     return rows

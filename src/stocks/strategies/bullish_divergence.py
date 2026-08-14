@@ -4,27 +4,28 @@ from stocks.indicators import atr, rsi
 from stocks.models import Direction, SignalEvent
 
 
-class ChipMomentumStrategy:
-    """外資連續買超為主訊號、RSI避免追高當濾網——用觀察清單7檔股票3年資料驗證過：
-    2330/2454/2408/3450上都有>50%勝率+正報酬，不是只對單一股票過度配適，但3189不適用，
-    8299/5439因為上櫃籌碼歷史資料不足還無法驗證(見chip_momentum相關分析)。
-    出場預設用固定15%移動停損(stop_mode="pct")，也支援2.5倍ATR移動停損(stop_mode=
-    "atr")——2026-08-15用scripts/backtest_stop_comparison.py全觀察清單10年回測比較過：
-    這支策略沒有其他出場條件、只靠停損，改成固定15%後平均報酬/加總報酬/獲利因子全面
-    提升(獲利因子2.54→3.22)，才改成15%當預設(ATR倍數2.5倍的由來：2倍在高波動股上
-    太容易被正常回檔洗出去，3倍雖然平均報酬更高但幾乎全靠少數幾筆極端波段撐起來，
-    2.5倍是當初驗證後比較平衡的取捨，stop_mode="atr"時仍沿用)。沒有foreign_net欄位
-    (bars沒join到institutional_flows)就直接跳過，跟institutional_streak一樣的防護。"""
+class BullishDivergenceStrategy:
+    """價格創近N日新低，但RSI沒有跟著創新低(背離)，代表下跌動能已經在減弱——比單純
+    「RSI很低」更早抓到轉折，抓的是「這次探底跌勢有沒有比上次更兇」，而不是「現在夠不夠
+    便宜」。跟rsi_mean_reversion(短週期RSI(2)超賣+跌破布林下軌，設計給盤整行情用)不同，
+    這支用長週期RSI(14)、目標是抓單邊崩跌後的真正止穩，避免強趨勢中被巴來巴去。
+    出場預設用固定15%移動停損(stop_mode="pct")，也支援ATR移動停損(stop_mode="atr")跟
+    分批停損(stop_mode="tiered_pct"：跌8%先賣一半、跌15%賣剩餘一半，2026-08-15新增
+    供實測比較用)——
+    2026-08-15用scripts/backtest_bottom_pickers.py實測比較8%/10%/15%固定停損跟2.5倍
+    ATR停損：8%/10%太緊，在崩跌剛止穩、行情還在震盪的階段常常被正常雜訊洗出場，抓不到
+    後面真正的大反轉；15%版本三個策略(這支+capitulation_reversal+chip_reversal_fast)
+    的平均報酬、加總報酬、獲利因子全面勝出(獲利因子2.01→2.96)，才改成15%當預設。
+    最大回撤數字看起來比ATR版更深，但那是單筆振幅變大的正常結果(賺賠都放大)，不代表
+    策略更不穩定——同樣的判斷邏輯用在strategy_selection.py的排除規則上：獲利因子才是
+    判斷好壞的依據，不是MDD。"""
 
-    name = "chip_momentum"
+    name = "bullish_divergence"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:
-        if "foreign_net" not in bars.columns:
-            return []
-
-        chip_streak_days = params.get("chip_streak_days", 3)
+        lookback_days = params.get("lookback_days", 20)
         rsi_period = params.get("rsi_period", 14)
-        rsi_overbought = params.get("rsi_overbought", 70)
+        rsi_ceiling = params.get("rsi_ceiling", 40)
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2.5)
         stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct" 或 "tiered_pct"
@@ -33,14 +34,18 @@ class ChipMomentumStrategy:
         stop_pct_full = params.get("stop_pct_full", 0.15)
 
         close = bars["close"]
-        foreign_net = bars["foreign_net"].fillna(0)
-        sign = foreign_net.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
-        group_id = (sign != sign.shift()).cumsum()
-        streak = sign.groupby(group_id).cumcount() + 1
-        foreign_buy_streak = (sign == 1) & (streak == chip_streak_days)
+        rsi_value = rsi(close, rsi_period)
 
-        not_overbought = rsi(close, rsi_period) < rsi_overbought
-        entry_condition = foreign_buy_streak & not_overbought
+        # shift(1)：不含當天，跟atr_breakout的唐奇安通道一樣避免look-ahead(當天的低點
+        # 本身不該拿來當「跌破前N日低點」的判斷基準)。
+        rolling_low_price = close.rolling(window=lookback_days).min().shift(1)
+        rolling_low_rsi = rsi_value.rolling(window=lookback_days).min().shift(1)
+
+        makes_new_low = close <= rolling_low_price
+        rsi_diverges = rsi_value > rolling_low_rsi
+        not_too_strong = rsi_value < rsi_ceiling  # 還在偏弱區間，避免已經強勢反彈完才進場
+
+        entry_condition = makes_new_low & rsi_diverges & not_too_strong
         prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
         entry_edge = entry_condition & ~prev_entry
 
@@ -71,7 +76,7 @@ class ChipMomentumStrategy:
                         half_sold = False
                         stop_half = None
                         stop_full = None
-                elif entry_edge[t]:
+                elif entry_edge[t] and not pd.isna(rolling_low_rsi[t]):
                     stop_half = c * (1 - stop_pct_half)
                     stop_full = c * (1 - stop_pct_full)
                     in_position = True
@@ -83,7 +88,8 @@ class ChipMomentumStrategy:
                             Direction.BUY,
                             c,
                             t,
-                            f"外資連{chip_streak_days}日買超(未超買)，分批停損{stop_pct_half * 100:.0f}%/{stop_pct_full * 100:.0f}%",
+                            f"價格創{lookback_days}日新低但RSI({rsi_period})未破底(背離)，"
+                            f"分批停損{stop_pct_half * 100:.0f}%/{stop_pct_full * 100:.0f}%",
                         )
                     )
 
@@ -111,10 +117,21 @@ class ChipMomentumStrategy:
                     stop = None
                 elif stop_mode == "pct" or not pd.isna(atr_value[t]):
                     stop = max(stop, next_stop(c, t))
-            elif entry_edge[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
+            elif (
+                entry_edge[t]
+                and not pd.isna(rolling_low_rsi[t])
+                and (stop_mode == "pct" or not pd.isna(atr_value[t]))
+            ):
                 stop = next_stop(c, t)
                 events.append(
-                    SignalEvent(symbol, self.name, Direction.BUY, c, t, f"外資連{chip_streak_days}日買超(未超買)，{stop_label} {stop:.2f}")
+                    SignalEvent(
+                        symbol,
+                        self.name,
+                        Direction.BUY,
+                        c,
+                        t,
+                        f"價格創{lookback_days}日新低但RSI({rsi_period})未破底(背離)，{stop_label} {stop:.2f}",
+                    )
                 )
                 in_position = True
 

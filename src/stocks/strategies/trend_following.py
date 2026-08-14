@@ -18,6 +18,9 @@ class TrendFollowingStrategy:
         volume_avg_period = params.get("volume_avg_period", 20)
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2)
+        stop_mode = params.get("stop_mode", "atr")  # "atr"(進場後固定不動) 或 "pct"(移動停損)，
+        # 2026-08-15新增供實測比較用，取捨說明同breakout.py。
+        stop_pct = params.get("stop_pct", 0.15)
 
         close = bars["close"]
         ma_fast = sma(close, fast)
@@ -29,6 +32,13 @@ class TrendFollowingStrategy:
         prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
         entry_edge = entry_condition & ~prev_entry
 
+        def next_stop(c: float, t) -> float:
+            if stop_mode == "pct":
+                return c * (1 - stop_pct)
+            return c - atr_multiplier * atr_value[t]
+
+        stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "停損"
+
         events: list[SignalEvent] = []
         in_position = False
         stop = None
@@ -38,7 +48,7 @@ class TrendFollowingStrategy:
             if in_position:
                 reasons = []
                 if c < stop:
-                    reasons.append(f"跌破停損{stop:.2f}")
+                    reasons.append(f"跌破{stop_label}{stop:.2f}")
                 if c < ma_fast[t]:
                     reasons.append(f"跌破{fast}日均線")
                 if ma_fast[t] < ma_slow[t]:
@@ -47,10 +57,12 @@ class TrendFollowingStrategy:
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, "、".join(reasons)))
                     in_position = False
                     stop = None
-            elif entry_edge[t] and not pd.isna(atr_value[t]):
-                stop = c - atr_multiplier * atr_value[t]
+                elif stop_mode == "pct":
+                    stop = max(stop, next_stop(c, t))
+            elif entry_edge[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
+                stop = next_stop(c, t)
                 events.append(
-                    SignalEvent(symbol, self.name, Direction.BUY, c, t, f"站上{fast}日均線且{fast}>{slow}日均線+爆量，停損{stop:.2f}")
+                    SignalEvent(symbol, self.name, Direction.BUY, c, t, f"站上{fast}日均線且{fast}>{slow}日均線+爆量，{stop_label}{stop:.2f}")
                 )
                 in_position = True
 
