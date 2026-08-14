@@ -11,13 +11,14 @@ import streamlit as st
 
 from charts import candlestick_with_ma, institutional_flow_chart, intraday_line_chart, kd_chart, margin_balance_chart
 from stocks.config import load_config
-from stocks.daily_update import add_symbol_to_watchlist, check_and_update, should_check_for_updates
+from stocks.daily_update import add_symbol_to_watchlist, check_and_update, is_market_open_now, should_check_for_updates
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.db import (
     attach_institutional_flows,
     bars_list_to_dataframe,
     bars_to_dataframe,
     connect,
+    export_watchlist_snapshot,
     fetch_bars_daily,
     fetch_ex_dividend_schedule,
     fetch_institutional_flows,
@@ -28,11 +29,13 @@ from stocks.db import (
     get_disabled_strategies,
     get_setting,
     get_symbol_groups,
+    import_watchlist_snapshot,
     init_db,
     move_watchlist_symbol,
     remove_from_watchlist,
     set_setting,
     set_symbol_groups,
+    watchlist_sync_path,
 )
 from stocks.shioaji_client import ShioajiClient
 from stocks.strategies import STRATEGY_LABELS, STRATEGY_REGISTRY, strategy_label
@@ -79,6 +82,15 @@ st.markdown(
 config = load_config()
 init_db(config.db_path)  # 確保schema是最新的(例如app_settings表)，下面馬上要用get_setting()
 
+# 2026-08-17：使用者有兩台電腦各自跑這個專案，觀察清單/群組用watchlist_shared.json
+# (跟db_path同目錄，沒有被.gitignore排除)透過git在兩台機器間同步——歷史資料量太大不
+# 適合整包用git同步，留在各自機器獨立累積。這裡每次載入dashboard都檢查一次(單純讀本地
+# 檔案比對，很便宜，不用像check_and_update那樣節流)，如果偵測到檔案內容(可能是git pull
+# 下來的)跟本地資料庫不一樣就套用進去；git add/commit/push都是使用者自己手動做，
+# dashboard不會自動碰git。
+with connect(config.db_path) as conn:
+    import_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
+
 
 TRACK_RECORD_STRATEGIES = ["chip_momentum", "trust_momentum", "atr_breakout", "trend_following", "breakout", "long_swing"]  # 這幾個自己的BUY/SELL事件本來就是配好對的
 # golden_cross_scaleout一次進場配兩次出場(先賣一半、再賣剩餘一半)，跟上面幾個「一買配一賣」
@@ -88,53 +100,72 @@ SCALEOUT_STRATEGY = "golden_cross_scaleout"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _compute_track_records(_config, symbols: tuple):
-    """算「策略」類(NOTIFIABLE_STRATEGIES)在每支股票自己歷史資料上的勝率/平均報酬，
-    給使用者參考「這個策略在這支股票的過去表現」，不是自動下單依據。快取5分鐘——這是跑
-    全部歷史資料的策略運算，不用每次▲▼/新增股票都重算一次。
+def _compute_track_record_for_symbol(_config, code: str) -> dict | None:
+    """單一股票的策略歷史勝率/平均報酬——2026-08-17拆成per-symbol快取(原本是
+    _compute_track_records整批用tuple(symbols)當快取鍵)：切換群組(不同子集合)幾乎
+    每次都換一個新的tuple，全部cache miss，10年資料量下每次都要重跑7個策略x每支股票
+    2000多天的Python迴圈，切換群組變得很慢(全觀察清單22檔約8秒)。拆成per-symbol後，
+    同一支股票不管出現在哪個群組都是同一個快取鍵，只有真的沒被任何畫面算過的股票才需要
+    重新算，切換群組多半是全部cache hit、瞬間完成。
 
     「（已排除）」標記對應scripts/recompute_strategy_selection.py寫進symbols.
     disabled_strategies的排除清單——run_live.py/run_batch.py評估這支股票時會跳過這些
     策略，不會通知/寫進signal_events，但這裡的歷史勝率分析不受影響，照樣完整顯示，
     讓使用者知道「這個策略對這支股票表現不好，所以被排除」的理由是什麼。"""
-    rows = []
     with connect(_config.db_path) as conn:
-        names = {row["code"]: row["name"] for row in fetch_watchlist(conn)}
-        for code in symbols:
-            bars = bars_to_dataframe(fetch_bars_daily(conn, code), ts_field="date")
-            bars = attach_institutional_flows(bars, fetch_institutional_flows(conn, code))
-            if bars.empty:
-                continue
-            disabled = set(get_disabled_strategies(conn, code))
+        name_row = conn.execute("SELECT name FROM symbols WHERE code = ?", (code,)).fetchone()
+        bars = bars_to_dataframe(fetch_bars_daily(conn, code), ts_field="date")
+        bars = attach_institutional_flows(bars, fetch_institutional_flows(conn, code))
+        if bars.empty:
+            return None
+        disabled = set(get_disabled_strategies(conn, code))
 
-            def cell_text(name: str, summary: dict | None) -> str:
-                if summary:
-                    pf = summary["profit_factor"]
-                    pf_text = f"{pf:.1f}" if pf is not None else "∞(無虧損)"
-                    text = (
-                        f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均 / "
-                        f"{summary['total_return_pct']:+.1f}%加總（{summary['n']}筆）/ "
-                        f"獲利因子{pf_text} / 最大回撤-{summary['max_drawdown_pct']:.1f}%"
-                    )
-                else:
-                    text = "尚無完整交易紀錄"
-                return f"{text} (已排除)" if name in disabled else text
-
-            row = {"代號": code, "名稱": names.get(code) or "—"}
-            for name in TRACK_RECORD_STRATEGIES:
-                events = STRATEGY_REGISTRY[name].evaluate(code, bars, _config.strategy_params.get(name, {}))
-                trades, _ = simulate_round_trips(events)
-                row[STRATEGY_LABELS[name].split("(")[0]] = cell_text(name, summarize_trades(trades))
-
-            scaleout_events = STRATEGY_REGISTRY[SCALEOUT_STRATEGY].evaluate(
-                code, bars, _config.strategy_params.get(SCALEOUT_STRATEGY, {})
+    def cell_text(name: str, summary: dict | None) -> str:
+        if summary:
+            pf = summary["profit_factor"]
+            pf_text = f"{pf:.1f}" if pf is not None else "∞(無虧損)"
+            text = (
+                f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均 / "
+                f"{summary['total_return_pct']:+.1f}%加總（{summary['n']}筆）/ "
+                f"獲利因子{pf_text} / 最大回撤-{summary['max_drawdown_pct']:.1f}%"
             )
-            scaleout_trades, _ = simulate_scaleout_trades(scaleout_events)
-            row[STRATEGY_LABELS[SCALEOUT_STRATEGY].split("(")[0]] = cell_text(
-                SCALEOUT_STRATEGY, summarize_trades(scaleout_trades)
-            )
-            rows.append(row)
-    return rows
+        else:
+            text = "尚無完整交易紀錄"
+        return f"{text} (已排除)" if name in disabled else text
+
+    row = {"代號": code, "名稱": (name_row["name"] if name_row else None) or "—"}
+    for name in TRACK_RECORD_STRATEGIES:
+        events = STRATEGY_REGISTRY[name].evaluate(code, bars, _config.strategy_params.get(name, {}))
+        trades, _ = simulate_round_trips(events)
+        row[STRATEGY_LABELS[name].split("(")[0]] = cell_text(name, summarize_trades(trades))
+
+    scaleout_events = STRATEGY_REGISTRY[SCALEOUT_STRATEGY].evaluate(
+        code, bars, _config.strategy_params.get(SCALEOUT_STRATEGY, {})
+    )
+    scaleout_trades, _ = simulate_scaleout_trades(scaleout_events)
+    row[STRATEGY_LABELS[SCALEOUT_STRATEGY].split("(")[0]] = cell_text(
+        SCALEOUT_STRATEGY, summarize_trades(scaleout_trades)
+    )
+    return row
+
+
+def _compute_track_records(_config, symbols: tuple):
+    """組合每支股票各自的快取結果(見_compute_track_record_for_symbol)——這層本身不用
+    st.cache_data，因為裡面每一支都已經是各自快取過的，這層只是便宜的list組裝，重算
+    也不痛不癢，不用為它另外佔一份快取空間。"""
+    rows = [_compute_track_record_for_symbol(_config, code) for code in symbols]
+    return [row for row in rows if row is not None]
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_overview_rows(_config):
+    """build_overview_rows本身不帶快取(watchlist_view.py是純商業邏輯模組，直接被
+    tests/test_watchlist_view.py單元測試呼叫，不該混進streamlit依賴/快取語意)，這裡包一層
+    快取給dashboard用。永遠處理「整個觀察清單」，不吃symbols參數——2026-08-17發現：
+    切換群組時如果沒有這層快取，每次都要重新對全部股票跑RSI/MACD/KD等指標運算，10年
+    資料量下一次要將近1秒，每次群組切換/任何按鈕點擊都要重付這筆成本。快取30秒，跟
+    render_watchlist_table的run_every="30s"對齊。"""
+    return build_overview_rows(_config)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -142,7 +173,9 @@ def _fetch_today_intraday(_config, symbols: tuple):
     """現場連線Shioaji抓觀察清單今天的分K，供「今日走勢」小圖用，不用等run_live.py
     整天掛著累積。快取30秒，跟render_watchlist_table的run_every="30s"對齊，走勢圖才會
     跟目前價位同一個節奏更新；▲▼/移除按鈕點擊時如果快取還沒過期也會直接沿用，不用
-    每次都重新登入Shioaji。"""
+    每次都重新登入Shioaji。呼叫端一定要傳「整個觀察清單」的symbols，不是群組篩選後的
+    子集合——2026-08-17發現：如果傳群組篩選後的symbols，切換群組會換一個新的tuple，
+    每次都要重新連線Shioaji(現場連線有真實網路延遲)，這是切換群組明顯變慢的主因之一。"""
     client = ShioajiClient(_config)
     client.connect()
     try:
@@ -151,16 +184,16 @@ def _fetch_today_intraday(_config, symbols: tuple):
         client.disconnect()
 
 
-@st.fragment(run_every="30s")
-def render_watchlist_table(config, symbols: tuple):
-    """總覽表格獨立成fragment，每30秒自己重新跑一次(不影響頁面其他部分)，這樣「目前
-    價位」/「漲跌」/「今日走勢」才會自動反映最新資料，使用者不用手動整頁重新整理——
-    這幾個欄位背後看的是bars_5min(run_live.py即時累積)跟Shioaji現場連線，資料本身
-    是活的，只差頁面沒有自動重新渲染。▲▼/移除按鈕維持原本st.rerun()預設的整頁重新
-    執行(fragment內呼叫st.rerun()預設scope="app"，不用特別處理)。"""
-    overview_rows = [r for r in build_overview_rows(config) if r["代號"] in symbols]
+def _render_watchlist_table_body(config, all_symbols: tuple, symbols: tuple):
+    """總覽表格的實際內容——2026-08-17拆成獨立函式，讓render_watchlist_table_live(開盤
+    時段，30秒自動更新)/render_watchlist_table_static(收盤時段，不自動更新)兩個fragment
+    共用同一份渲染邏輯，只差有沒有run_every。
+
+    all_symbols是整個觀察清單(不受群組篩選影響，快取鍵穩定)，symbols是目前群組篩選後
+    要顯示的子集合——抓資料用all_symbols(才能命中快取)，顯示前再用symbols篩選一次。"""
+    overview_rows = [r for r in _cached_overview_rows(config) if r["代號"] in symbols]
     try:
-        intraday_bars = _fetch_today_intraday(config, symbols) if symbols else {}
+        intraday_bars = _fetch_today_intraday(config, all_symbols) if all_symbols else {}
     except Exception as exc:
         intraday_bars = {}
         st.warning(f"⚠️ 抓即時盤中資料失敗，今日走勢欄位暫時顯示「尚無盤中資料」：{exc}")
@@ -181,10 +214,12 @@ def render_watchlist_table(config, symbols: tuple):
             if cols[0].button("▲", key=f"up_{code}", disabled=(i == 0)):
                 with connect(config.db_path) as conn:
                     move_watchlist_symbol(conn, code, direction=-1)
+                    export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
                 st.rerun()
             if cols[1].button("▼", key=f"down_{code}", disabled=(i == len(overview_rows) - 1)):
                 with connect(config.db_path) as conn:
                     move_watchlist_symbol(conn, code, direction=1)
+                    export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
                 st.rerun()
 
             cols[2].write(row["代號"])
@@ -227,15 +262,58 @@ def render_watchlist_table(config, symbols: tuple):
             if cols[17].button("移除", key=f"remove_{code}", use_container_width=True):
                 with connect(config.db_path) as conn:
                     remove_from_watchlist(conn, code)
+                    export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
                 st.rerun()
 
 
 @st.fragment(run_every="30s")
-def render_strategy_recommendations(config, watchlist: list[dict]):
-    """跟render_watchlist_table一樣獨立成fragment每30秒自動更新——這張表的「現價」
-    之前沒有跟著自動更新，因為build_strategy_recommendations是在fragment外面呼叫的，
-    只有整頁重新執行(按鈕點擊/手動重新整理)才會重算，2026-08-13使用者發現這裡的現價
-    沒有同步。"""
+def _render_watchlist_table_live(config, all_symbols: tuple, symbols: tuple):
+    _render_watchlist_table_body(config, all_symbols, symbols)
+
+
+@st.fragment()
+def _render_watchlist_table_static(config, all_symbols: tuple, symbols: tuple):
+    _render_watchlist_table_body(config, all_symbols, symbols)
+
+
+def render_watchlist_table(config, all_symbols: tuple, symbols: tuple):
+    """開盤時段用30秒自動更新(_render_watchlist_table_live)，收盤時段股價/籌碼資料不會變，
+    自動輪詢(尤其是Shioaji現場連線)是白工，改用不自動更新的版本(_render_watchlist_table_
+    static)——2026-08-17使用者要求。兩個都還是fragment，▲▼/移除按鈕本來就是靠按下去
+    st.rerun()才更新，不受這裡差異影響。"""
+    if is_market_open_now(config, datetime.now()):
+        _render_watchlist_table_live(config, all_symbols, symbols)
+    else:
+        _render_watchlist_table_static(config, all_symbols, symbols)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_strategy_recommendations(_config):
+    """build_strategy_recommendations本身不帶快取(watchlist_view.py是純商業邏輯模組，
+    直接被tests/test_watchlist_view.py單元測試呼叫)，這裡包一層快取給dashboard用。
+    ttl=30跟render_strategy_recommendations的run_every="30s"對齊，不快取更久——這張表
+    的「現價」要反映當下報價，快取太久會重新引入2026-08-13已經修過的現價不同步問題。
+    2026-08-17發現：這個函式全觀察清單10年資料下要跑4.5秒，沒有快取的話每次切換群組
+    (全頁重新執行，這個fragment也會跟著重跑)都要重付這筆成本。"""
+    return build_strategy_recommendations(_config)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_paper_trades(_config, start_date: str):
+    """build_paper_trades本身不帶快取(理由同_cached_strategy_recommendations)。這裡
+    不在fragment裡(訊號紀錄頁籤沒有自動更新機制)，但一樣要限制TTL(不能無限期快取)——
+    "持有中"部位的報酬率是用現價估算，快取太久會顯示過時的未實現報酬。2026-08-17發現：
+    這個函式全觀察清單10年資料下要跑4.8秒，沒有快取的話每次切換群組/任何按鈕點擊都要
+    重付這筆成本，是切換群組明顯變慢的主因之一。"""
+    return build_paper_trades(_config, start_date=start_date)
+
+
+def _render_strategy_recommendations_body(config, watchlist: list[dict]):
+    """跟render_watchlist_table一樣拆成獨立函式(見_render_watchlist_table_body同一個
+    2026-08-17改動)，讓開盤/收盤兩個版本的fragment共用同一份內容，只差有沒有自動更新。
+    這張表的「現價」之前沒有跟著自動更新，因為build_strategy_recommendations是在
+    fragment外面呼叫的，只有整頁重新執行(按鈕點擊/手動重新整理)才會重算，2026-08-13
+    使用者發現這裡的現價沒有同步。"""
     filter_col1, filter_col2, _filter_spacer = st.columns([1, 2, 3])
     today_only = filter_col1.checkbox("只顯示今天觸發", key="buy_recommendations_today_only")
     symbol_options = [f"{w['code']} {w['name']}" for w in watchlist]
@@ -245,7 +323,7 @@ def render_strategy_recommendations(config, watchlist: list[dict]):
 
     today_str = date.today().strftime("%Y-%m-%d")
     watchlist_codes = {w["code"] for w in watchlist}
-    recommendations = [r for r in build_strategy_recommendations(config) if r["代號"] in watchlist_codes]
+    recommendations = [r for r in _cached_strategy_recommendations(config) if r["代號"] in watchlist_codes]
     if today_only:
         recommendations = [r for r in recommendations if r["觸發日期"] == today_str]
     if selected_symbols:
@@ -269,6 +347,25 @@ def render_strategy_recommendations(config, watchlist: list[dict]):
         st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
     else:
         st.caption("目前沒有股票符合")
+
+
+@st.fragment(run_every="30s")
+def _render_strategy_recommendations_live(config, watchlist: list[dict]):
+    _render_strategy_recommendations_body(config, watchlist)
+
+
+@st.fragment()
+def _render_strategy_recommendations_static(config, watchlist: list[dict]):
+    _render_strategy_recommendations_body(config, watchlist)
+
+
+def render_strategy_recommendations(config, watchlist: list[dict]):
+    """開盤時段30秒自動更新，收盤時段股價不會變，不需要自動輪詢——2026-08-17使用者要求，
+    跟render_watchlist_table同一套dispatch邏輯。"""
+    if is_market_open_now(config, datetime.now()):
+        _render_strategy_recommendations_live(config, watchlist)
+    else:
+        _render_strategy_recommendations_static(config, watchlist)
 
 
 # st.session_state在瀏覽器重新整理時會重置(每次整頁重新載入=新的session)，靠它做「只檢查
@@ -353,6 +450,7 @@ with tab_watchlist:
                     with connect(config.db_path) as conn:
                         for code, raw in group_inputs.items():
                             set_symbol_groups(conn, code, [g.strip() for g in raw.split(",") if g.strip()])
+                        export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
                     st.rerun()
 
     if watchlist:
@@ -364,13 +462,14 @@ with tab_watchlist:
         )
         st.caption(f"📊 策略（會推播Telegram）：{'、'.join(STRATEGY_LABELS[k] for k in strategy_keys)}")
         st.caption(f"📈 指標訊號（只記錄不推播）：{'、'.join(STRATEGY_LABELS[k] for k in indicator_keys)}")
+        _refresh_note = "每30秒自動更新" if is_market_open_now(config, datetime.now()) else "現在是收盤時段，暫停自動更新"
         st.markdown(
-            "#### 總覽（價位/均線/指標，暫用最新收盤價，之後接即時報價會自動換資料源；▲▼可調整順序，每30秒自動更新）"
+            f"#### 總覽（價位/均線/指標，暫用最新收盤價，之後接即時報價會自動換資料源；▲▼可調整順序，{_refresh_note}）"
         )
-        render_watchlist_table(config, tuple(symbols))
+        render_watchlist_table(config, tuple(w["code"] for w in all_watchlist), tuple(symbols))
 
         st.markdown(
-            "#### 買進/賣出策略訊號（一列一個策略，標示觸發當天的價格/日期，現價供對照；預設依觸發日期新到舊排序，每30秒自動更新）"
+            f"#### 買進/賣出策略訊號（一列一個策略，標示觸發當天的價格/日期，現價供對照；預設依觸發日期新到舊排序，{_refresh_note}）"
         )
         render_strategy_recommendations(config, watchlist)
 
@@ -490,7 +589,7 @@ with tab_history:
         "只看特定股票", paper_symbol_options, key="paper_trades_symbol_filter"
     )
 
-    paper_trades = [r for r in build_paper_trades(config, start_date=paper_start.strftime("%Y-%m-%d")) if r["代號"] in symbols]
+    paper_trades = [r for r in _cached_paper_trades(config, paper_start.strftime("%Y-%m-%d")) if r["代號"] in symbols]
     if paper_selected_symbols:
         paper_selected_codes = {s.split(" ", 1)[0] for s in paper_selected_symbols}
         paper_trades = [r for r in paper_trades if r["代號"] in paper_selected_codes]

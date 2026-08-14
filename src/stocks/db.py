@@ -2,6 +2,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -173,11 +174,36 @@ def fetch_bars_5min(conn: sqlite3.Connection, symbol: str, limit: int | None = N
 
 
 def fetch_bars_5min_today(conn: sqlite3.Connection, symbol: str):
-    """給總覽表格的「今日走勢」迷你K線圖用。run_live.py沒跑起來的日子這裡自然是空的。"""
+    """給run_live.py組「今天還在累積中的部分K棒」用——嚴格只看日曆上的今天，非交易日
+    (週末/國定假日)run_live.py本來就不會執行，這裡本來就該是空的，不需要退回上一個
+    交易日(那樣反而會讓「今天的部分K棒」誤把上一個交易日的資料當成今天)。
+
+    dashboard顯示用的「今日走勢」不要用這個函式，改用fetch_bars_5min_latest_day
+    (2026-08-17新增)——那邊非交易日該顯示上一個交易日的走勢，語意不一樣。"""
     today = datetime.now().strftime("%Y-%m-%d")
     return conn.execute(
         "SELECT * FROM bars_5min WHERE symbol = ? AND ts >= ? ORDER BY ts ASC",
         (symbol, today),
+    ).fetchall()
+
+
+def fetch_bars_5min_latest_day(conn: sqlite3.Connection, symbol: str):
+    """給dashboard「今日走勢」迷你K線圖/現價計算用——2026-08-17修正：原本共用
+    fetch_bars_5min_today(嚴格篩選日曆上的今天)，非交易日(週末/國定假日)當天沒有
+    run_live.py收集的資料，會整個顯示空白、現價/漲跌也因此少了「今天」這個基準，錯誤
+    退化成跟前一交易日同一天比較(漲跌恆為0)。改成抓「這支股票bars_5min裡實際最新的
+    那一天」，非交易日自然會退回顯示最近一個交易日(通常是上一個週五)的走勢，不是
+    憑空消失；交易日當中run_live.py正常運作時，「最新的那一天」自然就是今天，效果
+    跟原本一樣。run_live.py沒跑起來過的股票這裡自然是空的。"""
+    latest_date_row = conn.execute(
+        "SELECT MAX(date(ts)) AS d FROM bars_5min WHERE symbol = ?", (symbol,)
+    ).fetchone()
+    if latest_date_row is None or latest_date_row["d"] is None:
+        return []
+    latest_date = latest_date_row["d"]
+    return conn.execute(
+        "SELECT * FROM bars_5min WHERE symbol = ? AND date(ts) = ? ORDER BY ts ASC",
+        (symbol, latest_date),
     ).fetchall()
 
 
@@ -295,6 +321,81 @@ def add_to_watchlist(conn: sqlite3.Connection, code: str, name: str = "", market
                name=CASE WHEN excluded.name != '' THEN excluded.name ELSE symbols.name END""",
         (code, name, market, max_order + 1),
     )
+
+
+def watchlist_sync_path(db_path: str) -> Path:
+    """觀察清單/群組跨機器同步用的檔案路徑，跟db_path放同一個目錄——2026-08-17使用者
+    有兩台電腦各自跑這個專案，歷史股價/籌碼資料量太大不適合整個用git同步，只把「使用者
+    自己設定的清單長相」(代號/名稱/市場/排序/群組)獨立寫成一個小檔案，這個檔案沒有被
+    .gitignore排除，使用者自己git add/commit/push就能同步到另一台機器。"""
+    return Path(db_path).parent / "watchlist_shared.json"
+
+
+def export_watchlist_snapshot(conn: sqlite3.Connection, path: Path | str) -> None:
+    """把目前的觀察清單(代號/名稱/市場/排序/群組)寫成JSON檔案。刻意不包含
+    disabled_strategies——那是根據本地歷史資料算出來的，兩台機器歷史資料進度不一定
+    一樣，不該被另一台機器的匯出蓋掉，讓各自的scripts/recompute_strategy_selection.py
+    自己重新判斷。呼叫端要在每次會改動觀察清單/群組的操作後呼叫這個函式(新增/移除/
+    排序/改群組)，讓匯出檔案隨時反映最新狀態。"""
+    rows = fetch_watchlist(conn)
+    snapshot = [
+        {
+            "code": r["code"],
+            "name": r["name"] or "",
+            "market": r["market"] or "",
+            "sort_order": r["sort_order"],
+            "groups": json.loads(r["groups"]) if r["groups"] else [],
+        }
+        for r in rows
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+
+
+def import_watchlist_snapshot(conn: sqlite3.Connection, path: Path | str) -> bool:
+    """把export_watchlist_snapshot寫出來的檔案套用回本地資料庫——檔案裡沒有的代號視為
+    另一台機器已經移除，本地也跟著移除(is_watchlist=0，軟刪除，歷史資料還留著)；檔案裡
+    有的upsert代號/名稱/市場/排序/群組。回傳True代表本地資料庫真的因此有改動，呼叫端
+    可以用這個判斷要不要提示使用者/重新整理。同樣刻意不動disabled_strategies跟任何
+    歷史資料表。檔案不存在(例如這台機器從來沒匯出過、或還沒git pull過)就直接跳過，
+    不當成錯誤。"""
+    path = Path(path)
+    if not path.exists():
+        return False
+    with open(path, "r", encoding="utf-8") as f:
+        snapshot = json.load(f)
+
+    changed = False
+    snapshot_codes = {row["code"] for row in snapshot}
+    current = {r["code"]: r for r in fetch_watchlist(conn)}
+
+    for row in snapshot:
+        code = row["code"]
+        groups_json = json.dumps(row.get("groups", []))
+        existing = current.get(code)
+        if (
+            existing is None
+            or existing["name"] != row["name"]
+            or existing["market"] != row["market"]
+            or existing["sort_order"] != row["sort_order"]
+            or (existing["groups"] or "[]") != groups_json
+        ):
+            conn.execute(
+                """INSERT INTO symbols (code, name, market, is_watchlist, sort_order, groups)
+                   VALUES (?, ?, ?, 1, ?, ?)
+                   ON CONFLICT(code) DO UPDATE SET
+                       name=excluded.name, market=excluded.market, is_watchlist=1,
+                       sort_order=excluded.sort_order, groups=excluded.groups""",
+                (code, row["name"], row["market"], row["sort_order"], groups_json),
+            )
+            changed = True
+
+    for code in current:
+        if code not in snapshot_codes:
+            conn.execute("UPDATE symbols SET is_watchlist = 0 WHERE code = ?", (code,))
+            changed = True
+
+    return changed
 
 
 def remove_from_watchlist(conn: sqlite3.Connection, code: str) -> None:

@@ -22,6 +22,7 @@ from stocks.db import (
     attach_institutional_flows,
     bars_to_dataframe,
     connect,
+    export_watchlist_snapshot,
     fetch_bars_daily,
     fetch_institutional_flows,
     fetch_synced_market_dates,
@@ -37,6 +38,7 @@ from stocks.db import (
     prune_signal_events,
     set_disabled_strategies,
     upsert_symbol,
+    watchlist_sync_path,
 )
 from stocks.strategy_selection import compute_disabled_strategies
 from stocks.yfinance_client import detect_market_and_fetch_bars, fetch_symbol_bars
@@ -250,8 +252,9 @@ def _resolve_symbol_input(user_input: str) -> tuple[str | None, str]:
 
 
 def add_symbol_to_watchlist(config: Config, code: str) -> dict:
-    """新增一檔股票：自動判斷上市/上櫃，抓近3年股價(跟原本7檔核心觀察清單股票一致)。
-    三大法人買賣超/融資融券：不管上市上櫃都透過FinMind直接補到跟股價一樣的3年歷史
+    """新增一檔股票：自動判斷上市/上櫃，抓近10年股價(跟觀察清單其他股票一致——2026-08-17
+    使用者把回測期間從3年拉長到10年後，新股票也該用同樣長度，不然樣本會比其他股票明顯少)。
+    三大法人買賣超/融資融券：不管上市上櫃都透過FinMind直接補到跟股價一樣的10年歷史
     (TaiwanStockInstitutionalInvestorsBuySell/TaiwanStockMarginPurchaseShortSale兩個
     dataset都涵蓋兩個市場，一次API呼叫涵蓋整段範圍，不用像TWSE官方API那樣逐日查詢)——
     原本上市只抓最新一天，是因為sync log是用「日期」而非「日期+股票」為單位在追蹤，其他
@@ -276,7 +279,7 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     if already_in:
         return {"ok": False, "message": f"{code} 已經在觀察清單裡了"}
 
-    bars, market = detect_market_and_fetch_bars(code, period="3y")
+    bars, market = detect_market_and_fetch_bars(code, period="10y")
     if not bars:
         return {"ok": False, "message": f"抓不到 {code} 的股價資料，確認代號是否正確"}
 
@@ -288,14 +291,14 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
 
     try:
         flows = finmind_client.fetch_institutional_flows_for_range(code, earliest_date, latest_date)
-        chips_note = "三大法人已透過FinMind補到近3年歷史"
+        chips_note = "三大法人已透過FinMind補到近10年歷史"
     except requests.RequestException:
         flows = []
         chips_note = "三大法人歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料"
 
     try:
         margins = finmind_client.fetch_margin_balances_for_range(code, earliest_date, latest_date)
-        chips_note += "；融資融券已透過FinMind補到近3年歷史；估值只先抓最新一天，之後每天累積"
+        chips_note += "；融資融券已透過FinMind補到近10年歷史；估值只先抓最新一天，之後每天累積"
     except requests.RequestException:
         margins = []
         chips_note += "；融資融券歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料；估值只先抓最新一天"
@@ -322,6 +325,7 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
 
     with connect(config.db_path) as conn:
         add_to_watchlist(conn, code, name=name, market=market)
+        export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
         if flows:
             insert_institutional_flows(conn, flows)
         if margins:
@@ -330,7 +334,7 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
             insert_valuations(conn, valuations)
 
     # 新增當下立刻跑一次排除評估，不用等到下個月的排程——兩個市場這時三大法人都已經有
-    # 3年歷史(FinMind)，chip_momentum/golden_cross_scaleout這種靠籌碼判斷的策略可以馬上
+    # 10年歷史(FinMind)，chip_momentum/golden_cross_scaleout這種靠籌碼判斷的策略可以馬上
     # 判斷；如果FinMind剛好失敗(見上面的try/except)，flows還是只有最新一天，樣本不足就
     # 先排除(見strategy_selection.should_disable)，等之後每月排程重跑、資料累積夠了才會
     # 真正開始判斷，不是預設先開著。
@@ -344,7 +348,7 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     market_label = "上市" if market == "TWSE" else "上櫃"
     return {
         "ok": True,
-        "message": f"已新增 {label}（{market_label}），近3年股價已抓好。{chips_note}",
+        "message": f"已新增 {label}（{market_label}），近10年股價已抓好。{chips_note}",
     }
 
 
@@ -360,6 +364,19 @@ def should_check_for_updates(last_check: datetime | None, now: datetime, cutoff_
         return True
     today_cutoff = now.replace(hour=cutoff_hour, minute=0, second=0, microsecond=0)
     return now >= today_cutoff and last_check < today_cutoff
+
+
+def is_market_open_now(config: Config, now: datetime) -> bool:
+    """判斷now是不是台股交易時段(週一到週五、config.market_open~market_close之間)——
+    2026-08-17使用者要求：dashboard的30秒自動更新只在開盤時段才有意義，收盤後股價/籌碼
+    資料不會變，重複輪詢(尤其是Shioaji現場連線)是白工，該關掉。不含國定假日行事曆(這個
+    專案目前沒有假日資料來源)，遇到國定假日還是會誤判成「開盤」，代價只是那幾天白跑
+    幾次30秒輪詢，不影響任何資料正確性(輪詢本來就是唯讀，重跑只是浪費，不會算錯)。"""
+    if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        return False
+    open_time = datetime.strptime(config.market_open, "%H:%M").time()
+    close_time = datetime.strptime(config.market_close, "%H:%M").time()
+    return open_time <= now.time() <= close_time
 
 
 def check_and_update(config: Config) -> dict:

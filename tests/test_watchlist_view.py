@@ -160,9 +160,11 @@ def test_build_overview_rows_end_to_end(tmp_path):
     assert row["代號"] == "2330"
     assert row["名稱"] == "台積電"
     assert str(round(closes[-1], 1)) in row["目前價位"], "目前價位現在是帶顏色的HTML，不是裸數字"
-    # 這批合成資料全部30天都在「今天」之前(今天沒有自己的bars_daily row)，
-    # 所以「昨收」跟「目前價位」剛好都落在同一天(最後一天)上，不是巧合
-    assert row["昨收"] == pytest.approx(closes[-1])
+    # 這批合成資料全部30天都在「今天」之前(今天沒有自己的bars_daily row)，「目前價位」
+    # 退回歷史最後一筆(closes[-1])——2026-08-17修正後，「昨收」要是最後一筆「以前」的
+    # 那一筆(closes[-2])，不能跟「目前價位」變成同一天(那正是使用者在非交易日回報的
+    # 「漲跌恆為0」bug)
+    assert row["昨收"] == pytest.approx(closes[-2])
     assert row["5日"] is not None
     assert row["RSI"] != "—", "30 days of data should be enough for a 14-period RSI"
     assert row["三大法人"] == "—", "no institutional_flows rows inserted for this symbol"
@@ -289,6 +291,22 @@ def test_compute_change_returns_none_without_a_prior_trading_day():
 
     assert change is None
     assert change_pct is None
+
+
+def test_compute_change_on_non_trading_day_compares_last_two_trading_days_not_same_day():
+    # 2026-08-17使用者回報的bug：假設今天是非交易日(週末/國定假日)，bars_daily沒有
+    # 今天這一列，最後一筆(例如上週五)自然被_current_price當成現價；但如果_prev_close
+    # 還是用「日曆上的今天」去切「以前」，週五那一列會被誤算進「今天以前」，導致
+    # current跟prev_close變成同一筆資料，漲跌恆為0。修正後prev_close該是最後一筆
+    # 之前的那一筆(例如上週四)，漲跌不該是0。
+    last_trading_day = pd.Timestamp.now().normalize() - pd.Timedelta(days=2)  # 模擬上週五
+    day_before = last_trading_day - pd.Timedelta(days=1)  # 模擬上週四
+    bars_daily = pd.DataFrame({"close": [95.0, 100.0]}, index=[day_before, last_trading_day])
+
+    change, change_pct = compute_change(bars_daily, pd.DataFrame())
+
+    assert change == pytest.approx(5.0), "不該是0——current跟prev_close不該指向同一天"
+    assert change_pct == pytest.approx(5.0 / 95 * 100)
 
 
 def test_change_text_colors_red_for_up_green_for_down():

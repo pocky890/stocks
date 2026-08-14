@@ -651,3 +651,27 @@ def test_should_check_for_updates_false_when_already_checked_again_after_cutoff(
     last_check = datetime(2026, 8, 7, 19, 30)
     now = datetime(2026, 8, 7, 21, 0)
     assert daily_update.should_check_for_updates(last_check, now) is False
+
+
+def test_is_market_open_now_true_during_trading_hours():
+    config = make_config("unused.db")  # market_open="09:00", market_close="13:30"
+    assert daily_update.is_market_open_now(config, datetime(2026, 8, 7, 10, 0)) is True  # 2026-08-07是週五
+
+
+def test_is_market_open_now_true_at_exact_open_and_close_boundary():
+    config = make_config("unused.db")
+    assert daily_update.is_market_open_now(config, datetime(2026, 8, 7, 9, 0)) is True
+    assert daily_update.is_market_open_now(config, datetime(2026, 8, 7, 13, 30)) is True
+
+
+def test_is_market_open_now_false_before_open_or_after_close():
+    config = make_config("unused.db")
+    assert daily_update.is_market_open_now(config, datetime(2026, 8, 7, 8, 59)) is False
+    assert daily_update.is_market_open_now(config, datetime(2026, 8, 7, 13, 31)) is False
+
+
+def test_is_market_open_now_false_on_weekend():
+    # 2026-08-07是週五收盤時間，2026-08-08是隔天週六——同樣的時刻週末該回傳False
+    config = make_config("unused.db")
+    assert daily_update.is_market_open_now(config, datetime(2026, 8, 8, 10, 0)) is False  # 週六
+    assert daily_update.is_market_open_now(config, datetime(2026, 8, 9, 10, 0)) is False  # 週日

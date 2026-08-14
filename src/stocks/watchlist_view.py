@@ -9,7 +9,7 @@ from stocks.db import (
     attach_institutional_flows,
     bars_to_dataframe,
     connect,
-    fetch_bars_5min_today,
+    fetch_bars_5min_latest_day,
     fetch_bars_daily,
     fetch_institutional_flows,
     fetch_watchlist,
@@ -118,20 +118,43 @@ def institutional_text(foreign_net: pd.Series, trust_net: pd.Series, streak_thre
     return "\n".join(parts) if parts else "—"
 
 
-def _prev_close(bars_daily_df: pd.DataFrame):
-    """今天以前最後一個收盤價 -- 「漲跌」的比較基準，跟市場報價慣例一致，不是當天開盤價。"""
-    if bars_daily_df.empty:
-        return None
-    today = pd.Timestamp.now().normalize()
-    before_today = bars_daily_df[bars_daily_df.index < today]
-    if before_today.empty:
-        return None
-    return before_today["close"].iloc[-1]
-
-
 INTRADAY_FRESH_WITHIN = pd.Timedelta(minutes=15)  # bars_5min超過這個時間沒有新資料就視為
 # 停止更新(run_live.py斷線/沒開)，不能再信任它是「現價」；15分鐘=3根5分K的寬容度，避開
 # 單次盤中小斷線就整欄顯示壞掉。
+
+
+def _reference_date(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame) -> pd.Timestamp:
+    """決定_current_price實際採用的是哪一天的資料——判斷邏輯必須跟_current_price完全
+    對齊，因為_prev_close要拿「這一天以前」當基準。2026-08-17發現的bug：原本_prev_close
+    直接用pd.Timestamp.now()的日曆日期切「以前」，非交易日(週末/國定假日)當天bars_daily
+    根本沒有那一列，_current_price會退回歷史最後一筆(通常是上一個交易日，例如週五)當
+    現價，但_prev_close卻還是用「日曆上的今天」去切，週五那一列剛好還是被算進「今天以前」，
+    導致current跟prev_close指向同一天，漲跌恆為0(使用者在非交易日看到的樣子)。"""
+    now = pd.Timestamp.now()
+    if not today_bars_df.empty and (now - today_bars_df.index[-1]) <= INTRADAY_FRESH_WITHIN:
+        return now.normalize()
+
+    today = now.normalize()
+    today_daily_row = bars_daily_df[bars_daily_df.index >= today]
+    if not today_daily_row.empty:
+        return today
+    if not today_bars_df.empty:
+        return now.normalize()
+    if bars_daily_df.empty:
+        return today
+    return bars_daily_df.index[-1].normalize()  # 非交易日：退回歷史最後一筆代表的那一天
+
+
+def _prev_close(bars_daily_df: pd.DataFrame, reference_date: pd.Timestamp):
+    """reference_date以前最後一個收盤價 -- 「漲跌」的比較基準，跟市場報價慣例一致，
+    不是當天開盤價。reference_date一定要跟_current_price實際採用的那一天一致(見
+    _reference_date)，不能直接用日曆上的今天，否則非交易日會讓兩者意外指向同一天。"""
+    if bars_daily_df.empty:
+        return None
+    before_reference = bars_daily_df[bars_daily_df.index < reference_date]
+    if before_reference.empty:
+        return None
+    return before_reference["close"].iloc[-1]
 
 
 def _current_price(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
@@ -147,7 +170,8 @@ def _current_price(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
     可以直接跟現在比對新鮮度；bars_daily的「今天」列沒有這種時間戳記可比，所以規則是：
     bars_5min在INTRADAY_FRESH_WITHIN內有新資料就優先信任它(真的還在即時累積)；否則才退回
     bars_daily的今天列(假設是收盤後補上的，比凍結的盤中快照可靠)；兩者都沒有才用日線
-    最後一筆(通常是昨天)。"""
+    最後一筆(通常是昨天，或非交易日時的上一個交易日)。這裡的判斷邏輯要跟_reference_date
+    完全對齊，不要各自維護一份。"""
     now = pd.Timestamp.now()
     if not today_bars_df.empty and (now - today_bars_df.index[-1]) <= INTRADAY_FRESH_WITHIN:
         return today_bars_df["close"].iloc[-1]
@@ -162,8 +186,10 @@ def _current_price(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
 
 
 def compute_change(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
-    """回傳(change, change_pct)：現價(見_current_price)比較昨收的漲跌點數/百分比。"""
-    prev_close = _prev_close(bars_daily_df)
+    """回傳(change, change_pct)：現價(見_current_price)比較上一個交易日收盤的漲跌
+    點數/百分比。"""
+    reference_date = _reference_date(bars_daily_df, today_bars_df)
+    prev_close = _prev_close(bars_daily_df, reference_date)
     if prev_close is None:
         return None, None
 
@@ -253,9 +279,9 @@ def build_overview_rows(config: Config) -> list[dict]:
 
             flows = fetch_institutional_flows(conn, symbol)
             merged = attach_institutional_flows(bars, flows)
-            today_bars = bars_to_dataframe(fetch_bars_5min_today(conn, symbol), ts_field="ts")
+            today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
             change, change_pct = compute_change(bars, today_bars)
-            prev_close = _prev_close(bars)
+            prev_close = _prev_close(bars, _reference_date(bars, today_bars))
 
             # bars["close"]最後一筆可能是daily_update盤中抓到、之後整天凍結的快照(見
             # _current_price docstring)，蓋成跟「漲跌」同一套算法算出來的現價，RSI/MACD/
@@ -324,7 +350,7 @@ def build_strategy_recommendations(config: Config) -> list[dict]:
 
             flows = fetch_institutional_flows(conn, symbol)
             merged = attach_institutional_flows(bars, flows)
-            today_bars = bars_to_dataframe(fetch_bars_5min_today(conn, symbol), ts_field="ts")
+            today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
             current_price = _round_or_none(_current_price(bars, today_bars))
             disabled = set(get_disabled_strategies(conn, symbol))
 
@@ -379,7 +405,7 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
 
             flows = fetch_institutional_flows(conn, symbol)
             merged = attach_institutional_flows(bars, flows)
-            today_bars = bars_to_dataframe(fetch_bars_5min_today(conn, symbol), ts_field="ts")
+            today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
             current_price = _current_price(bars, today_bars)
             disabled = set(get_disabled_strategies(conn, symbol))
 

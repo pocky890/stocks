@@ -288,6 +288,56 @@ def test_fetch_bars_5min_today_excludes_earlier_days(tmp_path):
     assert rows[0]["close"] == 100
 
 
+def test_fetch_bars_5min_latest_day_returns_todays_bars_when_present(tmp_path):
+    from datetime import timedelta
+
+    from stocks.models import Bar
+
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    yesterday = (datetime.now() - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+    today_bar = Bar(symbol="2330", ts=datetime.now(), open=100, high=101, low=99, close=100, volume=10)
+    yesterday_bar = Bar(symbol="2330", ts=yesterday, open=90, high=91, low=89, close=90, volume=5)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_5min(conn, [today_bar, yesterday_bar])
+        rows = db.fetch_bars_5min_latest_day(conn, "2330")
+
+    assert len(rows) == 1
+    assert rows[0]["close"] == 100
+
+
+def test_fetch_bars_5min_latest_day_falls_back_to_last_trading_day_on_non_trading_day(tmp_path):
+    # 2026-08-17使用者回報：非交易日(週末/國定假日)當天run_live.py沒有新增任何
+    # bars_5min，「今日走勢」不該整個空白，該顯示上一個交易日(通常是上週五)的走勢
+    from datetime import timedelta
+
+    from stocks.models import Bar
+
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    two_days_ago = (datetime.now() - timedelta(days=2)).replace(hour=10, minute=0, second=0, microsecond=0)
+    three_days_ago = (datetime.now() - timedelta(days=3)).replace(hour=10, minute=0, second=0, microsecond=0)
+    last_trading_bar = Bar(symbol="2330", ts=two_days_ago, open=100, high=101, low=99, close=100, volume=10)
+    older_bar = Bar(symbol="2330", ts=three_days_ago, open=90, high=91, low=89, close=90, volume=5)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_5min(conn, [last_trading_bar, older_bar])
+        rows = db.fetch_bars_5min_latest_day(conn, "2330")
+
+    assert len(rows) == 1, "只該回傳最新那一天(兩天前)的資料，不含更早那一天"
+    assert rows[0]["close"] == 100
+
+
+def test_fetch_bars_5min_latest_day_returns_empty_when_never_run(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    with db.connect(db_path) as conn:
+        assert db.fetch_bars_5min_latest_day(conn, "2330") == []
+
+
 def test_get_setting_returns_none_when_missing(tmp_path):
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
@@ -381,3 +431,113 @@ def test_set_symbol_groups_overwrites_previous_list(tmp_path):
         db.set_symbol_groups(conn, "2330", ["AI供應鏈"])
         db.set_symbol_groups(conn, "2330", [])
         assert db.get_symbol_groups(conn, "2330") == []
+
+
+def test_watchlist_sync_path_sits_next_to_db_file():
+    assert db.watchlist_sync_path("/some/dir/stocks.db") == db.Path("/some/dir/watchlist_shared.json")
+
+
+def test_export_watchlist_snapshot_writes_code_name_market_order_groups(tmp_path):
+    # 2026-08-17使用者要求兩台電腦共用觀察清單/群組——匯出檔案刻意不含
+    # disabled_strategies，那是根據本地歷史資料算出來的，不該被同步覆蓋。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    snapshot_path = tmp_path / "watchlist_shared.json"
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330", name="台積電", market="TWSE")
+        db.set_symbol_groups(conn, "2330", ["AI供應鏈"])
+        db.export_watchlist_snapshot(conn, snapshot_path)
+
+    import json
+
+    with open(snapshot_path, encoding="utf-8") as f:
+        snapshot = json.load(f)
+
+    assert snapshot == [{"code": "2330", "name": "台積電", "market": "TWSE", "sort_order": 0, "groups": ["AI供應鏈"]}]
+
+
+def test_import_watchlist_snapshot_returns_false_when_file_missing(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    with db.connect(db_path) as conn:
+        assert db.import_watchlist_snapshot(conn, tmp_path / "does_not_exist.json") is False
+
+
+def test_import_watchlist_snapshot_adds_new_symbol_from_file(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    snapshot_path = tmp_path / "watchlist_shared.json"
+
+    with db.connect(db_path) as conn_a:
+        db.add_to_watchlist(conn_a, "2330", name="台積電", market="TWSE")
+        db.set_symbol_groups(conn_a, "2330", ["核心"])
+        db.export_watchlist_snapshot(conn_a, snapshot_path)
+
+    other_db_path = str(tmp_path / "other.db")
+    db.init_db(other_db_path)
+    with db.connect(other_db_path) as conn_b:
+        changed = db.import_watchlist_snapshot(conn_b, snapshot_path)
+        assert changed is True
+        rows = db.fetch_watchlist(conn_b)
+        assert len(rows) == 1
+        assert rows[0]["code"] == "2330"
+        assert rows[0]["name"] == "台積電"
+        assert db.get_symbol_groups(conn_b, "2330") == ["核心"]
+
+
+def test_import_watchlist_snapshot_removes_symbol_not_in_file(tmp_path):
+    # 另一台機器已經把某支股票移除觀察清單，這台機器套用同步檔案後也該跟著移除
+    # (軟刪除，is_watchlist=0)，不是保留舊的、造成兩邊清單越來越不一致。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    snapshot_path = tmp_path / "watchlist_shared.json"
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        db.add_to_watchlist(conn, "2454")
+        db.export_watchlist_snapshot(conn, snapshot_path)  # 檔案裡有2330跟2454
+
+    with db.connect(db_path) as conn:
+        db.remove_from_watchlist(conn, "2454")
+        db.export_watchlist_snapshot(conn, snapshot_path)  # 重新匯出，檔案裡只剩2330
+
+    other_db_path = str(tmp_path / "other.db")
+    db.init_db(other_db_path)
+    with db.connect(other_db_path) as conn_b:
+        db.add_to_watchlist(conn_b, "2330")
+        db.add_to_watchlist(conn_b, "2454")  # 這台機器還沒同步過，兩支都在
+
+        changed = db.import_watchlist_snapshot(conn_b, snapshot_path)
+
+        assert changed is True
+        codes = {r["code"] for r in db.fetch_watchlist(conn_b)}
+        assert codes == {"2330"}
+
+
+def test_import_watchlist_snapshot_returns_false_when_already_in_sync(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    snapshot_path = tmp_path / "watchlist_shared.json"
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330", name="台積電", market="TWSE")
+        db.export_watchlist_snapshot(conn, snapshot_path)
+        changed = db.import_watchlist_snapshot(conn, snapshot_path)
+
+    assert changed is False
+
+
+def test_import_watchlist_snapshot_does_not_touch_disabled_strategies(tmp_path):
+    # disabled_strategies是根據本地歷史資料算出來的，兩台機器歷史資料進度不一定一樣，
+    # 匯入同步檔案時不該被覆蓋/清空。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    snapshot_path = tmp_path / "watchlist_shared.json"
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        db.set_disabled_strategies(conn, "2330", ["chip_momentum"])
+        db.export_watchlist_snapshot(conn, snapshot_path)
+        db.import_watchlist_snapshot(conn, snapshot_path)
+        assert db.get_disabled_strategies(conn, "2330") == ["chip_momentum"]
