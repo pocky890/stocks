@@ -532,6 +532,38 @@ def test_build_paper_trades_marks_open_position_as_held_with_unrealized_return(t
     assert atr_row["報酬率(%)"] == 0
 
 
+def test_build_paper_trades_uses_fresh_intraday_price_not_frozen_daily_snapshot(tmp_path):
+    # 2026-08-17程式碼review發現：跟build_strategy_recommendations同一個bug(2026-08-13
+    # 才修過)，build_paper_trades的「現價」/未實現報酬率一直是直接讀bars_daily最後一筆，
+    # 沒有跟著改用_current_price——如果daily_update盤中抓到快照凍結在bars_daily，這裡
+    # 顯示的現價會跟總覽表格/建議買進表格不一致，未實現報酬率也會算錯。
+    closes = [50] * 20 + [60]
+    dates = pd.date_range(end=pd.Timestamp.now().normalize(), periods=len(closes), freq="D")
+    bars = [
+        Bar(symbol="2454", ts=ts.to_pydatetime(), open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    fresh_tick = Bar(
+        symbol="2454",
+        ts=(pd.Timestamp.now() - pd.Timedelta(minutes=3)).to_pydatetime(),
+        open=70, high=75, low=65, close=70, volume=50,
+    )
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.insert_bars_5min(conn, [fresh_tick])
+        db.add_to_watchlist(conn, "2454", name="聯發科")
+
+    rows = build_paper_trades(config, start_date=dates[0].strftime("%Y-%m-%d"))
+
+    atr_row = next(r for r in rows if r["策略"] == "atr_breakout")
+    assert atr_row["現價"] == 70, "該用還在更新的bars_5min現價(70)，不是bars_daily最後一筆(60)"
+    assert atr_row["報酬率(%)"] == round((70 - 60) / 60 * 100, 1), "未實現報酬率要用新的現價算，不是舊的60"
+
+
 def test_build_paper_trades_ignores_signals_before_start_date(tmp_path):
     # start_date設在買進訊號那天之後——那筆交易的BUY事件被篩掉了，剩一個孤立的SELL
     # 配不成交易，也不該被誤判成部位，整筆不該出現

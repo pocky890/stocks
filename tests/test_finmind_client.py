@@ -74,3 +74,65 @@ def test_fetch_institutional_flows_for_range_returns_empty_on_failure_message(mo
     monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
 
     assert finmind_client.fetch_institutional_flows_for_range("8299", "2026-07-01", "2026-07-02") == []
+
+
+def test_fetch_margin_balances_for_range_maps_finmind_fields(monkeypatch):
+    payload = {
+        "msg": "success",
+        "data": [
+            {
+                "date": "2026-07-01",
+                "stock_id": "2330",
+                "MarginPurchaseBuy": 1460,
+                "MarginPurchaseSell": 722,
+                "MarginPurchaseTodayBalance": 30003,
+                "ShortSaleBuy": 37,
+                "ShortSaleSell": 14,
+                "ShortSaleTodayBalance": 101,
+            }
+        ],
+    }
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = finmind_client.fetch_margin_balances_for_range("2330", "2026-07-01", "2026-07-01")
+
+    assert rows == [
+        {
+            "symbol": "2330",
+            "date": "2026-07-01",
+            "margin_buy": 1460,
+            "margin_sell": 722,
+            "margin_balance": 30003,
+            "short_buy": 37,
+            "short_sell": 14,
+            "short_balance": 101,
+        }
+    ]
+
+
+def test_fetch_margin_balances_for_range_returns_empty_on_failure_message(monkeypatch):
+    payload = {"msg": "error", "data": []}
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    assert finmind_client.fetch_margin_balances_for_range("2330", "2026-07-01", "2026-07-02") == []
+
+
+def test_fetch_valuations_for_range_maps_finmind_fields(monkeypatch):
+    payload = {
+        "msg": "success",
+        "data": [{"date": "2026-07-01", "stock_id": "2330", "PER": 31.86, "dividend_yield": 0.93, "PBR": 10.43}],
+    }
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = finmind_client.fetch_valuations_for_range("2330", "2026-07-01", "2026-07-01")
+
+    assert rows == [
+        {"symbol": "2330", "date": "2026-07-01", "pe_ratio": 31.86, "dividend_yield": 0.93, "pb_ratio": 10.43}
+    ]
+
+
+def test_fetch_valuations_for_range_returns_empty_on_failure_message(monkeypatch):
+    payload = {"msg": "error", "data": []}
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    assert finmind_client.fetch_valuations_for_range("2330", "2026-07-01", "2026-07-02") == []

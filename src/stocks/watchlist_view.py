@@ -379,7 +379,8 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
 
             flows = fetch_institutional_flows(conn, symbol)
             merged = attach_institutional_flows(bars, flows)
-            current_price = bars["close"].iloc[-1]
+            today_bars = bars_to_dataframe(fetch_bars_5min_today(conn, symbol), ts_field="ts")
+            current_price = _current_price(bars, today_bars)
             disabled = set(get_disabled_strategies(conn, symbol))
 
             for strategy_name in NOTIFIABLE_STRATEGIES:

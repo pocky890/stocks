@@ -564,6 +564,31 @@ def test_golden_cross_scaleout_sells_both_halves_same_day_on_gap_down():
     assert "賣出剩餘一半" in sells[1].detail
 
 
+def test_golden_cross_scaleout_reenters_immediately_after_full_exit_while_score_still_qualifies():
+    # 2026-08-17程式碼review發現的bug，跟trust_momentum/long_swing踩過的同一種問題：改成
+    # level-triggered之前，進場條件是edge-triggered(entry_state從False變True的第一天才
+    # 觸發)。這裡用score_threshold=3把門檻降低，讓「MA3>MA7(+2)+RSI未超買(+1)」這兩項
+    # 從第一次進場(idx7)之後就一路維持>=3分沒有掉下來過，即使idx12出現一次量能確認的
+    # 真跌破觸發分批出場全部賣光——entry_state在idx7~idx13全程都是True(見下方數值
+    # 驗證)，代表舊版edge-triggered邏輯的entry_edge會在這整段期間全部是False(因為
+    # prev_entry_state也一直是True)，出場後永遠不會重新進場，卡死在旁邊。改成
+    # level-triggered後只要position==0時entry_state[t]是True就立刻進場，這裡驗證確實
+    # 在idx12(跌破出場同一天)就重新觸發了第二次BUY。
+    closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 16, 19, 21]
+    volumes = [1000] * 7 + [3000, 1000, 1000, 1000, 1000, 3000, 1000, 1000]
+    bars = make_bars(closes, volumes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+    params = {**SCALEOUT_PARAMS, "score_threshold": 3}
+
+    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, params)
+
+    buys = [e for e in events if e.direction == Direction.BUY]
+    sells = [e for e in events if e.direction == Direction.SELL]
+    assert len(sells) == 2, "idx12量能確認跌破3日線+同時跌破5日線，分批出場兩階段應該同一天出清"
+    assert len(buys) == 2, "出場後score從未跌破門檻，應該立刻重新進場，不用等條件重新False→True轉一輪"
+    assert buys[0].ts == bars.index[7]
+    assert buys[1].ts == sells[-1].ts, "第二次進場應該就在完全出清的同一天，不是隔了好幾天才等到edge重新觸發"
+
+
 def test_golden_cross_scaleout_returns_nothing_without_institutional_columns():
     # 沒有籌碼欄位時chip_backed整段是False，缺了+2分；把突破也擋掉(highs設高)的話剩下
     # MA3>MA7(+2)+站上MA7(+1)+量增(+1)=4分不到5分門檻，不該進場。

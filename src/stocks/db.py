@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS symbols (
     market TEXT,
     is_watchlist INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0,
-    disabled_strategies TEXT
+    disabled_strategies TEXT,
+    groups TEXT
 );
 
 CREATE TABLE IF NOT EXISTS bars_5min (
@@ -135,6 +136,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE symbols ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
     if "disabled_strategies" not in columns:
         conn.execute("ALTER TABLE symbols ADD COLUMN disabled_strategies TEXT")
+    if "groups" not in columns:
+        conn.execute("ALTER TABLE symbols ADD COLUMN groups TEXT")
 
 
 def insert_bars_daily(conn: sqlite3.Connection, bars: list[Bar]) -> None:
@@ -266,6 +269,20 @@ def get_disabled_strategies(conn: sqlite3.Connection, code: str) -> list[str]:
 
 def set_disabled_strategies(conn: sqlite3.Connection, code: str, strategies: list[str]) -> None:
     conn.execute("UPDATE symbols SET disabled_strategies = ? WHERE code = ?", (json.dumps(strategies), code))
+
+
+def get_symbol_groups(conn: sqlite3.Connection, code: str) -> list[str]:
+    """使用者自訂的觀察清單分組(標籤式，一支股票可以同時屬於多個群組)——2026-08-17
+    新增，純粹是dashboard顯示用的分類，不影響任何策略評估/通知邏輯。沒有設定過就回傳
+    空清單(還沒分類，只會出現在「全部」)。"""
+    row = conn.execute("SELECT groups FROM symbols WHERE code = ?", (code,)).fetchone()
+    if row is None or not row["groups"]:
+        return []
+    return json.loads(row["groups"])
+
+
+def set_symbol_groups(conn: sqlite3.Connection, code: str, groups: list[str]) -> None:
+    conn.execute("UPDATE symbols SET groups = ? WHERE code = ?", (json.dumps(groups), code))
 
 
 def add_to_watchlist(conn: sqlite3.Connection, code: str, name: str = "", market: str = "TWSE") -> None:

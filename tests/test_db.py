@@ -351,3 +351,33 @@ def test_set_disabled_strategies_overwrites_previous_list(tmp_path):
         db.set_disabled_strategies(conn, "2330", ["trend_following"])
         db.set_disabled_strategies(conn, "2330", [])
         assert db.get_disabled_strategies(conn, "2330") == []
+
+
+def test_get_symbol_groups_returns_empty_list_when_never_set(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        assert db.get_symbol_groups(conn, "2330") == []
+
+
+def test_set_symbol_groups_then_get_roundtrips(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        db.set_symbol_groups(conn, "2330", ["AI供應鏈", "記憶體"])
+        assert db.get_symbol_groups(conn, "2330") == ["AI供應鏈", "記憶體"]
+
+
+def test_set_symbol_groups_overwrites_previous_list(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        db.set_symbol_groups(conn, "2330", ["AI供應鏈"])
+        db.set_symbol_groups(conn, "2330", [])
+        assert db.get_symbol_groups(conn, "2330") == []

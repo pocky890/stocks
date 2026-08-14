@@ -3,6 +3,7 @@ import pandas as pd
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.strategy_selection import (
     MIN_AVG_RETURN_PCT,
+    MIN_PROFIT_FACTOR,
     MIN_TOTAL_RETURN_PCT,
     MIN_TRADES_FOR_RANKING,
     MIN_TRADES_OVERRIDES,
@@ -11,13 +12,16 @@ from stocks.strategy_selection import (
 )
 
 
-def make_summary(n=10, win_rate=50.0, avg_return_pct=1.0, total_return_pct=100.0, avg_return_excluding_best_pct=None) -> dict:
+def make_summary(
+    n=10, win_rate=50.0, avg_return_pct=1.0, total_return_pct=100.0, avg_return_excluding_best_pct=None, profit_factor=None
+) -> dict:
     return {
         "n": n,
         "win_rate": win_rate,
         "avg_return_pct": avg_return_pct,
         "total_return_pct": total_return_pct,
         "avg_return_excluding_best_pct": avg_return_excluding_best_pct,
+        "profit_factor": profit_factor,
     }
 
 
@@ -88,6 +92,41 @@ def test_should_disable_uses_per_strategy_trade_override():
     # 沒有strategy_name(或是其他沒被override的策略)一樣要用全域門檻擋下來
     assert should_disable(summary) is True
     assert should_disable(summary, "chip_momentum") is True
+
+
+def test_should_disable_true_when_profit_factor_below_threshold_even_with_good_average():
+    # 2026-08-17使用者拿10年真實資料比較後決定：獲利因子<MIN_PROFIT_FACTOR就排除，
+    # 即使平均/加總報酬都過關——同一支股票同一種MDD深淺，獲利因子不夠代表賺的錢沒有
+    # 明顯蓋過賠的錢，比單獨用MDD當門檻更準。
+    summary = make_summary(
+        n=MIN_TRADES_FOR_RANKING,
+        win_rate=50.0,
+        avg_return_pct=MIN_AVG_RETURN_PCT + 10,
+        total_return_pct=MIN_TOTAL_RETURN_PCT + 100,
+        profit_factor=MIN_PROFIT_FACTOR - 0.1,
+    )
+    assert should_disable(summary) is True
+
+
+def test_should_disable_false_when_profit_factor_is_none_meaning_no_losing_trades():
+    # profit_factor是None代表完全沒有虧損(分母是0)，是最好的情況，不該被當成排除依據
+    summary = make_summary(
+        n=MIN_TRADES_FOR_RANKING,
+        avg_return_pct=MIN_AVG_RETURN_PCT + 10,
+        total_return_pct=MIN_TOTAL_RETURN_PCT + 100,
+        profit_factor=None,
+    )
+    assert should_disable(summary) is False
+
+
+def test_should_disable_false_when_profit_factor_clears_threshold():
+    summary = make_summary(
+        n=MIN_TRADES_FOR_RANKING,
+        avg_return_pct=MIN_AVG_RETURN_PCT + 10,
+        total_return_pct=MIN_TOTAL_RETURN_PCT + 100,
+        profit_factor=MIN_PROFIT_FACTOR,
+    )
+    assert should_disable(summary) is False
 
 
 def test_compute_disabled_strategies_disables_everything_on_flat_data_with_no_signals():

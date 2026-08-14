@@ -12,8 +12,15 @@ class GoldenCrossScaleOutStrategy:
       收盤突破20日新高(不含當天，跟atr_breakout同樣shift(1)避免look-ahead) +2
       當天成交量 > 20日均量   +1
       RSI還沒超買(<rsi_overbought，預設70)  +1
-      總分達到score_threshold(預設5分)才進場，edge-triggered(總分從<5變成>=5的第一天觸發，
-      不是每天符合就重複發)。前5項是「動能夠不夠強」，RSI濾網問的是不同維度的問題「是不是
+      總分達到score_threshold(預設5分)才進場，level-triggered(只要當天score>=threshold
+      就進場，不要求前一天score<threshold)——2026-08-17程式碼review發現原本用edge-
+      triggered(score從<5變成>=5的第一天才觸發)會卡死：分批出場走完階段1+階段2、
+      position變回0時，如果score從出場前到出場後一路都>=5(從未跌回threshold以下)，
+      entry_edge就再也不會是True，這支股票會被這個策略晾在旁邊，直到score先跌破5分
+      再重新站上才會恢復進場——跟trust_momentum/long_swing踩過的同一種bug(停損/出場後
+      條件還沒轉過一輪False→True就卡住進不了場)，改成level-triggered後只要position
+      == 0時score夠就能立刻再進場，不用等分數先掉下去再爬回來。前5項是「動能夠不夠強」，
+      RSI濾網問的是不同維度的問題「是不是
       已經追太高了」——回測2454發現有些訊號分數很高但立刻反轉，一部分是追在超買區進場，
       RSI在那種情況不加分，score就少1分。「法人5日買超」用「近5日合計>0」(不是連續買超
       天數)，跟其他項一樣是加分項，不是硬性關卡，所以缺一項(例如籌碼沒過)只要其他項夠強
@@ -77,8 +84,6 @@ class GoldenCrossScaleOutStrategy:
             + not_overbought.astype(int) * score_rsi
         )
         entry_state = score >= score_threshold
-        prev_entry_state = entry_state.shift(1).fillna(False).astype(bool)
-        entry_edge = entry_state & ~prev_entry_state
 
         below_fast_confirmed = (close < ma_fast) & volume_confirm
         prev_below_fast_confirmed = below_fast_confirmed.shift(1).fillna(False).astype(bool)
@@ -108,7 +113,7 @@ class GoldenCrossScaleOutStrategy:
                     SignalEvent(symbol, self.name, Direction.SELL, c, t, "、".join(reasons) + "，賣出剩餘一半")
                 )
                 position = 0
-            if position == 0 and entry_edge[t]:
+            if position == 0 and entry_state[t]:
                 hits = [
                     label
                     for label, series in [

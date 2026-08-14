@@ -14,27 +14,32 @@ import requests
 TIMEOUT = 15
 BASE_URL = "https://api.finmindtrade.com/api/v4/data"
 DATASET = "TaiwanStockInstitutionalInvestorsBuySell"
+MARGIN_DATASET = "TaiwanStockMarginPurchaseShortSale"
+VALUATION_DATASET = "TaiwanStockPER"
 
 FOREIGN_NAMES = {"Foreign_Investor", "Foreign_Dealer_Self"}
 TRUST_NAMES = {"Investment_Trust"}
 DEALER_NAMES = {"Dealer_self", "Dealer_Hedging"}
 
 
-def fetch_institutional_flows_for_range(symbol: str, start_date: str, end_date: str) -> list[dict]:
-    """回傳[{symbol, date, foreign_net, trust_net, dealer_net, total_net}, ...]，
-    日期照升序排列，一次涵蓋start_date~end_date整段範圍。"""
+def _fetch_range(dataset: str, symbol: str, start_date: str, end_date: str) -> list[dict]:
     resp = requests.get(
         BASE_URL,
-        params={"dataset": DATASET, "data_id": symbol, "start_date": start_date, "end_date": end_date},
+        params={"dataset": dataset, "data_id": symbol, "start_date": start_date, "end_date": end_date},
         timeout=TIMEOUT,
     )
     resp.raise_for_status()
     payload = resp.json()
     if payload.get("msg") != "success":
         return []
+    return payload.get("data", [])
 
+
+def fetch_institutional_flows_for_range(symbol: str, start_date: str, end_date: str) -> list[dict]:
+    """回傳[{symbol, date, foreign_net, trust_net, dealer_net, total_net}, ...]，
+    日期照升序排列，一次涵蓋start_date~end_date整段範圍。"""
     by_date: dict[str, dict[str, int]] = {}
-    for row in payload.get("data", []):
+    for row in _fetch_range(DATASET, symbol, start_date, end_date):
         bucket = by_date.setdefault(row["date"], {"foreign": 0, "trust": 0, "dealer": 0})
         net = row["buy"] - row["sell"]
         name = row["name"]
@@ -55,4 +60,40 @@ def fetch_institutional_flows_for_range(symbol: str, start_date: str, end_date: 
             "total_net": b["foreign"] + b["trust"] + b["dealer"],
         }
         for date, b in sorted(by_date.items())
+    ]
+
+
+def fetch_margin_balances_for_range(symbol: str, start_date: str, end_date: str) -> list[dict]:
+    """回傳[{symbol, date, margin_buy, margin_sell, margin_balance, short_buy, short_sell,
+    short_balance}, ...]，欄位跟twse_client.fetch_margin_balances_for_date對齊，方便
+    insert_margin_balances不用管資料來源是哪一邊。"""
+    return [
+        {
+            "symbol": symbol,
+            "date": row["date"],
+            "margin_buy": row["MarginPurchaseBuy"],
+            "margin_sell": row["MarginPurchaseSell"],
+            "margin_balance": row["MarginPurchaseTodayBalance"],
+            "short_buy": row["ShortSaleBuy"],
+            "short_sell": row["ShortSaleSell"],
+            "short_balance": row["ShortSaleTodayBalance"],
+        }
+        for row in _fetch_range(MARGIN_DATASET, symbol, start_date, end_date)
+    ]
+
+
+def fetch_valuations_for_range(symbol: str, start_date: str, end_date: str) -> list[dict]:
+    """回傳[{symbol, date, pe_ratio, dividend_yield, pb_ratio}, ...]，欄位跟
+    twse_client.fetch_valuations_for_date對齊——但FinMind的TaiwanStockPER沒有股票名稱欄位，
+    這裡不像twse那邊順便回傳name，backfill時symbols表的name已經在watchlist加入時寫過了，
+    不需要靠這個dataset補。"""
+    return [
+        {
+            "symbol": symbol,
+            "date": row["date"],
+            "pe_ratio": row["PER"],
+            "dividend_yield": row["dividend_yield"],
+            "pb_ratio": row["PBR"],
+        }
+        for row in _fetch_range(VALUATION_DATASET, symbol, start_date, end_date)
     ]

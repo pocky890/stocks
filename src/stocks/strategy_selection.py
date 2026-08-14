@@ -39,6 +39,13 @@ MIN_TOTAL_RETURN_PCT = 50.0  # 2026-08-17使用者新增的第二條門檻：加
 # 抓對的訊號。改成只留平均報酬<MIN_AVG_RETURN_PCT這一個自動排除門檻；
 # avg_return_excluding_best_pct繼續算出來顯示，當「這筆正報酬有沒有過度依賴單筆」的
 # 參考資訊，但不再自動觸發排除，交給使用者自己判斷。
+MIN_PROFIT_FACTOR = 2.0  # 2026-08-17使用者拿10年真實回測數字比較後決定：獲利因子<2就排除，
+# 不管MDD多深——同樣是重虧損股票，MDD深但獲利因子夠高(例如7.5)代表過程顛簸但賺賠比紮實，
+# 不該被單獨的MDD門檻誤殺(套用同一支股票兩個策略實測：MDD-82%/獲利因子2.4 vs
+# MDD-28.3%/獲利因子4.6，後者全面更好)；獲利因子<2代表賺的錢沒有明顯蓋過賠的錢，這種
+# 才是真正該排除的。完全沒有虧損時profit_factor是None(不是0)，這裡不排除——那是最好的
+# 情況，不是資料不足。目前只加獲利因子門檻，MDD本身暫不單獨設門檻(套10年實測資料發現
+# MDD>35%會誤殺58%現有保留的策略，且MDD跟策略好壞沒有乾淨的對應關係，不像獲利因子)。
 SCALEOUT_STRATEGY = "golden_cross_scaleout"
 
 
@@ -66,13 +73,17 @@ def should_disable(summary: dict | None, strategy_name: str | None = None) -> bo
     當門檻：低勝率+高賺賠比是趨勢跟隨策略的正常樣貌，用勝率否決會錯殺這種類型的策略。
     也不會因為avg_return_excluding_best_pct(拿掉單筆最賺的那一筆之後還剩什麼)轉負就
     排除——那正是這類策略設計上要抓的「靠少數幾筆大波段撐報酬」，不是瑕疵，只當參考
-    資訊顯示，不當自動排除依據。"""
+    資訊顯示，不當自動排除依據。獲利因子<MIN_PROFIT_FACTOR也排除(2026-08-17新增)——
+    profit_factor是None代表完全沒有虧損，這是最好的情況，不當排除依據。"""
     min_trades = MIN_TRADES_OVERRIDES.get(strategy_name, MIN_TRADES_FOR_RANKING)
     if not summary or summary["n"] < min_trades:
         return True
     if summary["avg_return_pct"] < MIN_AVG_RETURN_PCT:
         return True
-    return summary["total_return_pct"] <= MIN_TOTAL_RETURN_PCT
+    if summary["total_return_pct"] <= MIN_TOTAL_RETURN_PCT:
+        return True
+    profit_factor = summary.get("profit_factor")
+    return profit_factor is not None and profit_factor < MIN_PROFIT_FACTOR
 
 
 def compute_disabled_strategies(symbol: str, bars: pd.DataFrame, strategy_params: dict) -> list[str]:

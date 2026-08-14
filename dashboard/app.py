@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -26,13 +27,22 @@ from stocks.db import (
     fetch_watchlist,
     get_disabled_strategies,
     get_setting,
+    get_symbol_groups,
     init_db,
     move_watchlist_symbol,
     remove_from_watchlist,
     set_setting,
+    set_symbol_groups,
 )
 from stocks.shioaji_client import ShioajiClient
 from stocks.strategies import STRATEGY_LABELS, STRATEGY_REGISTRY, strategy_label
+from stocks.strategy_selection import (
+    MIN_AVG_RETURN_PCT,
+    MIN_PROFIT_FACTOR,
+    MIN_TOTAL_RETURN_PCT,
+    MIN_TRADES_FOR_RANKING,
+    MIN_TRADES_OVERRIDES,
+)
 from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 from stocks.watchlist_view import build_overview_rows, build_paper_trades, build_strategy_recommendations
 
@@ -98,12 +108,16 @@ def _compute_track_records(_config, symbols: tuple):
             disabled = set(get_disabled_strategies(conn, code))
 
             def cell_text(name: str, summary: dict | None) -> str:
-                text = (
-                    f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均 / "
-                    f"{summary['total_return_pct']:+.1f}%加總（{summary['n']}筆）"
-                    if summary
-                    else "尚無完整交易紀錄"
-                )
+                if summary:
+                    pf = summary["profit_factor"]
+                    pf_text = f"{pf:.1f}" if pf is not None else "∞(無虧損)"
+                    text = (
+                        f"{summary['win_rate']:.0f}%勝率 / {summary['avg_return_pct']:+.1f}%平均 / "
+                        f"{summary['total_return_pct']:+.1f}%加總（{summary['n']}筆）/ "
+                        f"獲利因子{pf_text} / 最大回撤-{summary['max_drawdown_pct']:.1f}%"
+                    )
+                else:
+                    text = "尚無完整交易紀錄"
                 return f"{text} (已排除)" if name in disabled else text
 
             row = {"代號": code, "名稱": names.get(code) or "—"}
@@ -144,7 +158,7 @@ def render_watchlist_table(config, symbols: tuple):
     這幾個欄位背後看的是bars_5min(run_live.py即時累積)跟Shioaji現場連線，資料本身
     是活的，只差頁面沒有自動重新渲染。▲▼/移除按鈕維持原本st.rerun()預設的整頁重新
     執行(fragment內呼叫st.rerun()預設scope="app"，不用特別處理)。"""
-    overview_rows = build_overview_rows(config)
+    overview_rows = [r for r in build_overview_rows(config) if r["代號"] in symbols]
     try:
         intraday_bars = _fetch_today_intraday(config, symbols) if symbols else {}
     except Exception as exc:
@@ -230,7 +244,8 @@ def render_strategy_recommendations(config, watchlist: list[dict]):
     )
 
     today_str = date.today().strftime("%Y-%m-%d")
-    recommendations = build_strategy_recommendations(config)
+    watchlist_codes = {w["code"] for w in watchlist}
+    recommendations = [r for r in build_strategy_recommendations(config) if r["代號"] in watchlist_codes]
     if today_only:
         recommendations = [r for r in recommendations if r["觸發日期"] == today_str]
     if selected_symbols:
@@ -282,15 +297,32 @@ if should_check_for_updates(_last_check, _now):
     for error in result["errors"]:
         st.warning(f"⚠️ {error}（不影響其他資料，稍後重新整理再試一次即可）")
 
-tab_watchlist, tab_chart, tab_fundamentals, tab_history, tab_strategy_logic = st.tabs(
-    ["觀察清單", "K線圖", "籌碼/基本面", "訊號紀錄", "策略邏輯"]
-)
-
 with connect(config.db_path) as conn:
     watchlist_rows = fetch_watchlist(conn)
 
-watchlist = [dict(r) for r in watchlist_rows]
+all_watchlist = [dict(r) for r in watchlist_rows]
+for _w in all_watchlist:
+    _w["groups"] = json.loads(_w["groups"]) if _w["groups"] else []
+
+all_groups = sorted({g for w in all_watchlist for g in w["groups"]})
+
+# 群組是標籤式(一支股票可以同時屬於多個群組)、自訂名稱——2026-08-17使用者要求，觀察清單
+# 股票變多之後太亂，想要「切分類」的感覺。這個選擇器放在所有頁籤上方(2026-08-17使用者
+# 指出放在頁籤下面不好用，改到st.tabs()之前，這樣才是整頁最上方)，是全站共用的篩選：
+# 選了某個群組之後，下面觀察清單/買進賣出策略訊號/策略歷史勝率參考/訊號紀錄頁籤都只會顯示
+# 這個群組裡的股票——靠的是watchlist/symbols這兩個變數被這裡篩選過，後面每個頁籤都是重複
+# 使用這兩個變數，不用每個頁籤各自處理篩選邏輯。K線圖/籌碼基本面頁籤的選股下拉也會跟著
+# 縮小選項，這是共用同一份symbols變數的自然結果，不是特別去改那兩個頁籤。
+selected_group = st.segmented_control("群組", ["全部"] + all_groups, default="全部", key="active_group") or "全部"
+if selected_group == "全部":
+    watchlist = all_watchlist
+else:
+    watchlist = [w for w in all_watchlist if selected_group in w["groups"]]
 symbols = [w["code"] for w in watchlist]
+
+tab_watchlist, tab_chart, tab_fundamentals, tab_history, tab_strategy_logic = st.tabs(
+    ["觀察清單", "K線圖", "籌碼/基本面", "訊號紀錄", "策略邏輯"]
+)
 
 with tab_watchlist:
     st.subheader("觀察清單")
@@ -306,6 +338,22 @@ with tab_watchlist:
             add_result = add_symbol_to_watchlist(config, new_code.strip())
         (st.success if add_result["ok"] else st.warning)(add_result["message"])
         st.rerun()
+
+    if all_watchlist:
+        with st.expander("🏷️ 管理群組"):
+            st.caption("用逗號分開可以同時填多個群組(例如「AI供應鏈, 記憶體」)；留空代表不分類，只會出現在「全部」。")
+            with st.form("edit_groups_form"):
+                group_inputs = {
+                    w["code"]: st.text_input(
+                        f"{w['code']} {w['name']}", value=", ".join(w["groups"]), key=f"group_edit_{w['code']}"
+                    )
+                    for w in all_watchlist
+                }
+                if st.form_submit_button("儲存群組設定"):
+                    with connect(config.db_path) as conn:
+                        for code, raw in group_inputs.items():
+                            set_symbol_groups(conn, code, [g.strip() for g in raw.split(",") if g.strip()])
+                    st.rerun()
 
     if watchlist:
         strategy_keys = [k for k in STRATEGY_LABELS if k in NOTIFIABLE_STRATEGIES]
@@ -442,7 +490,7 @@ with tab_history:
         "只看特定股票", paper_symbol_options, key="paper_trades_symbol_filter"
     )
 
-    paper_trades = build_paper_trades(config, start_date=paper_start.strftime("%Y-%m-%d"))
+    paper_trades = [r for r in build_paper_trades(config, start_date=paper_start.strftime("%Y-%m-%d")) if r["代號"] in symbols]
     if paper_selected_symbols:
         paper_selected_codes = {s.split(" ", 1)[0] for s in paper_selected_symbols}
         paper_trades = [r for r in paper_trades if r["代號"] in paper_selected_codes]
@@ -471,12 +519,35 @@ with tab_history:
         closed = [r for r in paper_trades if r["狀態"] == "已平倉"]
         if closed:
             summary_df = pd.DataFrame(closed)
+
+            def _profit_factor(returns: pd.Series):
+                gains = returns[returns > 0].sum()
+                losses = -returns[returns < 0].sum()
+                return gains / losses if losses > 0 else None
+
+            def _max_drawdown(group: pd.DataFrame) -> float:
+                # 依買進日期排序後累加報酬率畫簡化權益曲線，抓從高點到低點最大跌了多少，
+                # 跟strategy_stats._max_drawdown_pct同一套算法，這裡改用pandas寫一份是因為
+                # 這張表的資料來源是build_paper_trades攤平後的dict list，不是Trade物件。
+                # 2026-08-17程式碼review發現：peak沒有以0(起始基準點)做底，如果權益曲線
+                # 從頭到尾沒有回到0以上，回撤會被低估(例如[-10,-5,+3]這裡原本只算出5.0，
+                # 正確答案是15.0)——用clip(lower=0.0)補回peak最少是0這個起始基準，
+                # 跟strategy_stats._max_drawdown_pct的peak = max(peak, cumulative)(從
+                # peak=0.0開始累加)數學上等價。
+                ordered = group.sort_values("買進日期")["報酬率(%)"]
+                cumulative = ordered.cumsum()
+                peak = cumulative.cummax().clip(lower=0.0)
+                return (peak - cumulative).max()
+
             summary = (
                 summary_df.groupby("策略")["報酬率(%)"]
-                .agg(筆數="count", 勝率=lambda s: (s > 0).mean() * 100, 平均報酬="mean", 加總報酬="sum")
+                .agg(筆數="count", 勝率=lambda s: (s > 0).mean() * 100, 平均報酬="mean", 加總報酬="sum", 獲利因子=_profit_factor)
                 .round(1)
                 .reset_index()
             )
+            mdd_by_strategy = summary_df.groupby("策略").apply(_max_drawdown)
+            summary["最大回撤"] = summary["策略"].map(-mdd_by_strategy).round(1)
+            st.caption("「獲利因子」是總獲利/總虧損(絕對值)，None代表這個策略目前完全沒有虧損過的交易；「最大回撤」是簡化權益曲線(每筆報酬率依買進日期直接加總)從高點到低點最大跌了多少，不是真正的資金曲線，只當風險參考。")
             st.dataframe(summary, use_container_width=True, hide_index=True)
 
         trades_df = pd.DataFrame(paper_trades).sort_values("買進日期", ascending=False)
@@ -491,6 +562,22 @@ with tab_strategy_logic:
         "「策略」進場+出場邏輯完整綁在一起，可以直接依據行動，會推播Telegram，每個策略類別本身的"
         "docstring就是這裡的說明文字；「指標訊號」單獨一個不構成完整交易系統，只記錄不推播，"
         "用一行帶過。目前套用的參數(config.json的strategy_params)列在每個策略說明下面。"
+    )
+
+    st.markdown("### 🚫 自動排除規則")
+    st.caption(
+        "每支股票的每個「策略」各自backtest一次，下面任一項沒過就自動排除(存進symbols."
+        "disabled_strategies，不會推播Telegram，但這裡跟「策略歷史勝率參考」照樣完整顯示全部策略供參考)。"
+        "由scripts/recompute_strategy_selection.py手動執行重跑更新，不是即時計算。"
+    )
+    overrides_text = "、".join(f"{strategy_label(name)}除外(改用{n}筆)" for name, n in MIN_TRADES_OVERRIDES.items())
+    st.markdown(
+        f"- 交易次數 < **{MIN_TRADES_FOR_RANKING}筆**（樣本不足，含完全沒有完整買賣配對；{overrides_text}）\n"
+        f"- 平均報酬率 < **{MIN_AVG_RETURN_PCT:+.1f}%**\n"
+        f"- 加總報酬 <= **{MIN_TOTAL_RETURN_PCT:+.1f}%**\n"
+        f"- 獲利因子 < **{MIN_PROFIT_FACTOR:.1f}**（完全沒有虧損時獲利因子視為∞，不排除）\n\n"
+        "不單獨用勝率或最大回撤(MDD)當排除依據——低勝率+高賺賠比是趨勢跟隨策略的正常樣貌，"
+        "MDD深但獲利因子夠高代表過程顛簸但賺賠比紮實，都不該被錯殺。"
     )
 
     st.markdown("### 📊 策略（會推播Telegram）")

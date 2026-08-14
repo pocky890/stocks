@@ -50,6 +50,23 @@ def simulate_round_trips(events: list[SignalEvent]) -> tuple[list[Trade], Signal
     return trades, open_position
 
 
+def _max_drawdown_pct(trades: list) -> float:
+    """把每筆交易的return_pct依進場時間(entry_ts，Trade跟ScaleoutTrade都有這個欄位，
+    不像exit_ts只有Trade有)直接加總(不是複利，跟total_return_pct同一套慣例)畫出一條
+    簡化權益曲線，抓這條線從高點到低點最大跌了多少——沒有真正的資金/倉位大小模型，
+    是「如果每筆交易都投入同一單位」的簡化版，抓的是相對走勢，不是實際資金曲線。
+    回傳正數(跌幅大小)，0代表這條曲線從頭到尾沒有回落過。"""
+    ordered = sorted(trades, key=lambda t: t.entry_ts)
+    cumulative = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for t in ordered:
+        cumulative += t.return_pct
+        peak = max(peak, cumulative)
+        max_dd = max(max_dd, peak - cumulative)
+    return max_dd
+
+
 def summarize_trades(trades: list[Trade]) -> dict:
     """回傳None代表沒有任何一次完整的進出場，勝率/報酬無意義。
 
@@ -58,19 +75,32 @@ def summarize_trades(trades: list[Trade]) -> dict:
     低勝率不代表不好，但如果拿掉那"一筆"最好的之後剩下全部轉負，代表這個組合的正報酬
     只是運氣好抓到一次，不是可以重複期待的表現——用來給strategy_selection.py判斷排除
     時當「這個正報酬夠不夠紮實」的防呆檢查，不是要否定低勝率高賺賠比這種策略類型本身。
-    只有1筆交易時沒有「剩下的」可以算，回傳None。"""
+    只有1筆交易時沒有「剩下的」可以算，回傳None。
+
+    2026-08-17使用者(轉述Gemini的建議)要求補上兩個原本完全沒追蹤的風險指標：
+    - profit_factor(獲利因子) = 總獲利/總虧損(絕對值)，跟勝率是不同維度——勝率只算
+      次數，獲利因子看的是「賺賠的大小比」，趨勢跟隨策略常見「勝率不到50%但賺賠比夠大」
+      的樣貌，獲利因子能把這個特質量化出來。完全沒有虧損時(losses=0)比值沒有意義，
+      回傳None，不是0或無限大。
+    - max_drawdown_pct(最大回撤)：用一條簡化權益曲線(見_max_drawdown_pct)抓「中間
+      最慘從高點跌了多少」——只看平均/加總報酬看不出這個策略過程中會不會讓人心理上
+      拿不住(例如中途曾經跌50%，即使最後總報酬是正的，大部分人也撐不到那個時候)。"""
     if not trades:
         return None
     returns = [t.return_pct for t in trades]
     wins = sum(1 for r in returns if r > 0)
     sorted_returns = sorted(returns, reverse=True)
     remaining = sorted_returns[1:]
+    gains = sum(r for r in returns if r > 0)
+    losses = abs(sum(r for r in returns if r < 0))
     return {
         "n": len(trades),
         "win_rate": wins / len(trades) * 100,
         "avg_return_pct": sum(returns) / len(returns),
         "total_return_pct": sum(returns),
         "avg_return_excluding_best_pct": (sum(remaining) / len(remaining)) if remaining else None,
+        "profit_factor": (gains / losses) if losses > 0 else None,
+        "max_drawdown_pct": _max_drawdown_pct(trades),
     }
 
 
