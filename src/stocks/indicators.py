@@ -56,3 +56,18 @@ def stochastic_kd(high: pd.Series, low: pd.Series, close: pd.Series, rsv_period:
     k = rsv.ewm(alpha=1 / k_smooth, adjust=False).mean()
     d = k.ewm(alpha=1 / d_smooth, adjust=False).mean()
     return k, d
+
+
+def weekly_trend_confirmed(daily_close: pd.Series, ma_period: int = 20, require_slope_up: bool = True) -> pd.Series:
+    """多週期(日線進場+週線確認)濾網用：把日線收盤依週(週五收尾，W-FRI)聚合成週線，算
+    週線MA，回傳對齊回日線index的布林序列。require_slope_up=True比對「週MA本身比上一週
+    高(斜率向上)」；False比對「週收盤價是否站上週MA」。
+
+    不需要額外shift(1)避免look-ahead：pandas resample的每個週線bar用「週五」當標籤，
+    reindex(method="ffill")查某個日線日期時，只會找「標籤<=這個日期」的週線bar——當週
+    還沒收完(還沒到週五)，這一週的標籤(週五)一定還沒到，天生查不到、只會退回上一個
+    已經收完的週，不會不小心用到當週還沒發生的漲跌幫自己背書。"""
+    weekly_close = daily_close.resample("W-FRI").last()
+    weekly_ma = weekly_close.rolling(ma_period).mean()
+    confirmed_weekly = weekly_ma.diff() > 0 if require_slope_up else weekly_close > weekly_ma
+    return confirmed_weekly.reindex(daily_close.index, method="ffill").fillna(False).astype(bool)

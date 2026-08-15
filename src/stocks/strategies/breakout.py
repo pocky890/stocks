@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr, rolling_avg_volume
+from stocks.indicators import atr, rolling_avg_volume, weekly_trend_confirmed
 from stocks.models import Direction, SignalEvent
 
 
@@ -24,6 +24,15 @@ class BreakoutStrategy:
         # 2026-08-15新增供實測比較用——pct模式會把停損改成會跟漲上移的移動停損，跟原本
         # 進場後就固定不動的ATR停損是不同行為，不是單純換算距離的公式而已。
         stop_pct = params.get("stop_pct", 0.15)
+        require_weekly_trend = params.get("require_weekly_trend", False)  # 2026-08-16
+        # 使用者建議：日線突破進場太容易遇到假突破，額外要求週線級別的趨勢確認。
+        # config.json已經設成true當正式預設(全觀察清單10年回測驗證：勝率42.9%→47.6%、
+        # 獲利因子2.85→3.57、最大回撤-311.0→-192.7，代價是筆數變少、加總報酬因此降低)；
+        # 這裡程式碼本身的fallback仍是False，只有沒被config.json覆蓋的呼叫才會退回
+        # 沒有週線濾網的舊行為。
+        weekly_trend_mode = params.get("weekly_trend_mode", "slope")  # "slope"或"above_ma"，
+        # 見indicators.weekly_trend_confirmed。
+        weekly_ma_period = params.get("weekly_ma_period", 20)
 
         close = bars["close"]
         donchian_upper = bars["high"].rolling(window=high_lookback_days).max().shift(1)
@@ -32,6 +41,10 @@ class BreakoutStrategy:
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
 
         entry_condition = (close > donchian_upper) & (bars["volume"] > volume_multiplier * avg_volume)
+        if require_weekly_trend:
+            entry_condition = entry_condition & weekly_trend_confirmed(
+                close, weekly_ma_period, require_slope_up=(weekly_trend_mode == "slope")
+            )
         prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
         entry_edge = entry_condition & ~prev_entry
 

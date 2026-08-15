@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr
+from stocks.indicators import atr, weekly_trend_confirmed
 from stocks.models import Direction, SignalEvent
 
 
@@ -24,9 +24,21 @@ class ATRBreakoutStrategy:
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
+        require_weekly_trend = params.get("require_weekly_trend", False)  # 2026-08-16
+        # 使用者建議：日線突破進場太容易遇到假突破，額外要求週線級別的趨勢確認，波段
+        # 延續性理論上會比較好。config.json已經設成true當正式預設(全觀察清單10年回測
+        # 驗證：勝率46.9%→53.6%、獲利因子3.45→4.57、最大回撤-303.7→-125.9，代價是
+        # 筆數變少、加總報酬因此降低)；這裡程式碼本身的fallback仍是False，只有沒被
+        # config.json覆蓋的呼叫才會退回沒有週線濾網的舊行為。
+        weekly_trend_mode = params.get("weekly_trend_mode", "slope")  # "slope"(週MA本身
+        # 斜率向上) 或 "above_ma"(收盤站上週MA)，見indicators.weekly_trend_confirmed。
+        weekly_ma_period = params.get("weekly_ma_period", 20)
 
         close = bars["close"]
         donchian_upper = bars["high"].rolling(window=donchian_period).max().shift(1)
+        entry_gate = pd.Series(True, index=bars.index)
+        if require_weekly_trend:
+            entry_gate = weekly_trend_confirmed(close, weekly_ma_period, require_slope_up=(weekly_trend_mode == "slope"))
 
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []
@@ -58,7 +70,7 @@ class ATRBreakoutStrategy:
                         half_sold = False
                         stop_half = None
                         stop_full = None
-                elif c > donchian_upper[t]:
+                elif c > donchian_upper[t] and entry_gate[t]:
                     stop_half = c * (1 - stop_pct_half)
                     stop_full = c * (1 - stop_pct_full)
                     in_position = True
@@ -103,7 +115,7 @@ class ATRBreakoutStrategy:
                     stop = None
                 else:
                     stop = max(stop, next_stop(c, t))
-            elif c > donchian_upper[t]:
+            elif c > donchian_upper[t] and entry_gate[t]:
                 stop = next_stop(c, t)
                 events.append(
                     SignalEvent(symbol, self.name, Direction.BUY, c, t, f"創{donchian_period}日新高突破，{stop_label} {stop:.2f}")
