@@ -647,29 +647,13 @@ with tab_history:
                 losses = -returns[returns < 0].sum()
                 return gains / losses if losses > 0 else None
 
-            def _max_drawdown(group: pd.DataFrame) -> float:
-                # 依買進日期排序後累加報酬率畫簡化權益曲線，抓從高點到低點最大跌了多少，
-                # 跟strategy_stats._max_drawdown_pct同一套算法，這裡改用pandas寫一份是因為
-                # 這張表的資料來源是build_paper_trades攤平後的dict list，不是Trade物件。
-                # 2026-08-17程式碼review發現：peak沒有以0(起始基準點)做底，如果權益曲線
-                # 從頭到尾沒有回到0以上，回撤會被低估(例如[-10,-5,+3]這裡原本只算出5.0，
-                # 正確答案是15.0)——用clip(lower=0.0)補回peak最少是0這個起始基準，
-                # 跟strategy_stats._max_drawdown_pct的peak = max(peak, cumulative)(從
-                # peak=0.0開始累加)數學上等價。
-                ordered = group.sort_values("買進日期")["報酬率(%)"]
-                cumulative = ordered.cumsum()
-                peak = cumulative.cummax().clip(lower=0.0)
-                return (peak - cumulative).max()
-
             summary = (
                 summary_df.groupby("策略")["報酬率(%)"]
-                .agg(筆數="count", 勝率=lambda s: (s > 0).mean() * 100, 平均報酬="mean", 加總報酬="sum", 獲利因子=_profit_factor)
+                .agg(筆數="count", 勝率=lambda s: (s > 0).mean() * 100, 獲利因子=_profit_factor, 平均報酬="mean", 加總報酬="sum")
                 .round(1)
                 .reset_index()
             )
-            mdd_by_strategy = summary_df.groupby("策略").apply(_max_drawdown)
-            summary["最大回撤"] = summary["策略"].map(-mdd_by_strategy).round(1)
-            st.caption("「獲利因子」是總獲利/總虧損(絕對值)，None代表這個策略目前完全沒有虧損過的交易；「最大回撤」是簡化權益曲線(每筆報酬率依買進日期直接加總)從高點到低點最大跌了多少，不是真正的資金曲線，只當風險參考。")
+            st.caption("「獲利因子」是總獲利/總虧損(絕對值)，None代表這個策略目前完全沒有虧損過的交易。")
             st.dataframe(summary, use_container_width=True, hide_index=True)
 
         trades_df = pd.DataFrame(paper_trades).sort_values("買進日期", ascending=False)
