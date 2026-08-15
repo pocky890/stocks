@@ -113,6 +113,8 @@ def test_add_symbol_falls_back_to_earlier_date_when_todays_valuation_report_not_
     monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", fake_valuations)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_margin_balances_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
@@ -138,6 +140,8 @@ def test_add_symbol_immediately_computes_disabled_strategies(tmp_path, monkeypat
     monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", lambda d: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_margin_balances_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
     daily_update.add_symbol_to_watchlist(config, "2408")
 
@@ -160,6 +164,8 @@ def test_add_symbol_tpex_backfills_three_years_via_finmind(tmp_path, monkeypatch
     monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: (bars, "TPEx"))
     monkeypatch.setattr(daily_update.finmind_client, "fetch_margin_balances_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_valuations_latest", lambda: [])
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
     captured = {}
 
@@ -190,6 +196,8 @@ def test_add_symbol_tpex_survives_valuation_ssl_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TPEx"))
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_margin_balances_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
     def raise_ssl_error():
         raise requests.exceptions.SSLError("Missing Subject Key Identifier")
@@ -224,6 +232,8 @@ def test_add_symbol_twse_also_backfills_three_years_via_finmind(tmp_path, monkey
         "fetch_valuations_for_date",
         lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
     )
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
     captured = {}
 
@@ -257,6 +267,8 @@ def test_add_symbol_twse_falls_back_to_latest_day_when_finmind_fails(tmp_path, m
         "fetch_valuations_for_date",
         lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
     )
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
     def raise_error(symbol, start_date, end_date):
         raise requests.exceptions.ConnectionError("boom")
@@ -290,6 +302,8 @@ def test_add_symbol_backfills_margin_balances_three_years_via_finmind(tmp_path, 
         "fetch_valuations_for_date",
         lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
     )
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
     captured = {}
 
@@ -332,6 +346,8 @@ def test_add_symbol_falls_back_to_latest_day_when_finmind_margin_fails(tmp_path,
         "fetch_valuations_for_date",
         lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
     )
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
     def raise_error(symbol, start_date, end_date):
         raise requests.exceptions.ConnectionError("boom")

@@ -38,6 +38,7 @@ from stocks.db import (
     prune_signal_events,
     set_disabled_strategies,
     set_industry_code,
+    upsert_industry_universe,
     upsert_symbol,
     watchlist_sync_path,
 )
@@ -324,20 +325,39 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     else:
         name = ""
 
-    # 順便標記官方產業分類代碼給circuit_breaker.py用——只查這支股票自己的分類，不會像
-    # scripts/populate_industry_codes.py那樣順便把全市場同業都拉進來，新股票如果剛好是
-    # 觀察清單目前還沒有的產業，記得手動重跑那支腳本才會有同業寬度可以算。try/except跟
-    # 上面估值查詢同一套容錯慣例，查不到就先空著，不讓新增流程失敗。
+    # 順便標記官方產業分類代碼給circuit_breaker.py用，並把「全市場同產業」的股票也一起
+    # 拉進來(is_watchlist=0，不會出現在觀察清單畫面)——不能只查這支股票自己的分類就好，
+    # 不然如果這支股票剛好是觀察清單目前還沒有的產業，斷路器會因為完全沒有同業資料可以
+    # 算寬度，等於形同沒開。兩個市場都抓(不是只抓這支股票自己上市/上櫃的那邊)是因為同一個
+    # 產業代碼底下上市上櫃都有成員，跟scripts/populate_industry_codes.py同一套邏輯，
+    # 這裡是「新增單一股票時自動觸發同一件事」，不用再手動重跑那支腳本。兩個來源各自獨立
+    # try/except(TPEx的SSL已知偶爾不穩定，跟上面估值查詢同一套容錯慣例)，任一個失敗不影響
+    # 新增流程本身，只是那個市場的同業清單這次沒補到，之後新增股票或手動重跑populate_
+    # industry_codes.py時還會再試。
+    directory = []
     try:
-        directory = twse_client.fetch_company_directory() if market == "TWSE" else tpex_client.fetch_company_directory()
-        industry_code = next((d.get("industry_code") for d in directory if d["symbol"] == code), None)
+        directory += [{**d, "market": "TWSE"} for d in twse_client.fetch_company_directory()]
     except requests.RequestException:
-        industry_code = None
+        pass
+    try:
+        directory += [{**d, "market": "TPEx"} for d in tpex_client.fetch_company_directory()]
+    except requests.RequestException:
+        pass
+    industry_code = next((d.get("industry_code") for d in directory if d["symbol"] == code), None)
 
     with connect(config.db_path) as conn:
         add_to_watchlist(conn, code, name=name, market=market)
         if industry_code:
             set_industry_code(conn, code, industry_code)
+            # 排除這支股票自己(symbol != code)：它自己的name已經由上面的valuations流程
+            # 決定好了(可能刻意是""，等下次每日更新才補上)，這裡只負責補其他同業peer的
+            # 資料，不能讓peer upsert順便把這支股票自己的name蓋掉。
+            peers = [
+                {"code": d["symbol"], "name": d["name"], "market": d["market"], "industry_code": d["industry_code"]}
+                for d in directory
+                if d.get("industry_code") == industry_code and d["symbol"] != code
+            ]
+            upsert_industry_universe(conn, peers)
         export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
         if flows:
             insert_institutional_flows(conn, flows)
