@@ -76,13 +76,23 @@ def fetch_valuations_latest() -> list[dict]:
 
 
 def fetch_company_directory() -> list[dict]:
-    """全部上櫃公司的代號/簡稱清單，跟twse_client.fetch_company_directory()同樣用途——
-    給daily_update.add_symbol_to_watchlist的名稱解析用，CompanyAbbreviation才是使用者
-    平常講的簡稱，不是CompanyName那個完整法定登記名稱。"""
+    """全部上櫃公司的代號/簡稱/產業別清單，跟twse_client.fetch_company_directory()同樣
+    用途——CompanyAbbreviation才是使用者平常講的簡稱，不是CompanyName那個完整法定登記
+    名稱。SecuritiesIndustryCode是櫃買中心官方產業分類代碼(例如"24"=半導體業)，2026-08-16
+    新增給circuit_breaker.py的全市場同產業寬度斷路器用——查證過跟FinMind的TaiwanStockInfo
+    industry_category比，FinMind對上市半導體股仍停留在舊式「電子工業」籠統分類沒更新，
+    這裡官方資料才是正確的，故意不用FinMind省事。"""
     resp = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=TIMEOUT)
     resp.raise_for_status()
     payload = resp.json()
-    return [{"symbol": row["SecuritiesCompanyCode"], "name": row["CompanyAbbreviation"].strip()} for row in payload]
+    return [
+        {
+            "symbol": row["SecuritiesCompanyCode"],
+            "name": row["CompanyAbbreviation"].strip(),
+            "industry_code": row.get("SecuritiesIndustryCode"),
+        }
+        for row in payload
+    ]
 
 
 def fetch_ex_dividend_schedule() -> list[dict]:

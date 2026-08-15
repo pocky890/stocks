@@ -16,7 +16,16 @@ CREATE TABLE IF NOT EXISTS symbols (
     is_watchlist INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0,
     disabled_strategies TEXT,
-    groups TEXT
+    groups TEXT,
+    industry_code TEXT
+);
+
+CREATE TABLE IF NOT EXISTS industry_closes (
+    symbol TEXT NOT NULL,
+    date TEXT NOT NULL,
+    industry_code TEXT NOT NULL,
+    close REAL,
+    PRIMARY KEY (symbol, date)
 );
 
 CREATE TABLE IF NOT EXISTS bars_5min (
@@ -139,6 +148,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE symbols ADD COLUMN disabled_strategies TEXT")
     if "groups" not in columns:
         conn.execute("ALTER TABLE symbols ADD COLUMN groups TEXT")
+    if "industry_code" not in columns:
+        conn.execute("ALTER TABLE symbols ADD COLUMN industry_code TEXT")
 
 
 def insert_bars_daily(conn: sqlite3.Connection, bars: list[Bar]) -> None:
@@ -309,6 +320,75 @@ def get_symbol_groups(conn: sqlite3.Connection, code: str) -> list[str]:
 
 def set_symbol_groups(conn: sqlite3.Connection, code: str, groups: list[str]) -> None:
     conn.execute("UPDATE symbols SET groups = ? WHERE code = ?", (json.dumps(groups), code))
+
+
+def upsert_industry_universe(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """批次寫入「全市場同產業股票」的代號/名稱/市場/產業代碼——這些大多不是觀察清單
+    股票，只是為了算circuit_breaker.py的產業寬度需要知道「這個產業全市場還有哪些股票」。
+    刻意不動is_watchlist(不在SET子句裡，ON CONFLICT時會維持原值)：如果某支股票剛好
+    同時是觀察清單成員(例如2330台積電)，這個函式不會把它的is_watchlist=1覆蓋掉；
+    也不會用空字串蓋掉已經有的名稱，跟upsert_symbol同樣的保守慣例。"""
+    conn.executemany(
+        """INSERT INTO symbols (code, name, market, industry_code) VALUES (?, ?, ?, ?)
+           ON CONFLICT(code) DO UPDATE SET
+               industry_code = excluded.industry_code,
+               name = CASE WHEN excluded.name != '' THEN excluded.name ELSE symbols.name END,
+               market = excluded.market""",
+        [(r["code"], r.get("name", ""), r["market"], r["industry_code"]) for r in rows],
+    )
+
+
+def get_industry_code(conn: sqlite3.Connection, code: str) -> str | None:
+    """證交所/櫃買中心官方產業分類代碼(twse_client/tpex_client的公司名錄API撈的，
+    例如"24"=半導體業)，用來算「全市場同產業寬度」斷路器——不是使用者自訂的groups
+    分類標籤，那個是人為的觀察清單分組，跟這裡的官方產業別是兩回事。沒有值代表還沒
+    分類過(通常是還沒跑過populate_industry_codes.py，或這支股票是這之後才新增的)。"""
+    row = conn.execute("SELECT industry_code FROM symbols WHERE code = ?", (code,)).fetchone()
+    return row["industry_code"] if row else None
+
+
+def set_industry_code(conn: sqlite3.Connection, code: str, industry_code: str | None) -> None:
+    conn.execute("UPDATE symbols SET industry_code = ? WHERE code = ?", (industry_code, code))
+
+
+def fetch_all_industry_codes(conn: sqlite3.Connection) -> dict[str, str]:
+    """回傳{code: industry_code}，只含有分類過的(industry_code不是NULL)。"""
+    rows = conn.execute("SELECT code, industry_code FROM symbols WHERE industry_code IS NOT NULL").fetchall()
+    return {r["code"]: r["industry_code"] for r in rows}
+
+
+def insert_industry_closes(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """rows是{"symbol", "date", "industry_code", "close"}的list——全市場(不限觀察清單)
+    跟觀察清單同產業的股票，收盤價存這裡供斷路器算「這個產業有幾成股票跌破自己20日均線」
+    用，不是給策略評估用的完整OHLCV，只留算均線寬度需要的收盤價，比bars_daily輕量。"""
+    conn.executemany(
+        """INSERT OR REPLACE INTO industry_closes (symbol, date, industry_code, close)
+           VALUES (?, ?, ?, ?)""",
+        [(r["symbol"], r["date"], r["industry_code"], r["close"]) for r in rows],
+    )
+
+
+def fetch_industry_closes(conn: sqlite3.Connection, industry_code: str, since_date: str | None = None):
+    """回傳某個產業代碼底下全市場所有股票的收盤價紀錄，供circuit_breaker.py算寬度用。
+    since_date(可選)只拿這天之後的資料，斷路器只需要算MA20+遲滯緩衝的觀察窗口，
+    不需要整個retention期間全部資料都掃過一次。"""
+    if since_date:
+        return conn.execute(
+            "SELECT * FROM industry_closes WHERE industry_code = ? AND date >= ? ORDER BY date ASC",
+            (industry_code, since_date),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM industry_closes WHERE industry_code = ? ORDER BY date ASC", (industry_code,)
+    ).fetchall()
+
+
+INDUSTRY_CLOSES_RETENTION_DAYS = 180  # 算MA20寬度+遲滯緩衝只需要近期資料，跟
+# signal_events的90天retention同樣道理，不用整個全市場歷史都留著。
+
+
+def prune_industry_closes(conn: sqlite3.Connection, retention_days: int = INDUSTRY_CLOSES_RETENTION_DAYS) -> int:
+    cur = conn.execute("DELETE FROM industry_closes WHERE date < date('now', ?)", (f"-{retention_days} days",))
+    return cur.rowcount
 
 
 def add_to_watchlist(conn: sqlite3.Connection, code: str, name: str = "", market: str = "TWSE") -> None:

@@ -12,12 +12,14 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stocks.bar_aggregator import BarAggregator, market_hour_boundaries
+from stocks.circuit_breaker import is_buy_suppressed, load_active_state
 from stocks.config import load_config
 from stocks.daily_update import check_and_update
 from stocks.db import (
     attach_institutional_flows,
     bars_to_dataframe,
     connect,
+    fetch_all_industry_codes,
     fetch_bars_5min,
     fetch_bars_5min_today,
     fetch_bars_daily,
@@ -163,6 +165,11 @@ def main():
             for sched in fetch_ex_dividend_schedule(conn, row["code"]):
                 if sched["ex_date"] == today_str:
                     ex_dividend_today.append({**dict(sched), "name": row["name"]})
+        # 產業代碼/斷路器開關狀態一整個盤中時段內不會變(industry_code只在新增股票時變，
+        # 斷路器狀態只有run_batch.py收盤後才會更新)，這裡讀一次存在記憶體裡整場重複用，
+        # 不用每個5分K tick、每支股票都重新查一次DB。
+        industry_codes = fetch_all_industry_codes(conn)
+        circuit_breaker_state = load_active_state(conn)
     watchlist = [row["code"] for row in watchlist_rows]
     symbol_names = {row["code"]: row["name"] for row in watchlist_rows}
     if not watchlist:
@@ -233,12 +240,22 @@ def main():
                 # 構造出來的午夜0點)，通知上才會顯示合理的觸發時間。
                 events = [replace(e, ts=now) for e in raw_events if e.ts.date() == now.date()]
                 new_events = insert_signal_events(conn, events)
-            if new_events:
+                # 斷路器只擋「要不要推播」，不影響signal_events寫入——訊號紀錄頁籤要看得到
+                # 完整歷史，被擋掉的BUY一樣算「這個策略真的觸發過」，只是不推播Telegram。
+                notifiable_events = [
+                    e
+                    for e in new_events
+                    if e.direction != Direction.BUY
+                    or not is_buy_suppressed(symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_ma_period)
+                ]
+            if notifiable_events:
                 with connect(config.db_path) as conn:
                     daily_bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
                     ex_dividend_dates = {r["ex_date"] for r in fetch_ex_dividend_schedule(conn, symbol)}
-                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), new_events, daily_bars, ex_dividend_dates)
-                print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(new_events)} 個訊號(日線)")
+                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), notifiable_events, daily_bars, ex_dividend_dates)
+                print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(notifiable_events)} 個訊號(日線)")
+            if new_events and not notifiable_events:
+                print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(new_events)} 個訊號(日線)，全部被產業斷路器擋下(只記錄不推播)")
 
         if bucket_end.strftime("%H:%M") == REMINDER_CHECK_HHMM:
             today_str = now.date().isoformat()
@@ -264,6 +281,17 @@ def main():
                     for r in latest_per_strategy.values()
                     if (r["direction"] == Direction.BUY.value and current_price >= r["price"])
                     or (r["direction"] == Direction.SELL.value and current_price <= r["price"])
+                ]
+                # 斷路器也要擋這裡：不然BUY通知當下被斷路器擋掉不推播，13:20卻又直接讀
+                # signal_events把同一筆補發出去，等於繞過斷路器(2026-08-16使用者確認
+                # 要修這個漏洞)。SELL永遠不擋，跟即時檢查那邊的規則一致。
+                still_valid = [
+                    r
+                    for r in still_valid
+                    if r["direction"] != Direction.BUY.value
+                    or not is_buy_suppressed(
+                        symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_ma_period
+                    )
                 ]
                 if still_valid:
                     notify_reminder(config, symbol, symbol_names.get(symbol, ""), still_valid, current_price, ex_dividend_dates)

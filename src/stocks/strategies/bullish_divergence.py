@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr, rsi
+from stocks.indicators import atr, macd, rsi, stochastic_kd
 from stocks.models import Direction, SignalEvent
 
 
@@ -32,6 +32,15 @@ class BullishDivergenceStrategy:
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
+        confirm_next_day = params.get("confirm_next_day", False)  # 2026-08-15研究中：
+        # 2026年7月的系統性重挫期間這支策略進場後平均還要再跌一段(13~28個交易日後才真正
+        # 落底)，訊號當天訊號一出現就進場，等於接刀。跟capitulation_reversal同一套「隔天
+        # 不再破前低+收盤收高才進場」的確認邏輯借過來試——那支策略同一段期間完全沒有誤觸發，
+        # 差別就在這個確認機制。預設False不影響既有行為。
+        require_macd_turn = params.get("require_macd_turn", False)  # 額外要求MACD柱狀圖
+        # 比前一天回升(下跌動能減弱的另一個角度佐證，不要求真正黃金交叉——那個太罕見，
+        # 幾乎篩不出任何訊號)。
+        require_kd_bullish = params.get("require_kd_bullish", False)  # 額外要求K>D(偏多)。
 
         close = bars["close"]
         rsi_value = rsi(close, rsi_period)
@@ -46,8 +55,20 @@ class BullishDivergenceStrategy:
         not_too_strong = rsi_value < rsi_ceiling  # 還在偏弱區間，避免已經強勢反彈完才進場
 
         entry_condition = makes_new_low & rsi_diverges & not_too_strong
+
+        if require_macd_turn:
+            _, _, histogram = macd(close)
+            entry_condition = entry_condition & (histogram > histogram.shift(1))
+        if require_kd_bullish:
+            k, d = stochastic_kd(bars["high"], bars["low"], close)
+            entry_condition = entry_condition & (k > d)
+
         prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
         entry_edge = entry_condition & ~prev_entry
+
+        if confirm_next_day:
+            raw_signal = entry_edge.shift(1).fillna(False).astype(bool)
+            entry_edge = raw_signal & (close > close.shift(1)) & (bars["low"] >= bars["low"].shift(1))
 
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []

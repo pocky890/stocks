@@ -7,6 +7,11 @@
   "batch": {
     "pacing_seconds": 0.5
   },
+  "circuit_breaker": {
+    "breadth_ma_period": 20,
+    "enter_threshold": 0.60,
+    "exit_threshold": 0.40
+  },
   "strategy_params": {
     "ma_crossover": { "fast": 5, "slow": 20 },
     "rsi": { "period": 14, "oversold": 30, "overbought": 70 },

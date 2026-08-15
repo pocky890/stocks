@@ -20,6 +20,9 @@ class Config:
     batch_pacing_seconds: float
     strategy_params: dict
     db_path: str
+    circuit_breaker_ma_period: int = 20
+    circuit_breaker_enter_threshold: float = 0.60
+    circuit_breaker_exit_threshold: float = 0.40
 
 
 def load_config() -> Config:
@@ -39,4 +42,7 @@ def load_config() -> Config:
         batch_pacing_seconds=raw["batch"]["pacing_seconds"],
         strategy_params=raw["strategy_params"],
         db_path=str(PROJECT_ROOT / "data" / "stocks.db"),
+        circuit_breaker_ma_period=raw["circuit_breaker"]["breadth_ma_period"],
+        circuit_breaker_enter_threshold=raw["circuit_breaker"]["enter_threshold"],
+        circuit_breaker_exit_threshold=raw["circuit_breaker"]["exit_threshold"],
     )

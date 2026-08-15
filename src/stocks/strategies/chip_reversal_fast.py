@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr
+from stocks.indicators import atr, macd, stochastic_kd
 from stocks.models import Direction, SignalEvent
 
 
@@ -28,6 +28,13 @@ class ChipReversalFastStrategy:
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
+        confirm_next_day = params.get("confirm_next_day", False)  # 2026-08-15研究中：
+        # 跟bullish_divergence.py同一段註解——2026年7月系統性重挫期間這支策略進場後平均
+        # 還要再跌一段才真正落底，借capitulation_reversal「隔天不再破前低+收盤收高才進場」
+        # 的確認邏輯來試。預設False不影響既有行為。
+        require_macd_turn = params.get("require_macd_turn", False)  # 額外要求MACD柱狀圖
+        # 比前一天回升，跟bullish_divergence.py同一段理由。
+        require_kd_bullish = params.get("require_kd_bullish", False)  # 額外要求K>D(偏多)。
 
         close = bars["close"]
         trust_net = bars["trust_net"].fillna(0)
@@ -40,6 +47,17 @@ class ChipReversalFastStrategy:
         # 前一天是「連續>=sell_streak_days天賣超」的streak尾端，今天符號轉正——今天就是
         # 轉買超的第一天，跟trust_momentum等5日視窗累積轉正不同，這裡不等累積，看到就進場。
         just_reversed = (prev_sign == -1) & (prev_streak >= sell_streak_days) & (sign == 1)
+
+        if require_macd_turn:
+            _, _, histogram = macd(close)
+            just_reversed = just_reversed & (histogram > histogram.shift(1))
+        if require_kd_bullish:
+            k, d = stochastic_kd(bars["high"], bars["low"], close)
+            just_reversed = just_reversed & (k > d)
+
+        if confirm_next_day:
+            raw_signal = just_reversed.shift(1).fillna(False).astype(bool)
+            just_reversed = raw_signal & (close > close.shift(1)) & (bars["low"] >= bars["low"].shift(1))
 
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []

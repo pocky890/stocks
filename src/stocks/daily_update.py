@@ -37,6 +37,7 @@ from stocks.db import (
     mark_market_data_synced,
     prune_signal_events,
     set_disabled_strategies,
+    set_industry_code,
     upsert_symbol,
     watchlist_sync_path,
 )
@@ -323,8 +324,20 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     else:
         name = ""
 
+    # 順便標記官方產業分類代碼給circuit_breaker.py用——只查這支股票自己的分類，不會像
+    # scripts/populate_industry_codes.py那樣順便把全市場同業都拉進來，新股票如果剛好是
+    # 觀察清單目前還沒有的產業，記得手動重跑那支腳本才會有同業寬度可以算。try/except跟
+    # 上面估值查詢同一套容錯慣例，查不到就先空著，不讓新增流程失敗。
+    try:
+        directory = twse_client.fetch_company_directory() if market == "TWSE" else tpex_client.fetch_company_directory()
+        industry_code = next((d.get("industry_code") for d in directory if d["symbol"] == code), None)
+    except requests.RequestException:
+        industry_code = None
+
     with connect(config.db_path) as conn:
         add_to_watchlist(conn, code, name=name, market=market)
+        if industry_code:
+            set_industry_code(conn, code, industry_code)
         export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
         if flows:
             insert_institutional_flows(conn, flows)

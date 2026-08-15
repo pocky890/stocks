@@ -597,17 +597,25 @@ with tab_history:
         "從下面選的日期開始，每個策略每次BUY訊號當作買進、配對到SELL訊號當作賣出，純粹照訊號模擬記錄，"
         "不是真的下單；「持有中」代表還沒配到出場訊號，報酬率用現價估算(未實現)。"
     )
-    paper_start_col, paper_symbol_col, _paper_spacer = st.columns([1, 2, 3])
+    paper_start_col, paper_symbol_col, paper_strategy_col = st.columns([1, 2, 2])
     paper_start = paper_start_col.date_input("模擬起始日期", value=date(2026, 7, 1), key="paper_trades_start")
     paper_symbol_options = [f"{w['code']} {w['name']}" for w in watchlist]
     paper_selected_symbols = paper_symbol_col.multiselect(
         "只看特定股票", paper_symbol_options, key="paper_trades_symbol_filter"
+    )
+    paper_strategy_options = sorted(NOTIFIABLE_STRATEGIES)  # build_paper_trades本身只跑
+    # NOTIFIABLE_STRATEGIES(見watchlist_view.build_paper_trades docstring)，選項不用列
+    # 單一指標，列了也永遠篩不出東西。
+    paper_selected_strategies = paper_strategy_col.multiselect(
+        "只看特定策略", paper_strategy_options, format_func=strategy_label, key="paper_trades_strategy_filter"
     )
 
     paper_trades = [r for r in _cached_paper_trades(config, paper_start.strftime("%Y-%m-%d")) if r["代號"] in symbols]
     if paper_selected_symbols:
         paper_selected_codes = {s.split(" ", 1)[0] for s in paper_selected_symbols}
         paper_trades = [r for r in paper_trades if r["代號"] in paper_selected_codes]
+    if paper_selected_strategies:
+        paper_trades = [r for r in paper_trades if r["策略"] in paper_selected_strategies]
 
     if not paper_trades:
         st.info("這段時間沒有任何策略觸發買進訊號")

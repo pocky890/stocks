@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr, rsi
+from stocks.indicators import atr, rsi, sma
 from stocks.models import Direction, SignalEvent
 
 
@@ -48,6 +48,11 @@ class TrustMomentumStrategy:
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
+        require_uptrend = params.get("require_uptrend", False)  # 2026-08-15研究中：擋掉
+        # 大盤/個股趨勢已經轉弱、但投信當下還在買的假訊號(2026年7月那波系統性重挫期間
+        # 全觀察清單同時觸發、同時停損就是這種情況)——預設False不影響既有行為，只有
+        # 明確帶這個參數做回測比較時才會生效，跟long_swing的MA60>MA120 regime概念同源。
+        trend_ma_period = params.get("trend_ma_period", 60)
 
         close = bars["close"]
         trust_net = bars["trust_net"].fillna(0)
@@ -57,6 +62,8 @@ class TrustMomentumStrategy:
 
         not_overbought = rsi(close, rsi_period) < rsi_overbought
         entry_condition = trust_buy_streak & not_overbought
+        if require_uptrend:
+            entry_condition = entry_condition & (close > sma(close, trend_ma_period))
 
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []

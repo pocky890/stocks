@@ -1,0 +1,103 @@
+"""全市場同產業寬度斷路器：某產業≥60%的股票跌破自己20日均線時，暫停對「這個產業裡
+的股票」發送新的BUY通知(SELL永遠不擋、既有部位一樣可以出場)——即使這支股票自己還在噴，
+也只有在它自己「當下」也跌破自己的20日均線時才會被擋，避免同業平均被拖累而錯殺逆勢股
+(3711日月光投控2~4月的案例：全市場半導體寬度觸發，但3711自己沒破月線，純產業寬度斷路器
+會誤殺它8筆好進場，加上這個AND條件後幾乎完全救回)。
+
+全市場產業寬度用「前一交易日收盤」算(run_batch.py收盤後14:00才更新，見refresh_industry_
+states)；個股自己是否跌破月線用「當下即時價格」(run_live.py本來就在追蹤，含今天盤中
+partial K)——兩者新鮮度不同，是2026-08-16使用者確認接受的設計(要即時算全市場寬度，
+代表盤中每5分鐘要多打一次全市場~2000檔快照，是使用者明確要避免的額外掃描負擔)。
+
+60%/40%的遲滯門檻(進場60%、解除40%，避免臨界值附近反覆開關)是2026-08-15~16全觀察清單
+2年回測驗證過的：不設斷路器時2026年7月系統性重挫獲利因子只有0、加總虧損-1099；加這個
+「全市場同產業+自己須破月線」版本後，2026 YTD總報酬回升到3984(比純產業寬度版的3327好，
+但不如更寬鬆版本)，7月虧損-441.5(比純產業版的-241.3多，但遠比不設斷路器的-1099.4好)——
+這是使用者確認要的「比較平衡」版本，不是唯一正確答案，門檻本身也在50%~70%的區間內測過，
+是平滑的風險/報酬取捨，不是找到了神奇甜蜜點。
+"""
+import json
+
+import pandas as pd
+
+from stocks.config import Config
+from stocks.db import fetch_all_industry_codes, fetch_industry_closes, get_setting, set_setting
+
+STATE_KEY = "circuit_breaker_state"  # app_settings裡存{industry_code: bool}的JSON，
+# 用app_settings(不另開一張表)是因為這專案已經有這個key-value機制、也是disabled_
+# strategies/groups欄位同樣的JSON-in-column慣例，這裡只是換成JSON-in-app_settings-value。
+
+
+def load_active_state(conn) -> dict:
+    raw = get_setting(conn, STATE_KEY)
+    return json.loads(raw) if raw else {}
+
+
+def _save_active_state(conn, state: dict) -> None:
+    set_setting(conn, STATE_KEY, json.dumps(state))
+
+
+def compute_breadth_pct(conn, industry_code: str, ma_period: int) -> float | None:
+    """回傳這個產業代碼「目前資料庫裡最新一天」有幾成股票跌破自己的ma_period日均線。
+    資料還不夠(累積不到ma_period天)或這個產業代碼完全沒有資料，回傳None——呼叫端
+    (refresh_industry_states)遇到None要跳過，不能當成0%處理(0%會誤觸發「解除」)。"""
+    rows = fetch_industry_closes(conn, industry_code)
+    if not rows:
+        return None
+    df = pd.DataFrame([dict(r) for r in rows])
+    pivot = df.pivot(index="date", columns="symbol", values="close").sort_index()
+    if len(pivot) < ma_period:
+        return None
+    ma = pivot.rolling(ma_period).mean()
+    latest_close = pivot.iloc[-1]
+    latest_ma = ma.iloc[-1]
+    valid = latest_close.notna() & latest_ma.notna()
+    if valid.sum() == 0:
+        return None
+    return float((latest_close[valid] < latest_ma[valid]).sum() / valid.sum())
+
+
+def refresh_industry_states(conn, config: Config) -> dict:
+    """收盤後(run_batch.py儲存完當天的industry_closes後)呼叫一次：對觀察清單目前涵蓋的
+    每個產業代碼重新算寬度、套遲滯規則更新on/off狀態並存回app_settings。回傳更新後的
+    完整狀態字典，run_live.py隔天啟動時透過load_active_state讀到的就是這裡存的結果。"""
+    codes = set(fetch_all_industry_codes(conn).values())
+    state = load_active_state(conn)
+    for code in codes:
+        pct = compute_breadth_pct(conn, code, config.circuit_breaker_ma_period)
+        if pct is None:
+            continue
+        active = state.get(code, False)
+        if not active and pct >= config.circuit_breaker_enter_threshold:
+            active = True
+        elif active and pct <= config.circuit_breaker_exit_threshold:
+            active = False
+        state[code] = active
+    _save_active_state(conn, state)
+    return state
+
+
+def is_buy_suppressed(
+    symbol: str,
+    industry_codes: dict,
+    active_state: dict,
+    own_bars_with_today: pd.DataFrame,
+    ma_period: int,
+) -> bool:
+    """純函式，不碰DB——industry_codes/active_state是呼叫端(run_live.py)在迴圈開始前
+    讀好一次的{symbol: industry_code}/{industry_code: bool}，避免每個5分K tick、每支
+    股票都重新查一次DB(這兩份資料一整天內不會變：industry_codes只在新增股票時變、
+    active_state只有run_batch.py收盤後才會更新)。own_bars_with_today是呼叫端已經算好
+    的「歷史日K+今天partial K」(build_daily_bars_with_today)，用來判斷這支股票自己
+    當下是否跌破自己的月線。兩個條件都成立才回傳True(該擋)。"""
+    industry_code = industry_codes.get(symbol)
+    if industry_code is None or not active_state.get(industry_code, False):
+        return False
+
+    if own_bars_with_today.empty or len(own_bars_with_today) < ma_period:
+        return False
+    close = own_bars_with_today["close"]
+    latest_ma = close.rolling(ma_period).mean().iloc[-1]
+    if pd.isna(latest_ma):
+        return False
+    return bool(close.iloc[-1] < latest_ma)

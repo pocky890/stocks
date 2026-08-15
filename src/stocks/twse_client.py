@@ -134,13 +134,19 @@ def fetch_valuations_for_date(date_iso: str, retries: int = RETRIES) -> list[dic
 
 
 def fetch_company_directory(retries: int = RETRIES) -> list[dict]:
-    """全部上市公司的代號/簡稱清單(不是逐日查詢，一次拿全部)——不需要知道代號、只知道
-    中文名稱(例如「台積電」)也能查出對應代號，給daily_update.add_symbol_to_watchlist的
+    """全部上市公司的代號/簡稱/產業別清單(不是逐日查詢，一次拿全部)——不需要知道代號、
+    只知道中文名稱(例如「台積電」)也能查出對應代號，給daily_update.add_symbol_to_watchlist的
     名稱解析用。"公司簡稱"才是使用者平常講的名字(例如「台積電」)，"公司名稱"是完整法定
     登記名稱(例如「台灣積體電路製造股份有限公司」)，兩者不一樣，用簡稱才對得上symbols
-    表裡existing的name欄位慣例。"""
+    表裡existing的name欄位慣例。"產業別"是證交所官方產業分類代碼(例如"24"=半導體業)，
+    2026-08-16新增給circuit_breaker.py的全市場同產業寬度斷路器用——查證過FinMind的
+    TaiwanStockInfo industry_category對上市半導體股仍停留在舊式「電子工業」籠統分類
+    沒更新，這裡官方資料才是正確的，故意不用FinMind省事。"""
     payload = _get_json("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", retries=retries)
-    return [{"symbol": row["公司代號"], "name": row["公司簡稱"].strip()} for row in payload]
+    return [
+        {"symbol": row["公司代號"], "name": row["公司簡稱"].strip(), "industry_code": row.get("產業別")}
+        for row in payload
+    ]
 
 
 def fetch_ex_dividend_schedule(retries: int = RETRIES) -> list[dict]:
