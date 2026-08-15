@@ -225,6 +225,41 @@ def test_move_watchlist_symbol_self_heals_duplicate_sort_order(tmp_path):
     assert codes_in_order == ["2317", "2454", "2330"]
 
 
+def test_move_watchlist_symbol_skips_neighbors_outside_visible_codes(tmp_path):
+    # 2026-08-15使用者反映dashboard切換群組後▲▼看起來壞掉：整個觀察清單順序是
+    # 2330,3141(別的群組),2317 三檔，畫面上目前這個群組只顯示2330跟2317(3141屬於
+    # 別的群組，畫面上看不到)——在這個篩選後的畫面上對2317按▲，應該要跳過看不見的
+    # 3141、直接跟2330交換，不能傻傻地跟緊鄰的全域鄰居(3141)交換，不然畫面上完全
+    # 看不出任何變化。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        db.add_to_watchlist(conn, "3141")
+        db.add_to_watchlist(conn, "2317")
+        db.move_watchlist_symbol(conn, "2317", direction=-1, visible_codes={"2330", "2317"})
+        codes_in_order = [r["code"] for r in db.fetch_watchlist(conn)]
+
+    assert codes_in_order == ["2317", "3141", "2330"]
+
+
+def test_move_watchlist_symbol_is_noop_at_edge_of_visible_codes(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+
+    with db.connect(db_path) as conn:
+        db.add_to_watchlist(conn, "2330")
+        db.add_to_watchlist(conn, "3141")
+        db.add_to_watchlist(conn, "2317")
+        # 2330是目前群組(只有2330/2317)裡看得到的第一筆，再往上移動應該什麼都不做，
+        # 不能因為全域清單裡2330前面沒有別的股票就直接回傳，也不能誤跳到3141。
+        db.move_watchlist_symbol(conn, "2330", direction=-1, visible_codes={"2330", "2317"})
+        codes_in_order = [r["code"] for r in db.fetch_watchlist(conn)]
+
+    assert codes_in_order == ["2330", "3141", "2317"]
+
+
 def test_bars_list_to_dataframe_converts_bar_objects():
     from stocks.models import Bar
 

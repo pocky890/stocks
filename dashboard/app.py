@@ -160,6 +160,36 @@ def _cached_overview_rows(_config):
     return build_overview_rows(_config)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_chart_data(_config, symbol: str):
+    """K線圖頁籤的資料抓取+畫圖包一層快取——這張圖疊了K線+4條均線+布林通道+法人買賣超+
+    融資融券+KD+MACD好幾個指標，10年資料量下重算有一定成本；沒有這層快取的話，使用者
+    切換群組、點擊觀察清單的▲▼/移除等任何觸發整頁rerun的操作，都會連帶重新抓資料+
+    重畫這張圖，即使使用者根本沒有在看這個頁籤。快取60秒，同一支股票短時間內重複顯示
+    不用重算。"""
+    with connect(_config.db_path) as conn:
+        bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
+        flow_rows = [dict(r) for r in fetch_institutional_flows(conn, symbol)]
+        margin_rows = [dict(r) for r in fetch_margin_balances(conn, symbol)]
+        valuation_rows = [dict(r) for r in fetch_valuations(conn, symbol)]
+        ex_div_rows = [dict(r) for r in fetch_ex_dividend_schedule(conn, symbol)]
+
+    fig = None
+    if not bars.empty:
+        flow_df = pd.DataFrame(flow_rows) if flow_rows else None
+        margin_df = pd.DataFrame(margin_rows) if margin_rows else None
+        fig = price_and_chip_chart(bars, flow_df, margin_df, ma_windows=[5, 10, 20, 60])
+
+    return {
+        "bars_empty": bars.empty,
+        "fig": fig,
+        "has_flow": bool(flow_rows),
+        "has_margin": bool(margin_rows),
+        "valuation_rows": valuation_rows,
+        "ex_div_rows": ex_div_rows,
+    }
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def _fetch_today_intraday(_config, symbols: tuple):
     """現場連線Shioaji抓觀察清單今天的分K，供「今日走勢」小圖用，不用等run_live.py
@@ -205,13 +235,15 @@ def _render_watchlist_table_body(config, all_symbols: tuple, symbols: tuple):
 
             if cols[0].button("▲", key=f"up_{code}", disabled=(i == 0)):
                 with connect(config.db_path) as conn:
-                    move_watchlist_symbol(conn, code, direction=-1)
+                    move_watchlist_symbol(conn, code, direction=-1, visible_codes=set(symbols))
                     export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
+                _cached_overview_rows.clear()
                 st.rerun()
             if cols[1].button("▼", key=f"down_{code}", disabled=(i == len(overview_rows) - 1)):
                 with connect(config.db_path) as conn:
-                    move_watchlist_symbol(conn, code, direction=1)
+                    move_watchlist_symbol(conn, code, direction=1, visible_codes=set(symbols))
                     export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
+                _cached_overview_rows.clear()
                 st.rerun()
 
             cols[2].write(row["代號"])
@@ -255,6 +287,7 @@ def _render_watchlist_table_body(config, all_symbols: tuple, symbols: tuple):
                 with connect(config.db_path) as conn:
                     remove_from_watchlist(conn, code)
                     export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
+                _cached_overview_rows.clear()
                 st.rerun()
 
 
@@ -426,6 +459,7 @@ with tab_watchlist:
         with st.spinner(f"抓取 {new_code.strip()} 資料..."):
             add_result = add_symbol_to_watchlist(config, new_code.strip())
         (st.success if add_result["ok"] else st.warning)(add_result["message"])
+        _cached_overview_rows.clear()
         st.rerun()
 
     if all_watchlist:
@@ -443,6 +477,7 @@ with tab_watchlist:
                         for code, raw in group_inputs.items():
                             set_symbol_groups(conn, code, [g.strip() for g in raw.split(",") if g.strip()])
                         export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
+                    _cached_overview_rows.clear()
                     st.rerun()
 
     if watchlist:
@@ -479,31 +514,31 @@ with tab_chart:
     if not symbols:
         st.info("觀察清單是空的，沒有資料可以畫圖")
     else:
-        selected = st.selectbox("選擇股票", symbols)
-        with connect(config.db_path) as conn:
-            bars = bars_to_dataframe(fetch_bars_daily(conn, selected), ts_field="date")
-            flow_rows = fetch_institutional_flows(conn, selected)
-            margin_rows = fetch_margin_balances(conn, selected)
-            valuation_rows = fetch_valuations(conn, selected)
-            ex_div_rows = fetch_ex_dividend_schedule(conn, selected)
+        chart_symbol_names = {w["code"]: w["name"] for w in watchlist}
+        selected = st.selectbox(
+            "選擇股票",
+            symbols,
+            format_func=lambda code: f"{code} {chart_symbol_names.get(code, '')}".strip(),
+        )
+        # 2026-08-15使用者要求把籌碼面資料搬到K線圖下方一起比對，不要分開頁籤來回切換——
+        # 三張圖疊在同一個figure裡(shared_xaxes)，拖曳/縮放任一段時間軸，其他段會跟著對齊；
+        # 資料抓取+畫圖包在_cached_chart_data裡(見上方定義)，避免切到其他頁籤/按其他按鈕
+        # 觸發整頁rerun時被迫重算這張圖。
+        chart_data = _cached_chart_data(config, selected)
 
-        if bars.empty:
+        if chart_data["bars_empty"]:
             st.warning(f"{selected} 沒有歷史K棒資料")
         else:
-            # 2026-08-15使用者要求把籌碼面資料搬到K線圖下方一起比對，不要分開頁籤來回切換——
-            # 三張圖疊在同一個figure裡(shared_xaxes)，拖曳/縮放任一段時間軸，其他段會跟著對齊。
-            flow_df = pd.DataFrame([dict(r) for r in flow_rows]) if flow_rows else None
-            margin_df = pd.DataFrame([dict(r) for r in margin_rows]) if margin_rows else None
-            fig = price_and_chip_chart(bars, flow_df, margin_df, ma_windows=[5, 10, 20, 60])
-            st.plotly_chart(fig, use_container_width=True)
-            if not flow_rows:
+            st.plotly_chart(chart_data["fig"], use_container_width=True)
+            if not chart_data["has_flow"]:
                 st.info("沒有三大法人資料，先跑 `python scripts/fetch_market_data.py`")
-            if not margin_rows:
+            if not chart_data["has_margin"]:
                 st.info("沒有融資融券資料，先跑 `python scripts/fetch_market_data.py`")
 
         st.markdown("#### 目前估值")
+        valuation_rows = chart_data["valuation_rows"]
         if valuation_rows:
-            latest = dict(valuation_rows[-1])
+            latest = valuation_rows[-1]
             col1, col2, col3 = st.columns(3)
             col1.metric("本益比(PE)", latest["pe_ratio"] if latest["pe_ratio"] is not None else "N/A")
             col2.metric("殖利率(%)", latest["dividend_yield"])
@@ -512,8 +547,9 @@ with tab_chart:
             st.info("沒有估值資料，先跑 `python scripts/fetch_market_data.py`")
 
         st.markdown("#### 近期除權息")
+        ex_div_rows = chart_data["ex_div_rows"]
         if ex_div_rows:
-            ex_div_df = pd.DataFrame([dict(r) for r in ex_div_rows])
+            ex_div_df = pd.DataFrame(ex_div_rows)
             st.dataframe(
                 ex_div_df[["ex_date", "cash_dividend", "stock_dividend_ratio", "detail"]],
                 use_container_width=True,

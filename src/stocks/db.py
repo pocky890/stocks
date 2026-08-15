@@ -407,17 +407,28 @@ def set_watchlist_order(conn: sqlite3.Connection, code: str, sort_order: int) ->
     conn.execute("UPDATE symbols SET sort_order = ? WHERE code = ?", (sort_order, code))
 
 
-def move_watchlist_symbol(conn: sqlite3.Connection, code: str, direction: int) -> None:
-    """direction: -1 to move up, +1 to move down. Renumbers every watchlist symbol's
-    sort_order sequentially (0..n-1) based on current display order and swaps the target
-    with its neighbor -- this also self-heals any duplicate/untidy sort_order values left
-    over from before the reorder UI existed, instead of requiring a separate migration."""
+def move_watchlist_symbol(conn: sqlite3.Connection, code: str, direction: int, visible_codes: set[str] | None = None) -> None:
+    """direction: -1 to move up, +1 to move down. visible_codes限制「上一個/下一個鄰居」
+    只能在這個集合裡找(通常是dashboard目前篩選的群組子集合)，不給的話就用整個觀察清單——
+    2026-08-15使用者反映▲▼看起來壞掉：dashboard切換群組後畫面只顯示該群組的股票，但
+    這裡原本直接抓「整個觀察清單」的鄰居，如果緊鄰的下一筆剛好屬於別的群組(畫面上根本
+    沒顯示)，交換的對象是使用者看不到的股票，畫面上完全看不出變化，看起來像沒反應。
+
+    Renumbers every watchlist symbol's sort_order sequentially (0..n-1) based on current
+    display order and swaps the target with its (visible_codes內的)鄰居 -- this also
+    self-heals any duplicate/untidy sort_order values left over from before the reorder UI
+    existed, instead of requiring a separate migration。"""
     codes = [r["code"] for r in fetch_watchlist(conn)]
-    idx = codes.index(code)
-    new_idx = idx + direction
-    if new_idx < 0 or new_idx >= len(codes):
+    visible = [c for c in codes if visible_codes is None or c in visible_codes]
+    idx_in_visible = visible.index(code)
+    new_idx_in_visible = idx_in_visible + direction
+    if new_idx_in_visible < 0 or new_idx_in_visible >= len(visible):
         return
-    codes[idx], codes[new_idx] = codes[new_idx], codes[idx]
+    neighbor = visible[new_idx_in_visible]
+
+    idx = codes.index(code)
+    neighbor_idx = codes.index(neighbor)
+    codes[idx], codes[neighbor_idx] = codes[neighbor_idx], codes[idx]
     for position, c in enumerate(codes):
         set_watchlist_order(conn, c, position)
 
