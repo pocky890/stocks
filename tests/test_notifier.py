@@ -6,7 +6,13 @@ import pytest
 from stocks import telegram_client
 from stocks.config import Config
 from stocks.models import Direction, SignalEvent, Tier
-from stocks.notifier import notify_batch_summary, notify_connectivity, notify_reminder, notify_symbol_signals
+from stocks.notifier import (
+    notify_batch_summary,
+    notify_connectivity,
+    notify_ex_dividend_today,
+    notify_reminder,
+    notify_symbol_signals,
+)
 
 EMPTY_BARS = pd.DataFrame(columns=["close"])
 
@@ -148,6 +154,38 @@ def test_notify_symbol_signals_omits_trend_line_when_daily_bars_missing(captured
     assert "趨勢" not in text, "沒有日線資料(例如新股票剛加進來)就不該印出趨勢那一行"
 
 
+def test_notify_symbol_signals_warns_when_sell_falls_on_ex_dividend_date(captured_calls):
+    # 2026-08-15使用者發現：除權息當天股價會被交易所機制性扣掉股利金額，停損邏輯看不出
+    # 這是股息因素還是真的下跌，容易誤判——賣出訊號剛好落在已知的除權息日就該額外提醒。
+    config = make_config()
+    events = [make_event("chip_momentum", Direction.SELL, "跌破15%移動停損 100.00", ts=datetime(2026, 1, 6, 13, 20))]
+    notify_symbol_signals(config, "2330", "台積電", events, EMPTY_BARS, ex_dividend_dates={"2026-01-06"})
+
+    text = captured_calls[0]["data"]["text"]
+    assert "除權息" in text
+    assert "2026-01-06" in text
+
+
+def test_notify_symbol_signals_omits_ex_dividend_warning_when_date_does_not_match(captured_calls):
+    config = make_config()
+    events = [make_event("chip_momentum", Direction.SELL, "跌破15%移動停損 100.00", ts=datetime(2026, 1, 6, 13, 20))]
+    notify_symbol_signals(config, "2330", "台積電", events, EMPTY_BARS, ex_dividend_dates={"2026-03-18"})
+
+    text = captured_calls[0]["data"]["text"]
+    assert "除權息" not in text
+
+
+def test_notify_symbol_signals_omits_ex_dividend_warning_for_buy_only_events(captured_calls):
+    # 除權息造成的機制性下跌只會誤判賣出訊號，買進訊號跟這個無關，就算當天剛好是除權息日
+    # 也不該印出提醒(避免使用者誤以為買進訊號也受影響)。
+    config = make_config()
+    events = [make_event("chip_momentum", Direction.BUY, "外資連3日買超", ts=datetime(2026, 1, 6, 13, 20))]
+    notify_symbol_signals(config, "2330", "台積電", events, EMPTY_BARS, ex_dividend_dates={"2026-01-06"})
+
+    text = captured_calls[0]["data"]["text"]
+    assert "除權息" not in text
+
+
 def test_notify_reminder_describes_sell_signal_still_below_trigger(captured_calls):
     # 2026-08-14使用者要求：9:30跌破ATR停損發過通知，13:20如果現價仍在觸發價之下(還沒
     # 回升)，代表狀況沒解除，要再提醒一次。使用者後來反饋看不出來是買還是賣，標題跟每
@@ -199,6 +237,27 @@ def test_notify_reminder_sends_nothing_for_empty_rows(captured_calls):
     config = make_config()
     notify_reminder(config, "2330", "台積電", [], current_price=100.0)
     assert len(captured_calls) == 0
+
+
+def test_notify_reminder_warns_when_today_is_ex_dividend_date(captured_calls):
+    config = make_config()
+    row = {"strategy": "atr_breakout", "direction": "sell", "price": 100.0, "ts": "2026-01-06T09:30:00"}
+
+    notify_reminder(config, "2330", "台積電", [row], current_price=95.0, ex_dividend_dates={"2026-01-06"})
+
+    text = captured_calls[0]["data"]["text"]
+    assert "除權息" in text
+    assert "2026-01-06" in text
+
+
+def test_notify_reminder_omits_ex_dividend_warning_when_date_does_not_match(captured_calls):
+    config = make_config()
+    row = {"strategy": "atr_breakout", "direction": "sell", "price": 100.0, "ts": "2026-01-06T09:30:00"}
+
+    notify_reminder(config, "2330", "台積電", [row], current_price=95.0, ex_dividend_dates={"2026-03-18"})
+
+    text = captured_calls[0]["data"]["text"]
+    assert "除權息" not in text
 
 
 def test_notify_connectivity_lost_and_restored(captured_calls):
@@ -290,6 +349,50 @@ def test_notify_batch_summary_says_nothing_new_when_all_events_are_historical(ca
 
     assert len(captured_calls) == 1
     assert "今天沒有符合條件的股票" in captured_calls[0]["data"]["text"]
+
+
+def test_notify_ex_dividend_today_lists_cash_dividend_amount(captured_calls):
+    config = make_config()
+    rows = [{"symbol": "2330", "name": "台積電", "cash_dividend": 4.5, "stock_dividend_ratio": None, "detail": "除息"}]
+
+    notify_ex_dividend_today(config, rows)
+
+    assert len(captured_calls) == 1
+    text = captured_calls[0]["data"]["text"]
+    assert "2330 台積電" in text
+    assert "現金股利4.50元" in text
+    assert "共 1 檔" in text
+
+
+def test_notify_ex_dividend_today_lists_stock_dividend_ratio(captured_calls):
+    config = make_config()
+    rows = [{"symbol": "2330", "name": "台積電", "cash_dividend": None, "stock_dividend_ratio": 0.5, "detail": "除權"}]
+
+    notify_ex_dividend_today(config, rows)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "股票股利0.5" in text
+
+
+def test_notify_ex_dividend_today_lists_multiple_symbols(captured_calls):
+    config = make_config()
+    rows = [
+        {"symbol": "2330", "name": "台積電", "cash_dividend": 4.5, "stock_dividend_ratio": None, "detail": "除息"},
+        {"symbol": "2454", "name": "聯發科", "cash_dividend": 10.0, "stock_dividend_ratio": None, "detail": "除息"},
+    ]
+
+    notify_ex_dividend_today(config, rows)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "共 2 檔" in text
+    assert "2330 台積電" in text
+    assert "2454 聯發科" in text
+
+
+def test_notify_ex_dividend_today_sends_nothing_when_no_symbols_today(captured_calls):
+    config = make_config()
+    notify_ex_dividend_today(config, [])
+    assert len(captured_calls) == 0
 
 
 def test_send_message_without_credentials_does_not_call_requests(captured_calls):

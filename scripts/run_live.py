@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stocks.bar_aggregator import BarAggregator, market_hour_boundaries
 from stocks.config import load_config
+from stocks.daily_update import check_and_update
 from stocks.db import (
     attach_institutional_flows,
     bars_to_dataframe,
@@ -20,6 +21,7 @@ from stocks.db import (
     fetch_bars_5min,
     fetch_bars_5min_today,
     fetch_bars_daily,
+    fetch_ex_dividend_schedule,
     fetch_institutional_flows,
     fetch_signal_events,
     fetch_watchlist,
@@ -29,7 +31,13 @@ from stocks.db import (
     insert_signal_events,
 )
 from stocks.models import Direction, Tier
-from stocks.notifier import NOTIFIABLE_STRATEGIES, notify_connectivity, notify_reminder, notify_symbol_signals
+from stocks.notifier import (
+    NOTIFIABLE_STRATEGIES,
+    notify_connectivity,
+    notify_ex_dividend_today,
+    notify_reminder,
+    notify_symbol_signals,
+)
 from stocks.shioaji_client import ShioajiClient
 from stocks.signal_engine import evaluate_all
 from stocks.strategies import STRATEGY_REGISTRY
@@ -88,20 +96,52 @@ def build_today_partial_bar(rows) -> dict | None:
     }
 
 
+def todays_cash_dividend(conn, symbol: str, today) -> float:
+    """今天如果剛好是這支股票的除息日，回傳現金股利金額，否則回傳0——2026-08-15使用者
+    發現：除息當天交易所會把參考價機制性扣掉股利金額(除息參考價=前一天收盤-股利)，
+    這不是公司真的下跌，但即時監控用的bars_daily歷史高點/停損線是「除息前」算的，
+    今天的即時報價(Shioaji原始報價，不像bars_daily是yfinance還原過的)卻已經反映了
+    除息後的價格，兩者基準對不上，會讓停損誤判成跌破。這裡只處理現金股利，股票股利
+    (配股)牽涉股數變動，先不處理(範圍縮小，之後真的要做再另外處理)。"""
+    today_str = today.isoformat()
+    for row in fetch_ex_dividend_schedule(conn, symbol):
+        if row["ex_date"] == today_str and row["cash_dividend"]:
+            return float(row["cash_dividend"])
+    return 0.0
+
+
 def build_daily_bars_with_today(conn, symbol: str) -> pd.DataFrame:
     """給DAILY_CONCEPT_STRATEGIES用的日線序列：歷史日K(已接上三大法人資料，跟
     run_batch.py同樣的接法) + 今天的partial日K。如果run_batch.py已經跑過、bars_daily
-    裡已經有今天正式的日K了，就不用補partial的，直接用正式資料。"""
+    裡已經有今天正式的日K了，就不用補partial的，直接用正式資料。
+
+    今天如果剛好是除息日(見todays_cash_dividend)，「今天」這根K棒的open/high/low/close
+    全部加回股利金額，讓它跟歷史資料(除息前)站在同一個價格基準比較，不會被除息造成的
+    機制性下跌誤判成真的跌破停損——隔天bars_daily會被_refresh_price_data用yfinance重新
+    抓一次，屆時「今天」就會變成正式的還原後歷史資料，不再需要這裡的補償，所以這個
+    加回去的動作只需要做在「今天」這一根，不用往回處理更早的資料。"""
     history = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
     history = attach_institutional_flows(history, fetch_institutional_flows(conn, symbol))
 
     today = datetime.now().date()
+    dividend_addback = todays_cash_dividend(conn, symbol, today)
+
     if not history.empty and history.index[-1].date() >= today:
+        if dividend_addback:
+            history = history.copy()
+            today_mask = history.index.date == today
+            for col in ("open", "high", "low", "close"):
+                history.loc[today_mask, col] += dividend_addback
         return history
 
     today_bar = build_today_partial_bar(fetch_bars_5min_today(conn, symbol))
     if today_bar is None:
         return history
+    if dividend_addback:
+        today_bar = {
+            **today_bar,
+            **{col: today_bar[col] + dividend_addback for col in ("open", "high", "low", "close")},
+        }
     today_row = pd.DataFrame([today_bar], index=[pd.Timestamp(today)])
     return pd.concat([history, today_row])
 
@@ -110,14 +150,29 @@ def main():
     config = load_config()
     init_db(config.db_path)
 
+    # 08:55排程啟動時不一定有人剛好開過dashboard，除權息預告表(跟股價/籌碼一樣)可能是
+    # 好幾天前的舊資料——這裡主動跑一次check_and_update確保今天要用的除權息清單是新的，
+    # 不依賴使用者剛好開過dashboard才會更新。
+    check_and_update(config)
+
     with connect(config.db_path) as conn:
         watchlist_rows = fetch_watchlist(conn)
+        today_str = datetime.now().date().isoformat()
+        ex_dividend_today = []
+        for row in watchlist_rows:
+            for sched in fetch_ex_dividend_schedule(conn, row["code"]):
+                if sched["ex_date"] == today_str:
+                    ex_dividend_today.append({**dict(sched), "name": row["name"]})
     watchlist = [row["code"] for row in watchlist_rows]
     symbol_names = {row["code"]: row["name"] for row in watchlist_rows}
     if not watchlist:
         print("觀察清單是空的，先在dashboard新增股票")
         return
     print(f"觀察清單: {watchlist}")
+
+    if ex_dividend_today:
+        notify_ex_dividend_today(config, ex_dividend_today)
+        print(f"今日除權息 {len(ex_dividend_today)} 檔，已發送提醒")
 
     client = ShioajiClient(config)
     client.connect()
@@ -154,7 +209,8 @@ def main():
             if new_events:
                 with connect(config.db_path) as conn:
                     daily_bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
-                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), new_events, daily_bars)
+                    ex_dividend_dates = {r["ex_date"] for r in fetch_ex_dividend_schedule(conn, symbol)}
+                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), new_events, daily_bars, ex_dividend_dates)
                 print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(new_events)} 個訊號")
 
         # 2026-08-14使用者確認：NOTIFIABLE_STRATEGIES(日線尺度)改成每個5分K tick都檢查
@@ -180,7 +236,8 @@ def main():
             if new_events:
                 with connect(config.db_path) as conn:
                     daily_bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
-                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), new_events, daily_bars)
+                    ex_dividend_dates = {r["ex_date"] for r in fetch_ex_dividend_schedule(conn, symbol)}
+                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), new_events, daily_bars, ex_dividend_dates)
                 print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(new_events)} 個訊號(日線)")
 
         if bucket_end.strftime("%H:%M") == REMINDER_CHECK_HHMM:
@@ -198,6 +255,7 @@ def main():
                     for r in sorted(todays_rows, key=lambda r: r["ts"]):
                         latest_per_strategy[r["strategy"]] = r
                     daily_bars_with_today = build_daily_bars_with_today(conn, symbol)
+                    ex_dividend_dates = {r["ex_date"] for r in fetch_ex_dividend_schedule(conn, symbol)}
                 if not latest_per_strategy or daily_bars_with_today.empty:
                     continue
                 current_price = daily_bars_with_today["close"].iloc[-1]
@@ -208,7 +266,7 @@ def main():
                     or (r["direction"] == Direction.SELL.value and current_price <= r["price"])
                 ]
                 if still_valid:
-                    notify_reminder(config, symbol, symbol_names.get(symbol, ""), still_valid, current_price)
+                    notify_reminder(config, symbol, symbol_names.get(symbol, ""), still_valid, current_price, ex_dividend_dates)
                     print(f"  {symbol} {bucket_end.strftime('%H:%M')} 提醒 {len(still_valid)} 個尚未解除的訊號")
 
     client.disconnect()

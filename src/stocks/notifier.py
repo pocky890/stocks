@@ -66,7 +66,12 @@ def _trend_text(daily_close: pd.Series) -> str:
 
 
 def notify_symbol_signals(
-    config: Config, symbol: str, name: str, events: list[SignalEvent], daily_bars: pd.DataFrame
+    config: Config,
+    symbol: str,
+    name: str,
+    events: list[SignalEvent],
+    daily_bars: pd.DataFrame,
+    ex_dividend_dates: set[str] = frozenset(),
 ) -> bool:
     """Combine every triggered strategy for one symbol at one point in time into a
     single Telegram message, per the aggregation design (list which strategies fired,
@@ -79,7 +84,14 @@ def notify_symbol_signals(
 
     趨勢(站上/跌破哪些均線)是額外資訊——那是daily_bars隨時能算的「當下狀態」，不是
     編造的，所以額外加一行，但不計入觸發項目數。daily_bars要是日線(不是5分K)，
-    5/10/20/60的均線才是有意義的天數。"""
+    5/10/20/60的均線才是有意義的天數。
+
+    ex_dividend_dates：這支股票已知/預告中的除權息日期集合(db.fetch_ex_dividend_schedule
+    查出來的ex_date，是提前公告的資料，呼叫端在除權息當天之前就查得到)——2026-08-15
+    使用者發現：除權息當天交易所會把參考價機制性地扣掉股利金額(除息參考價=前一天收盤-
+    股利)，這不是公司真的下跌，但停損/停利邏輯只看得到股價、看不到使用者應該收到的股息，
+    可能誤判成跌破停損。這裡只是在通知裡多加一行提醒，讓使用者自己判斷這次觸發有沒有
+    參考價值，不是自動排除或改變訊號本身——訊號紀錄/歷史績效統計都不受影響。"""
     events = [e for e in events if e.strategy in NOTIFIABLE_STRATEGIES]
     if not events:
         return True
@@ -104,6 +116,14 @@ def notify_symbol_signals(
     ]
     lines += [f"[V] {strategy_label(e.strategy)}：{e.detail or e.strategy}" for e in buy_events + sell_events]
 
+    sell_ex_div_dates = {e.ts.strftime("%Y-%m-%d") for e in sell_events} & set(ex_dividend_dates)
+    if sell_ex_div_dates:
+        lines += [
+            "",
+            f"⚠️ 注意：{'、'.join(sorted(sell_ex_div_dates))} 是這支股票的除權息日，賣出訊號"
+            "可能是除息參考價機制性下跌(前一天收盤-股利)，不一定是真的下跌，建議自行確認。",
+        ]
+
     trend = _trend_text(daily_bars["close"]) if not daily_bars.empty else ""
     if trend:
         lines += ["", f"📈 趨勢：{trend}"]
@@ -111,13 +131,18 @@ def notify_symbol_signals(
     return send_message(config.telegram_bot_token, config.telegram_chat_id, "\n".join(lines))
 
 
-def notify_reminder(config: Config, symbol: str, name: str, rows: list, current_price: float) -> bool:
+def notify_reminder(
+    config: Config, symbol: str, name: str, rows: list, current_price: float, ex_dividend_dates: set[str] = frozenset()
+) -> bool:
     """13:20固定提醒：今天已經通知過的訊號，如果現在價格還是跟當時觸發方向一致(BUY還沒
     跌破、SELL還沒回升)，代表狀況還沒解除，使用者可能還沒處理，額外提醒一次——跟
     notify_symbol_signals的「新訊號剛觸發」語意不同，這裡是「舊訊號還沒解除」，2026-08-14
     使用者要求的：盤中觸發就先通知一次，13:20如果還是同一個方向再提醒一次，不用等使用者
     自己記得回頭看。rows是signal_events查出來的sqlite3.Row(或相容dict)，需要symbol/
-    strategy/direction/price/ts欄位。"""
+    strategy/direction/price/ts欄位。
+
+    ex_dividend_dates同notify_symbol_signals——rows都是今天的資料(呼叫端已經篩過)，
+    今天如果剛好是這支股票的除權息日、又有賣出訊號還沒解除，一樣加提醒。"""
     if not rows:
         return True
     buy_rows = [r for r in rows if r["direction"] == Direction.BUY.value]
@@ -143,6 +168,41 @@ def notify_reminder(config: Config, symbol: str, name: str, rows: list, current_
         verb = "還沒跌破" if is_buy else "還沒回升"
         ts_text = row["ts"][11:16] if len(row["ts"]) >= 16 else row["ts"]
         lines.append(f"[{tag}] {strategy_label(row['strategy'])}：{ts_text}觸發@{row['price']:.1f}，{verb}")
+
+    if sell_rows:
+        today_str = sell_rows[0]["ts"][:10]
+        if today_str in ex_dividend_dates:
+            lines += [
+                "",
+                f"⚠️ 注意：今天({today_str})是這支股票的除權息日，賣出訊號可能是除息參考價"
+                "機制性下跌，不一定是真的下跌，建議自行確認。",
+            ]
+
+    return send_message(config.telegram_bot_token, config.telegram_chat_id, "\n".join(lines))
+
+
+def notify_ex_dividend_today(config: Config, rows: list[dict]) -> bool:
+    """早上一次性通知：今天觀察清單裡有哪幾檔要除權息、金額多少——2026-08-15使用者要求，
+    這樣盤中如果剛好看到停損觸發，心裡已經有個底「這支今天有除息，可能是股價機制性
+    下跌」，不用等到訊號真的觸發才第一次知道。rows每筆需要symbol/name/cash_dividend/
+    stock_dividend_ratio/detail欄位(跟db.fetch_ex_dividend_schedule欄位一致，呼叫端
+    篩過ex_date==今天再傳進來)。沒有任何一檔今天除權息就什麼都不送(不用每天洗版一句
+    「今天沒有除權息」)。"""
+    if not rows:
+        return True
+
+    lines = [f"【📅 今日除權息提醒】共 {len(rows)} 檔："]
+    for row in rows:
+        label = f"{row['symbol']} {row['name']}" if row.get("name") else row["symbol"]
+        parts = []
+        if row.get("cash_dividend"):
+            parts.append(f"現金股利{row['cash_dividend']:.2f}元")
+        if row.get("stock_dividend_ratio"):
+            parts.append(f"股票股利{row['stock_dividend_ratio']}")
+        detail = "、".join(parts) if parts else (row.get("detail") or "除權息")
+        lines.append(f"  {label}：{detail}")
+    lines.append("")
+    lines.append("今天如果看到賣出訊號觸發，記得對照這份清單，可能是除息造成的價格下跌，不一定是真的下跌。")
 
     return send_message(config.telegram_bot_token, config.telegram_chat_id, "\n".join(lines))
 

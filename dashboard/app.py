@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import pandas as pd
 import streamlit as st
 
-from charts import candlestick_with_ma, institutional_flow_chart, intraday_line_chart, kd_chart, margin_balance_chart
+from charts import intraday_line_chart, kd_chart, price_and_chip_chart
 from stocks.config import load_config
 from stocks.daily_update import add_symbol_to_watchlist, check_and_update, is_market_open_now, should_check_for_updates
 from stocks.notifier import NOTIFIABLE_STRATEGIES
@@ -409,8 +409,8 @@ else:
     watchlist = [w for w in all_watchlist if selected_group in w["groups"]]
 symbols = [w["code"] for w in watchlist]
 
-tab_watchlist, tab_chart, tab_fundamentals, tab_history, tab_strategy_logic = st.tabs(
-    ["觀察清單", "K線圖", "籌碼/基本面", "訊號紀錄", "策略邏輯"]
+tab_watchlist, tab_chart, tab_history, tab_strategy_logic = st.tabs(
+    ["觀察清單", "K線圖", "訊號紀錄", "策略邏輯"]
 )
 
 with tab_watchlist:
@@ -475,44 +475,31 @@ with tab_watchlist:
         st.info("觀察清單是空的，用上面欄位新增股票，或先跑 `python scripts/fetch_historical.py` 填範例資料")
 
 with tab_chart:
-    st.subheader("K線圖 + 均線")
+    st.subheader("K線圖 + 均線 + 籌碼面（證交所免費公開資料）")
     if not symbols:
         st.info("觀察清單是空的，沒有資料可以畫圖")
     else:
         selected = st.selectbox("選擇股票", symbols)
         with connect(config.db_path) as conn:
             bars = bars_to_dataframe(fetch_bars_daily(conn, selected), ts_field="date")
+            flow_rows = fetch_institutional_flows(conn, selected)
+            margin_rows = fetch_margin_balances(conn, selected)
+            valuation_rows = fetch_valuations(conn, selected)
+            ex_div_rows = fetch_ex_dividend_schedule(conn, selected)
+
         if bars.empty:
             st.warning(f"{selected} 沒有歷史K棒資料")
         else:
-            fig = candlestick_with_ma(bars, ma_windows=[5, 10, 20, 60])
+            # 2026-08-15使用者要求把籌碼面資料搬到K線圖下方一起比對，不要分開頁籤來回切換——
+            # 三張圖疊在同一個figure裡(shared_xaxes)，拖曳/縮放任一段時間軸，其他段會跟著對齊。
+            flow_df = pd.DataFrame([dict(r) for r in flow_rows]) if flow_rows else None
+            margin_df = pd.DataFrame([dict(r) for r in margin_rows]) if margin_rows else None
+            fig = price_and_chip_chart(bars, flow_df, margin_df, ma_windows=[5, 10, 20, 60])
             st.plotly_chart(fig, use_container_width=True)
-
-with tab_fundamentals:
-    st.subheader("籌碼面 / 基本面（證交所免費公開資料）")
-    if not symbols:
-        st.info("觀察清單是空的，沒有資料可以顯示")
-    else:
-        selected_f = st.selectbox("選擇股票", symbols, key="fundamentals_symbol")
-        with connect(config.db_path) as conn:
-            flow_rows = fetch_institutional_flows(conn, selected_f)
-            margin_rows = fetch_margin_balances(conn, selected_f)
-            valuation_rows = fetch_valuations(conn, selected_f)
-            ex_div_rows = fetch_ex_dividend_schedule(conn, selected_f)
-
-        st.markdown("#### 三大法人買賣超")
-        if flow_rows:
-            flow_df = pd.DataFrame([dict(r) for r in flow_rows])
-            st.plotly_chart(institutional_flow_chart(flow_df), use_container_width=True)
-        else:
-            st.info("沒有三大法人資料，先跑 `python scripts/fetch_market_data.py`")
-
-        st.markdown("#### 融資融券餘額")
-        if margin_rows:
-            margin_df = pd.DataFrame([dict(r) for r in margin_rows])
-            st.plotly_chart(margin_balance_chart(margin_df), use_container_width=True)
-        else:
-            st.info("沒有融資融券資料，先跑 `python scripts/fetch_market_data.py`")
+            if not flow_rows:
+                st.info("沒有三大法人資料，先跑 `python scripts/fetch_market_data.py`")
+            if not margin_rows:
+                st.info("沒有融資融券資料，先跑 `python scripts/fetch_market_data.py`")
 
         st.markdown("#### 目前估值")
         if valuation_rows:
