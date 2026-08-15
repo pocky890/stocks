@@ -1,7 +1,7 @@
-"""比較3種「抓最低點」候選策略(bullish_divergence/capitulation_reversal/chip_reversal_fast)
-在整個觀察清單上的歷史表現，同時比較每個策略的ATR移動停損 vs 幾組固定百分比移動停損
-(8%/10%/15%)——這是研究用的一次性腳本，候選策略還沒決定要不要留、還沒加進
-STRATEGY_REGISTRY，先直接import類別來跑。
+"""比較「抓最低點」候選策略(bullish_divergence/capitulation_reversal，原本還有
+chip_reversal_fast，2026-08-15使用者要求整支拿掉)在整個觀察清單上的歷史表現，同時比較
+每個策略的ATR移動停損 vs 幾組固定百分比移動停損(8%/10%/15%)——這是研究用的一次性腳本，
+候選策略還沒決定要不要留、還沒加進STRATEGY_REGISTRY，先直接import類別來跑。
 """
 import sys
 from pathlib import Path
@@ -21,7 +21,6 @@ from stocks.db import (
 )
 from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
 from stocks.strategies.capitulation_reversal import CapitulationReversalStrategy
-from stocks.strategies.chip_reversal_fast import ChipReversalFastStrategy
 from stocks.strategy_stats import simulate_round_trips, summarize_trades
 
 STOP_CONFIGS = [
@@ -34,7 +33,6 @@ STOP_CONFIGS = [
 CANDIDATES = [
     BullishDivergenceStrategy(),
     CapitulationReversalStrategy(),
-    ChipReversalFastStrategy(),
 ]
 
 

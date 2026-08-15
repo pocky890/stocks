@@ -21,10 +21,10 @@ from stocks.db import (
     fetch_watchlist,
 )
 from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
-from stocks.strategies.chip_reversal_fast import ChipReversalFastStrategy
 from stocks.strategy_stats import simulate_round_trips, summarize_trades
 
-CANDIDATES = [BullishDivergenceStrategy(), ChipReversalFastStrategy()]
+# chip_reversal_fast原本也在這裡一起比較，2026-08-15使用者要求整支拿掉，只剩bullish_divergence。
+CANDIDATES = [BullishDivergenceStrategy()]
 CONFIGS = [
     ("原本(訊號當天進場)", {}),
     ("加隔天確認", {"confirm_next_day": True}),

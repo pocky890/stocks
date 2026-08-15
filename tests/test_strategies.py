@@ -7,6 +7,7 @@ from stocks.strategies import STRATEGY_LABELS, STRATEGY_REGISTRY, strategy_label
 from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bollinger import BollingerStrategy
 from stocks.strategies.breakout import BreakoutStrategy
+from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
 from stocks.strategies.chip_momentum import ChipMomentumStrategy
 from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
@@ -239,6 +240,64 @@ def test_atr_breakout_stays_flat_generates_no_signal():
         "2330", bars, {"donchian_period": 3, "atr_period": 2, "atr_multiplier": 2}
     )
     assert events == []
+
+
+def test_bullish_divergence_reversal_confirm_waits_for_close_above_ma5_or_prior_high():
+    # idx8創5日新低(50)且RSI背離(前段跌勢比較猛，這段比較溫和)，原本訊號當天(idx8)就直接
+    # 進場；2026-08-15使用者建議加require_reversal_confirm——不該猜底部，要等到「收盤站上
+    # 5日均線」或「收盤價站上前一天最高價(破底翻)」這兩個確認條件其中之一真的出現才進場。
+    # idx9收57，站上idx8的最高價(51)，屬於後者，確認後才進場，價格也因此從50變成57。
+    closes = [100, 90, 80, 70, 60, 65, 68, 55, 50, 57, 52, 58]
+    bars = make_bars(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+    params = {"lookback_days": 5, "rsi_period": 3, "rsi_ceiling": 90}
+
+    baseline = BullishDivergenceStrategy().evaluate("2454", bars, params)
+    assert baseline[0].direction == Direction.BUY
+    assert baseline[0].price == 50
+
+    confirmed = BullishDivergenceStrategy().evaluate("2454", bars, {**params, "require_reversal_confirm": True})
+    assert confirmed[0].direction == Direction.BUY
+    assert confirmed[0].price == 57
+    assert confirmed[0].ts > baseline[0].ts
+
+
+def test_bullish_divergence_reversal_confirm_keeps_waiting_across_multiple_days():
+    # 2026-08-15使用者發現：原本require_reversal_confirm只看訊號隔天一次，隔天沒確認就
+    # 永遠放棄——但實測案例顯示真正的反轉常常要等好幾天MACD/KD才轉正，隔天不confirm不
+    # 代表這次低點是假的。這裡驗證：idx8創新低(50)後，idx9(45)、idx10(40)持續破底(RSI已經
+    # 探底到0，不再滿足背離不會產生新訊號)，直到idx11(55)才真的站上前高——距離idx8已經
+    # 3個交易日，reversal_confirm_max_wait_days預設10天內都算數，該進場；但如果把
+    # max_wait_days調到2(等不到3天後才出現的確認)，這次訊號就該直接放棄，不進場。
+    closes = [100, 90, 80, 70, 60, 65, 68, 55, 50, 45, 40, 55, 60]
+    bars = make_bars(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+    params = {"lookback_days": 5, "rsi_period": 3, "rsi_ceiling": 90, "require_reversal_confirm": True}
+
+    patient = BullishDivergenceStrategy().evaluate("2454", bars, params)
+    assert patient[0].direction == Direction.BUY
+    assert patient[0].price == 55
+
+    impatient = BullishDivergenceStrategy().evaluate(
+        "2454", bars, {**params, "reversal_confirm_max_wait_days": 2}
+    )
+    assert impatient == []
+
+
+def test_bullish_divergence_structural_stop_stays_fixed_at_entry_bar_low():
+    # 進場K棒(idx8)最低點49，結構停損固定在49*(1-2%)=48.02，之後價格衝高到70再拉回55
+    # (55還在48.02之上)不該出場——如果是pct/atr那種逐日往上墊高的移動停損，70衝高後停損
+    # 會墊到59.5，55反而會先觸發出場；這裡刻意驗證結構停損不會這樣往上移動，只有真的
+    # 跌破48.02(idx15收47)才出場，因為它保護的是「進場當時的結構是否還成立」，不是拿來
+    # 鎖定後續獲利用的移動停損。
+    closes = [100, 90, 80, 70, 60, 65, 68, 55, 50, 57, 52, 58, 65, 70, 55, 47]
+    bars = make_bars(closes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
+    params = {"lookback_days": 5, "rsi_period": 3, "rsi_ceiling": 90, "stop_mode": "structural"}
+
+    events = BullishDivergenceStrategy().evaluate("2454", bars, params)
+
+    assert len(events) == 2
+    buy, sell = events
+    assert buy.direction == Direction.BUY and buy.price == 50
+    assert sell.direction == Direction.SELL and sell.price == 47
 
 
 def test_chip_momentum_enters_on_foreign_buy_streak_and_exits_on_atr_stop():

@@ -14,9 +14,10 @@ MAX_BATCH_SYMBOLS_LISTED = 30
 # 只有這幾個「進場/出場邏輯完整、可以直接照著做」的策略會推播——單一指標(RSI/MACD/KD/
 # 均線交叉...)本身誤判率較高，不再各自觸發通知，但照樣會寫進signal_events(訊號紀錄頁籤
 # 看得到全部)。極簡買賣公式(buy_formula/sell_formula)回測後整體表現墊底，已經移除。
-# bullish_divergence/capitulation_reversal/chip_reversal_fast(2026-08-15新增，「抓最低點」
-# 系列)：進出場邏輯完整(進場條件各自見策略docstring，出場統一15%移動停損)，經
-# scripts/backtest_bottom_pickers.py全觀察清單10年回測驗證後加入。
+# bullish_divergence/capitulation_reversal(2026-08-15新增，「抓最低點」系列)：進出場邏輯
+# 完整(進場條件各自見策略docstring，出場統一15%移動停損)，經scripts/backtest_bottom_
+# pickers.py全觀察清單10年回測驗證後加入。chip_reversal_fast同批加入，2026-08-15使用者
+# 要求整支策略拿掉(不只是不通知)，已從STRATEGY_REGISTRY/config.json完全移除。
 NOTIFIABLE_STRATEGIES = {
     "atr_breakout",
     "chip_momentum",
@@ -27,7 +28,6 @@ NOTIFIABLE_STRATEGIES = {
     "long_swing",
     "bullish_divergence",
     "capitulation_reversal",
-    "chip_reversal_fast",
 }
 _MA_PERIODS = (5, 10, 20, 60)
 _MA_NAMES = {20: "月", 60: "季"}  # 5、10維持數字講法，20/60叫月線/季線，跟dashboard命名一致

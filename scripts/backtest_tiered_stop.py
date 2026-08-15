@@ -1,6 +1,6 @@
-"""比較「單階15%移動停損」vs「分批停損(8%賣一半/15%賣剩餘一半)」在6支目前用固定
-百分比停損的策略上的表現(bullish_divergence/capitulation_reversal/chip_reversal_fast/
-atr_breakout/chip_momentum/trust_momentum)。分批出場的訊號要用simulate_scaleout_trades
+"""比較「單階15%移動停損」vs「分批停損(8%賣一半/15%賣剩餘一半)」在幾支目前用固定
+百分比停損的策略上的表現(bullish_divergence/capitulation_reversal/atr_breakout/
+chip_momentum/trust_momentum)。分批出場的訊號要用simulate_scaleout_trades
 配對(一次BUY配兩次SELL)，不是simulate_round_trips，跟golden_cross_scaleout用同一套。
 研究用一次性腳本，不動STRATEGY_REGISTRY的預設params。
 """
@@ -24,14 +24,12 @@ from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
 from stocks.strategies.capitulation_reversal import CapitulationReversalStrategy
 from stocks.strategies.chip_momentum import ChipMomentumStrategy
-from stocks.strategies.chip_reversal_fast import ChipReversalFastStrategy
 from stocks.strategies.trust_momentum import TrustMomentumStrategy
 from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 
 CANDIDATES = [
     BullishDivergenceStrategy(),
     CapitulationReversalStrategy(),
-    ChipReversalFastStrategy(),
     ATRBreakoutStrategy(),
     ChipMomentumStrategy(),
     TrustMomentumStrategy(),

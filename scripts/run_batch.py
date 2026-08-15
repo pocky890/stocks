@@ -2,10 +2,10 @@
 股票，不再對全市場~2000檔評估/通知——太雜訊。跑除institutional_streak以外的所有策略
 （那個還是只服務觀察清單自己），但NOTIFIABLE_STRATEGIES(atr_breakout/chip_momentum/
 trust_momentum/trend_following/breakout/golden_cross_scaleout/long_swing/
-bullish_divergence/capitulation_reversal/chip_reversal_fast)另外跳過——這幾個策略對
-觀察清單股票只在run_live.py的13:20檢查發通知，這裡再評估一次會重複通知同一天同一檔
-股票的同一個訊號。單一指標類策略(RSI/MACD/KD/均線交叉...)照樣評估、寫進signal_events
-(訊號紀錄頁籤看得到)，但本來就不發通知，不受影響。
+bullish_divergence/capitulation_reversal)另外跳過——這幾個策略對觀察清單股票只在
+run_live.py的13:20檢查發通知，這裡再評估一次會重複通知同一天同一檔股票的同一個訊號。
+單一指標類策略(RSI/MACD/KD/均線交叉...)照樣評估、寫進signal_events(訊號紀錄頁籤看得到)，
+但本來就不發通知，不受影響。
 
 api.daily_quotes()/三大法人API都沒有「只查特定股票」的接口，只能一次拿全市場資料
 (~2000檔OHLCV + TWSE/TPEx各一次籌碼呼叫)，篩選出觀察清單再寫入DB/評估——全市場的

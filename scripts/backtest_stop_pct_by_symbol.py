@@ -22,7 +22,6 @@ from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
 from stocks.strategies.capitulation_reversal import CapitulationReversalStrategy
 from stocks.strategies.chip_momentum import ChipMomentumStrategy
-from stocks.strategies.chip_reversal_fast import ChipReversalFastStrategy
 from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
 from stocks.strategies.trust_momentum import TrustMomentumStrategy
 from stocks.strategy_stats import simulate_round_trips, summarize_trades
@@ -30,7 +29,6 @@ from stocks.strategy_stats import simulate_round_trips, summarize_trades
 CANDIDATES = [
     BullishDivergenceStrategy(),
     CapitulationReversalStrategy(),
-    ChipReversalFastStrategy(),
     ATRBreakoutStrategy(),
     ChipMomentumStrategy(),
     TrustMomentumStrategy(),
