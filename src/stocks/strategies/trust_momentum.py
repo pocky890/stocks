@@ -53,12 +53,29 @@ class TrustMomentumStrategy:
         # 全觀察清單同時觸發、同時停損就是這種情況)——預設False不影響既有行為，只有
         # 明確帶這個參數做回測比較時才會生效，跟long_swing的MA60>MA120 regime概念同源。
         trend_ma_period = params.get("trend_ma_period", 60)
+        entry_mode = params.get("entry_mode", "default")  # "default"(舊版:近chip_window_days
+        # 日內至少chip_min_buy_days天買超且淨額為正，單一視窗) 或 "window10_3"(2026-08-16
+        # 使用者提出、先在chip_momentum驗證過的兩層視窗寫法：近10日累積淨額為正，且近3日
+        # 內至少2日買超——用cum_window_days/recent_window_days/recent_min_buy_days三個
+        # 參數控制，跟chip_momentum.py同一套命名，方便對照)。config.json已經把trust_momentum
+        # 設成"window10_3"當正式預設(全觀察清單10年回測打平略優，2026 YTD明顯改善：加總
+        # 報酬32.5→209.1、獲利因子1.05→1.41，這支策略今年本來是全部策略裡表現最差的)；
+        # 這裡程式碼本身的fallback仍留"default"，只有沒被config.json覆蓋、直接呼叫
+        # evaluate()又沒帶這個參數的情況才會退回舊版行為。
+        cum_window_days = params.get("cum_window_days", 10)
+        recent_window_days = params.get("recent_window_days", 3)
+        recent_min_buy_days = params.get("recent_min_buy_days", 2)
 
         close = bars["close"]
         trust_net = bars["trust_net"].fillna(0)
-        buy_days_in_window = (trust_net > 0).rolling(window=chip_window_days).sum()
-        net_sum_in_window = trust_net.rolling(window=chip_window_days).sum()
-        trust_buy_streak = (buy_days_in_window >= chip_min_buy_days) & (net_sum_in_window > 0)
+        if entry_mode == "window10_3":
+            cum_positive = trust_net.rolling(cum_window_days).sum() > 0
+            recent_buy_days = (trust_net > 0).rolling(recent_window_days).sum()
+            trust_buy_streak = cum_positive & (recent_buy_days >= recent_min_buy_days)
+        else:
+            buy_days_in_window = (trust_net > 0).rolling(window=chip_window_days).sum()
+            net_sum_in_window = trust_net.rolling(window=chip_window_days).sum()
+            trust_buy_streak = (buy_days_in_window >= chip_min_buy_days) & (net_sum_in_window > 0)
 
         not_overbought = rsi(close, rsi_period) < rsi_overbought
         entry_condition = trust_buy_streak & not_overbought

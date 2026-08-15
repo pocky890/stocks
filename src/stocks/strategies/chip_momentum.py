@@ -31,13 +31,28 @@ class ChipMomentumStrategy:
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
+        entry_mode = params.get("entry_mode", "streak")  # "streak"(現行:連續剛好chip_streak_days
+        # 天買超) 或 "window"(2026-08-16研究中：近cum_window_days日外資買超累積淨額為正，
+        # 且近recent_window_days日內至少recent_min_buy_days天買超——跟trust_momentum的
+        # 視窗概念類似，但這裡刻意用兩層(長窗口看累積方向+短窗口看最近有沒有持續買，
+        # 不是trust_momentum那種單一視窗)，比原本「連續剛好3天」寬鬆，容許中間偶爾斷一天
+        # 不買。預設仍是streak，不影響既有行為。
+        cum_window_days = params.get("cum_window_days", 10)
+        recent_window_days = params.get("recent_window_days", 3)
+        recent_min_buy_days = params.get("recent_min_buy_days", 2)
 
         close = bars["close"]
         foreign_net = bars["foreign_net"].fillna(0)
-        sign = foreign_net.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
-        group_id = (sign != sign.shift()).cumsum()
-        streak = sign.groupby(group_id).cumcount() + 1
-        foreign_buy_streak = (sign == 1) & (streak == chip_streak_days)
+
+        if entry_mode == "window":
+            cum_positive = foreign_net.rolling(cum_window_days).sum() > 0
+            recent_buy_days = (foreign_net > 0).rolling(recent_window_days).sum()
+            foreign_buy_streak = cum_positive & (recent_buy_days >= recent_min_buy_days)
+        else:
+            sign = foreign_net.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+            group_id = (sign != sign.shift()).cumsum()
+            streak = sign.groupby(group_id).cumcount() + 1
+            foreign_buy_streak = (sign == 1) & (streak == chip_streak_days)
 
         not_overbought = rsi(close, rsi_period) < rsi_overbought
         entry_condition = foreign_buy_streak & not_overbought
