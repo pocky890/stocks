@@ -57,6 +57,44 @@ def compute_breadth_pct(conn, industry_code: str, ma_period: int) -> float | Non
     return float((latest_close[valid] < latest_ma[valid]).sum() / valid.sum())
 
 
+def compute_breadth_series(conn, industry_code: str, ma_period: int) -> pd.Series:
+    """跟compute_breadth_pct同一套算法，但回傳「每一天」的寬度數字(index是pd.Timestamp)，
+    不是只回傳資料庫裡最新一天——build_paper_trades要回放「當時」的斷路器狀態來過濾
+    歷史BUY訊號，不能只看app_settings存的『現在』狀態。每一天的均線都只用當天(含)以前
+    的收盤價算，跟原本逐日rolling的因果性一致，不會有look-ahead。"""
+    rows = fetch_industry_closes(conn, industry_code)
+    if not rows:
+        return pd.Series(dtype=float)
+    df = pd.DataFrame([dict(r) for r in rows])
+    pivot = df.pivot(index="date", columns="symbol", values="close").sort_index()
+    pivot.index = pd.to_datetime(pivot.index)
+    if len(pivot) < ma_period:
+        return pd.Series(dtype=float)
+    ma = pivot.rolling(ma_period).mean()
+    valid = pivot.notna() & ma.notna()
+    valid_count = valid.sum(axis=1).astype(float)
+    below_count = (pivot < ma)[valid].sum(axis=1).astype(float)
+    pct = (below_count / valid_count)[valid_count > 0]
+    return pct
+
+
+def replay_active_state(breadth_pct: pd.Series, enter_threshold: float, exit_threshold: float) -> pd.Series:
+    """依照refresh_industry_states同一套60%/40%遲滯規則，逐日回放斷路器on/off狀態
+    (index跟breadth_pct一樣是pd.Timestamp)。回傳的是「當天收盤後」算出的狀態——正式
+    環境裡這個狀態要到隔天run_live.py才會讀到(見load_active_state)，所以呼叫端要自己
+    shift(1)一天才是「當天盤中」實際生效的狀態，不能直接拿當天的值去擋當天的訊號
+    (那會變成用當天收盤資料去擋當天盤中已經發生的訊號，等於look-ahead)。"""
+    states = {}
+    active = False
+    for date, pct in breadth_pct.items():
+        if not active and pct >= enter_threshold:
+            active = True
+        elif active and pct <= exit_threshold:
+            active = False
+        states[date] = active
+    return pd.Series(states)
+
+
 def refresh_industry_states(conn, config: Config) -> dict:
     """收盤後(run_batch.py儲存完當天的industry_closes後)呼叫一次：對觀察清單目前涵蓋的
     每個產業代碼重新算寬度、套遲滯規則更新on/off狀態並存回app_settings。回傳更新後的

@@ -3,7 +3,14 @@ from datetime import date, timedelta
 import pandas as pd
 
 from stocks import db
-from stocks.circuit_breaker import compute_breadth_pct, is_buy_suppressed, load_active_state, refresh_industry_states
+from stocks.circuit_breaker import (
+    compute_breadth_pct,
+    compute_breadth_series,
+    is_buy_suppressed,
+    load_active_state,
+    refresh_industry_states,
+    replay_active_state,
+)
 from stocks.config import Config
 
 
@@ -114,6 +121,31 @@ def test_is_buy_suppressed_requires_both_industry_active_and_own_ma_broken():
 
 def test_is_buy_suppressed_never_blocks_unclassified_symbol():
     assert is_buy_suppressed("9999", {}, {"24": True}, pd.DataFrame({"close": [12, 10, 8]}), ma_period=3) is False
+
+
+def test_compute_breadth_series_returns_pct_for_every_day_not_just_latest(tmp_path):
+    # build_paper_trades要回放「當時」的斷路器狀態，不能只看最新一天(compute_breadth_pct
+    # 的行為)，所以每一天都要各自算一個寬度數字，不夠ma_period天的日子直接不出現。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    start = date(2026, 1, 1)
+    with db.connect(db_path) as conn:
+        insert_closes(conn, "24", "AAA", [8, 10, 12, 14], start)  # 一路走高 -> 每天都在自己均線之上
+        insert_closes(conn, "24", "BBB", [12, 10, 8, 6], start)  # 一路走低 -> 每天都在自己均線之下
+        series = compute_breadth_series(conn, "24", ma_period=3)
+    assert list(series.index.strftime("%Y-%m-%d")) == ["2026-01-03", "2026-01-04"]
+    assert list(series.values) == [0.5, 0.5]
+
+
+def test_replay_active_state_applies_same_hysteresis_day_by_day():
+    # 跟refresh_industry_states同一套60%/40%遲滯規則，但這裡是一次回放整段歷史(給paper
+    # trade用)，不是只看單一個「現在」的百分比。
+    pct = pd.Series(
+        [0.9, 0.5, 0.9, 0.3, 0.9],
+        index=pd.date_range("2026-01-01", periods=5),
+    )
+    state = replay_active_state(pct, enter_threshold=0.60, exit_threshold=0.40)
+    assert list(state.values) == [True, True, True, False, True]
 
 
 def test_load_active_state_defaults_to_empty_dict(tmp_path):

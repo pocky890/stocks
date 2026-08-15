@@ -1,3 +1,5 @@
+from datetime import date, datetime, timedelta
+
 import pandas as pd
 import pytest
 
@@ -627,6 +629,54 @@ def test_build_paper_trades_skips_strategies_disabled_for_that_symbol(tmp_path):
 
     assert not any(r["策略"] == "atr_breakout" for r in rows)
     assert any(r["策略"] == "golden_cross_scaleout" for r in rows), "沒被排除的策略應該照樣出現"
+
+
+def test_build_paper_trades_suppresses_buy_blocked_by_industry_circuit_breaker(tmp_path):
+    # 2026-08-15使用者要求：全市場同產業寬度斷路器擋掉的BUY訊號不該出現在模擬交易紀錄裡，
+    # 跟disabled_strategies同一種「照現在的設定實際會不會被通知」的邏輯。這裡用donchian_
+    # period=3(縮小突破所需的天數)搭配一段大跌後小反彈，讓atr_breakout在反彈那天觸發突破
+    # 進場，但當天收盤價(22)仍然低於自己的15日均線(35.9)；同時把兩檔同產業股票塞進
+    # industry_closes、全程都跌破自己的均線(100%寬度，遠高於60%進場門檻)，讓斷路器在
+    # 進場前一天就已經是on——兩個條件(產業寬度斷路器on + 自己也跌破月線)同時成立，
+    # 這筆BUY該被擋下來，不該出現在模擬交易紀錄裡。
+    closes = [100] + [50, 47, 44, 41, 38, 35, 32, 29, 26, 23, 20, 17, 14] + [22]
+    dates = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(len(closes))]
+    bars = [
+        Bar(symbol="2454", ts=ts, open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = Config(
+        shioaji_api_key="",
+        shioaji_secret_key="",
+        telegram_bot_token="",
+        telegram_chat_id="",
+        market_open="09:00",
+        market_close="13:30",
+        bar_interval_minutes=5,
+        batch_pacing_seconds=0,
+        strategy_params={"atr_breakout": {"donchian_period": 3}},
+        db_path=db_path,
+        circuit_breaker_ma_period=15,
+    )
+
+    peer_dates = [date(2025, 12, 16) + timedelta(days=i) for i in range(31)]  # 涵蓋到2026-01-15
+    peer_rows = [
+        {"symbol": sym, "date": d.isoformat(), "industry_code": "24", "close": 100 - i}
+        for sym in ("PEERA", "PEERB")
+        for i, d in enumerate(peer_dates)
+    ]
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="群聯")
+        db.set_industry_code(conn, "2454", "24")
+        db.insert_industry_closes(conn, peer_rows)
+
+    rows = build_paper_trades(config, start_date=dates[0].strftime("%Y-%m-%d"))
+
+    assert not any(r["策略"] == "atr_breakout" for r in rows), "產業寬度斷路器on+自己跌破月線時，這筆BUY該被擋下來"
 
 
 def test_price_text_plain_number_when_change_unknown():

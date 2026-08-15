@@ -4,11 +4,13 @@ from datetime import datetime
 
 import pandas as pd
 
+from stocks.circuit_breaker import compute_breadth_series, replay_active_state
 from stocks.config import Config
 from stocks.db import (
     attach_institutional_flows,
     bars_to_dataframe,
     connect,
+    fetch_all_industry_codes,
     fetch_bars_5min_latest_day,
     fetch_bars_daily,
     fetch_institutional_flows,
@@ -393,10 +395,33 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
     這裡跟_compute_track_records不一樣：那裡是故意忽略排除清單(給使用者看「為什麼」
     被排除的歷史全貌)，這裡是模擬「照現在的設定實際會不會被通知」，所以個股已經被
     disabled_strategies排除的策略要跳過，不列進模擬交易——不然會看到「策略明明已經
-    被排除了，畫面上卻還在模擬買賣」這種矛盾。"""
+    被排除了，畫面上卻還在模擬買賣」這種矛盾。
+
+    2026-08-15使用者要求：同樣道理，全市場同產業寬度斷路器(circuit_breaker.py)擋掉的
+    BUY訊號也不該出現在這裡——不然會看到「這支股票這個訊號當時實際上不會被通知」卻還在
+    模擬買賣的矛盾，跟disabled_strategies是同一種問題。斷路器只擋BUY(SELL永遠不擋、
+    既有部位一樣可以出場)，所以只過濾events裡的BUY方向，不動SELL。斷路器狀態要用
+    compute_breadth_series+replay_active_state逐日回放「當時」的on/off(不能只看
+    app_settings存的『現在』狀態)，且shift(1)一天再拿來擋——正式環境裡斷路器狀態要
+    收盤後才更新、隔天才生效(見circuit_breaker.py的refresh_industry_states/
+    load_active_state)，同一天的收盤資料不能拿來擋當天已經觸發的訊號，不然等於
+    look-ahead。個股自己是否跌破月線則用當天(含)以前的收盤價，跟訊號本身用同一天
+    收盤價判斷是一致的因果性，不是look-ahead。"""
     start = pd.Timestamp(start_date)
     rows = []
+    breadth_state_cache: dict[str, pd.Series] = {}
     with connect(config.db_path) as conn:
+        industry_codes = fetch_all_industry_codes(conn)
+
+        def _effective_active_state(industry_code: str) -> pd.Series:
+            if industry_code not in breadth_state_cache:
+                breadth_pct = compute_breadth_series(conn, industry_code, config.circuit_breaker_ma_period)
+                active_state = replay_active_state(
+                    breadth_pct, config.circuit_breaker_enter_threshold, config.circuit_breaker_exit_threshold
+                )
+                breadth_state_cache[industry_code] = active_state.shift(1).fillna(False)
+            return breadth_state_cache[industry_code]
+
         for symbol_row in fetch_watchlist(conn):
             symbol, name = symbol_row["code"], symbol_row["name"]
             bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
@@ -409,6 +434,24 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
             current_price = _current_price(bars, today_bars)
             disabled = set(get_disabled_strategies(conn, symbol))
 
+            industry_code = industry_codes.get(symbol)
+            own_ma = None
+            own_below_ma = None
+            effective_active_state = None
+            if industry_code is not None:
+                own_ma = merged["close"].rolling(config.circuit_breaker_ma_period).mean()
+                own_below_ma = merged["close"] < own_ma
+                effective_active_state = _effective_active_state(industry_code)
+
+            def _buy_suppressed(ts) -> bool:
+                if effective_active_state is None:
+                    return False
+                if ts not in effective_active_state.index or not effective_active_state.loc[ts]:
+                    return False
+                if ts not in own_ma.index or pd.isna(own_ma.loc[ts]):
+                    return False
+                return bool(own_below_ma.loc[ts])
+
             for strategy_name in NOTIFIABLE_STRATEGIES:
                 if strategy_name in disabled:
                     continue
@@ -416,6 +459,7 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
                 if strategy is None:
                     continue
                 events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
+                events = [e for e in events if not (e.direction == Direction.BUY and _buy_suppressed(e.ts))]
                 events_since = [e for e in events if e.ts >= start]
                 if not events_since:
                     continue
