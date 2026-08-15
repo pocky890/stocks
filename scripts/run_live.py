@@ -12,7 +12,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from stocks.bar_aggregator import BarAggregator, market_hour_boundaries
-from stocks.circuit_breaker import is_buy_suppressed, load_active_state
+from stocks.circuit_breaker import CIRCUIT_BREAKER_EXEMPT_STRATEGIES, is_buy_suppressed, load_active_state
 from stocks.config import load_config
 from stocks.daily_update import check_and_update
 from stocks.db import (
@@ -242,10 +242,13 @@ def main():
                 new_events = insert_signal_events(conn, events)
                 # 斷路器只擋「要不要推播」，不影響signal_events寫入——訊號紀錄頁籤要看得到
                 # 完整歷史，被擋掉的BUY一樣算「這個策略真的觸發過」，只是不推播Telegram。
+                # CIRCUIT_BREAKER_EXEMPT_STRATEGIES裡的策略完全跳過斷路器檢查——見
+                # circuit_breaker.py同名常數的說明。
                 notifiable_events = [
                     e
                     for e in new_events
                     if e.direction != Direction.BUY
+                    or e.strategy in CIRCUIT_BREAKER_EXEMPT_STRATEGIES
                     or not is_buy_suppressed(symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_ma_period)
                 ]
             if notifiable_events:
@@ -289,6 +292,7 @@ def main():
                     r
                     for r in still_valid
                     if r["direction"] != Direction.BUY.value
+                    or r["strategy"] in CIRCUIT_BREAKER_EXEMPT_STRATEGIES
                     or not is_buy_suppressed(
                         symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_ma_period
                     )

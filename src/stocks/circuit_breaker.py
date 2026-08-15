@@ -115,6 +115,18 @@ def refresh_industry_states(conn, config: Config) -> dict:
     return state
 
 
+CIRCUIT_BREAKER_EXEMPT_STRATEGIES = {"bullish_divergence"}  # 2026-08-15使用者發現：背離抄底
+# 調校成RSI<30+右側確認(MACD回升or價格站上均線/前高)後，實測2026-07~08的進場訊號被這個
+# 斷路器擋下的比例是100%——包括後來漲了23%~41%的大贏家全部一起被擋。原因是這個斷路器
+# 「AND自己也跌破月線」這個條件，本來是設計給動能/趨勢類策略用的(避免買進一支連自己都
+# 還沒轉強的股票，那種情況通常代表這支股票也在跟著產業一起爛)；但背離抄底這種抄底策略
+# 「當下正跌破自己月線」根本是進場的前提條件，不是警訊——它就是要在股價還沒轉強、月線
+# 還沒翻上來之前先進場卡位，等右側確認出現才進場的機制已經在做斷路器想做的事(避免接刀)，
+# 兩層過濾疊在一起等於直接把整支策略關掉。capitulation_reversal同一批「抓最低點」策略
+# 實測擋掉比例只有31%(不是系統性衝突，暫不比照排除)，只有bullish_divergence被驗證是
+# 幾乎100%衝突，故只排除這一支。
+
+
 def is_buy_suppressed(
     symbol: str,
     industry_codes: dict,

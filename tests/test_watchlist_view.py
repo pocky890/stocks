@@ -679,6 +679,58 @@ def test_build_paper_trades_suppresses_buy_blocked_by_industry_circuit_breaker(t
     assert not any(r["策略"] == "atr_breakout" for r in rows), "產業寬度斷路器on+自己跌破月線時，這筆BUY該被擋下來"
 
 
+def test_build_paper_trades_exempts_bullish_divergence_from_circuit_breaker(tmp_path):
+    # 2026-08-15使用者發現：背離抄底調校成RSI<30+右側確認後，實測2026-07~08的進場訊號
+    # 被斷路器擋下的比例是100%(包括後來漲了23%~41%的大贏家)，因為「自己也跌破月線」
+    # 對抄底策略來說根本是進場前提、不是警訊——所以bullish_divergence要完全跳過斷路器
+    # 過濾(CIRCUIT_BREAKER_EXEMPT_STRATEGIES)。這裡建構跟test_build_paper_trades_
+    # suppresses_buy_blocked_by_industry_circuit_breaker同樣「產業寬度斷路器on+自己
+    # 跌破月線」的環境(兩檔同產業股票全程破線，5日均線期間)，但這次讓bullish_divergence
+    # 在2026-01-09創新低+RSI背離觸發BUY(收盤50，當天自己的5日均線59.6，比收盤價高，
+    # 一般情況下會被斷路器擋掉)，驗證這筆BUY照樣要出現在模擬交易紀錄裡。
+    closes = [100, 90, 80, 70, 60, 65, 68, 55, 50, 57, 52, 58]
+    dates = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(len(closes))]
+    bars = [
+        Bar(symbol="2454", ts=ts, open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = Config(
+        shioaji_api_key="",
+        shioaji_secret_key="",
+        telegram_bot_token="",
+        telegram_chat_id="",
+        market_open="09:00",
+        market_close="13:30",
+        bar_interval_minutes=5,
+        batch_pacing_seconds=0,
+        strategy_params={"bullish_divergence": {"lookback_days": 5, "rsi_period": 3, "rsi_ceiling": 90}},
+        db_path=db_path,
+        circuit_breaker_ma_period=5,
+    )
+
+    peer_dates = [date(2025, 12, 20) + timedelta(days=i) for i in range(21)]  # 涵蓋到2026-01-09
+    peer_rows = [
+        {"symbol": sym, "date": d.isoformat(), "industry_code": "24", "close": 100 - i}
+        for sym in ("PEERA", "PEERB")
+        for i, d in enumerate(peer_dates)
+    ]
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="群聯")
+        db.set_industry_code(conn, "2454", "24")
+        db.insert_industry_closes(conn, peer_rows)
+
+    rows = build_paper_trades(config, start_date=dates[0].strftime("%Y-%m-%d"))
+
+    bd_rows = [r for r in rows if r["策略"] == "bullish_divergence"]
+    assert bd_rows, "背離抄底豁免斷路器，這筆BUY不該被擋掉"
+    assert bd_rows[0]["買進日期"] == "2026-01-09"
+    assert bd_rows[0]["買進價位"] == 50
+
+
 def test_price_text_plain_number_when_change_unknown():
     assert price_text(105.0, None) == "105"
 

@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from stocks.circuit_breaker import compute_breadth_series, replay_active_state
+from stocks.circuit_breaker import CIRCUIT_BREAKER_EXEMPT_STRATEGIES, compute_breadth_series, replay_active_state
 from stocks.config import Config
 from stocks.db import (
     attach_institutional_flows,
@@ -406,7 +406,13 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
     收盤後才更新、隔天才生效(見circuit_breaker.py的refresh_industry_states/
     load_active_state)，同一天的收盤資料不能拿來擋當天已經觸發的訊號，不然等於
     look-ahead。個股自己是否跌破月線則用當天(含)以前的收盤價，跟訊號本身用同一天
-    收盤價判斷是一致的因果性，不是look-ahead。"""
+    收盤價判斷是一致的因果性，不是look-ahead。
+
+    CIRCUIT_BREAKER_EXEMPT_STRATEGIES裡的策略完全跳過這個過濾(見circuit_breaker.py
+    同名常數的說明)——bullish_divergence調校後實測2026-07~08的進場訊號被斷路器擋下
+    比例是100%，包括後來漲了23%~41%的大贏家，因為「自己也跌破月線」對抄底策略來說
+    根本是進場前提、不是警訊，跟run_live.py的即時通知邏輯要一致，不然模擬交易紀錄會
+    比實際通知更悲觀。"""
     start = pd.Timestamp(start_date)
     rows = []
     breadth_state_cache: dict[str, pd.Series] = {}
@@ -459,7 +465,8 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
                 if strategy is None:
                     continue
                 events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
-                events = [e for e in events if not (e.direction == Direction.BUY and _buy_suppressed(e.ts))]
+                if strategy_name not in CIRCUIT_BREAKER_EXEMPT_STRATEGIES:
+                    events = [e for e in events if not (e.direction == Direction.BUY and _buy_suppressed(e.ts))]
                 events_since = [e for e in events if e.ts >= start]
                 if not events_since:
                     continue
