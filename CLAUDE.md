@@ -80,21 +80,26 @@ stop_mode等)，pull完一定要重跑一次`python scripts/recompute_strategy_s
   現行設定好(反覆驗證出同一個結論：這幾支策略靠少數幾筆抱到滿的大波段撐報酬，任何
   提早鎖利/收緊停損的機制幾乎都會系統性砍掉這個獲利來源)，只是保留起來方便以後測試用，
   不是待完成的功能，不用理它們。
-- `chip_momentum`(外資買超動能)新增`entry_mode="ratio"`研究選項(近`ratio_window_days`
-  日外資淨買超加總為正、且加總/近同窗口總成交量加總>`ratio_threshold`，用集中度取代
-  現行「連續剛好N天買超」的頻率判斷)，同樣**config.json沒有啟用**。全觀察清單10年
-  回測(`scripts/backtest_chip_momentum_ratio_entry.py`，baseline要用
+- **`chip_momentum`(外資買超動能)正式改用`entry_mode="ratio"`(`ratio_window_days=5`、
+  `ratio_threshold=0.10`)**：近5日外資淨買超加總為正、且加總/近5日總成交量加總>10%，
+  用集中度取代原本「連續剛好N天買超」的頻率判斷。這是`config.json`的
+  `strategy_params`變更，**pull到這個commit要在這台電腦重跑一次
+  `python scripts/recompute_strategy_selection.py`**(已在做這個決定的那台電腦上跑過)。
+  全觀察清單10年回測(`scripts/backtest_chip_momentum_ratio_entry.py`，baseline要用
   `config.strategy_params["chip_momentum"]`而不是程式碼裡的hardcoded預設值——兩者
-  不一樣，第一次跑這支腳本時baseline誤用了空dict、let chip_streak_days掉回程式碼
-  裡的預設值3而非config.json實際的5，算出來的比較是錯的，後來修正過)結果：現行(連續
-  剛好5天)410筆、加總報酬6758.6、獲利因子3.78；ratio 6-12%門檻筆數變多(458~686筆)、
-  加總報酬持平或略高(6130~8563.6)但獲利因子明顯較低(2.94~3.25)——現行版本的優勢
-  部分來自少數幾檔股票的超高獲利因子(2330台積電10.13、2454聯發科13.97、3661世芯-KY
-  12.03等)，跟這個codebase其他策略「靠少數大波段撐報酬」的既有模式一致。2026年較
-  近期的區間(YTD/7月)ratio 8-10%明顯優於現行版本(YTD獲利因子2.75~2.92 vs 現行1.70)，
-  比第一次(錯誤baseline)算出來的差距更明顯、更難用「樣本數太少是雜訊」打發掉。這次
-  沒有強烈定論——維持現行`entry_mode="streak"`預設，但ratio 8-10%是有一定說服力的
-  候選，值得之後觀察更多近期資料再決定要不要切換，不是像之前那樣單純不用理它。
+  不一樣，第一次跑這支腳本時baseline誤用了空dict、讓chip_streak_days掉回程式碼裡的
+  預設值3而非config.json實際的5，算出來的比較是錯的，後來修正過)結果：原本(連續
+  剛好5天)410筆、加總報酬6758.6、獲利因子3.78；ratio 10%門檻530筆、加總報酬7061.7、
+  獲利因子3.25——10年獲利因子略輸原本版本(原本優勢部分來自少數幾檔股票的超高獲利
+  因子，如2330台積電10.13、2454聯發科13.97、3661世芯-KY 12.03，跟這codebase其他
+  策略「靠少數大波段撐報酬」的既有模式一致)，但2026年較近期區間(YTD/7月)ratio 10%
+  全面優於原本版本(YTD勝率48.3% vs 38.7%、獲利因子2.92 vs 1.70、最大回撤-138.3 vs
+  -138.4打平；7月最大回撤-37.2 vs -44.6)。在ratio 6/8/10/12%四個門檻裡，10%在三個
+  時間窗口的綜合表現(獲利因子、最大回撤、近期表現)都優於8%——8%雖然10年加總報酬
+  略高，但獲利因子更低、回撤更大，近期表現也輸10%。使用者確認採用10%，是接受10年
+  獲利因子小幅下降、換取近期表現與風控改善的取捨。原本的`entry_mode="streak"`(連續
+  剛好`chip_streak_days`天買超)保留在程式碼裡當備援，`config.json`的`chip_streak_days`
+  也還留著(現在entry_mode="ratio"不會讀到它，純參考值，之後要切回streak模式可以用)。
 - `trust_momentum`(投信買超動能)新增`cooldown_days`研究參數(停損出場後N天內不重新
   進場)，**config.json沒有啟用(預設0，即現行:level-triggered，條件仍成立就立刻
   重新進場)**。起因是使用者質疑投信「左側攤平」+ level-triggered進場可能造成連續

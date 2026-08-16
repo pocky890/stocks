@@ -7,7 +7,9 @@ from stocks.models import Direction, SignalEvent
 class ChipMomentumStrategy:
     """外資買超動能策略。
 
-    進場：外資連續5天(chip_streak_days)買超 + RSI(14)未超買(<70)
+    進場：近5天(ratio_window_days)外資淨買超加總為正，且加總/近同窗口總成交量加總>10%
+    (ratio_threshold，entry_mode="ratio")+ RSI(14)未超買(<70)。也支援entry_mode="streak"
+    (連續剛好chip_streak_days天買超，原本的預設)、"window"(累積為正+近期頻率門檻)。
     出場：跌破15%移動停損(stop_mode="pct")，也支援2.5倍ATR移動停損("atr")、分批停損("tiered_pct")
 
     斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己當下也跌破
@@ -31,11 +33,11 @@ class ChipMomentumStrategy:
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
-        entry_mode = params.get("entry_mode", "streak")  # "streak"(現行:連續剛好
-        # chip_streak_days天買超)、"window"(近cum_window_days日累積買超為正，且近
-        # recent_window_days日內至少recent_min_buy_days天買超，比連續買超寬鬆) 或
-        # "ratio"(近ratio_window_days日淨買超加總為正，且淨買超加總/總成交量加總>
-        # ratio_threshold，用集中度取代天數頻率)
+        entry_mode = params.get("entry_mode", "streak")  # "ratio"(現行:近
+        # ratio_window_days日淨買超加總為正，且淨買超加總/總成交量加總>ratio_threshold，
+        # 用集中度取代天數頻率)、"streak"(不設entry_mode時的預設寫法，原本現行:連續剛好
+        # chip_streak_days天買超) 或 "window"(近cum_window_days日累積買超為正，且近
+        # recent_window_days日內至少recent_min_buy_days天買超，比連續買超寬鬆)
         cum_window_days = params.get("cum_window_days", 10)
         recent_window_days = params.get("recent_window_days", 3)
         recent_min_buy_days = params.get("recent_min_buy_days", 2)
