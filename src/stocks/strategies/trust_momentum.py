@@ -16,9 +16,13 @@ class TrustMomentumStrategy:
 
     出場：現行(config.json):stop_mode="volume_alert_scaleout"——高檔跌破alert_ma_period
     (現行:10)日均線且成交量>alert_volume_multiplier(現行:1.5)倍均量時，先賣出一半
-    ("爆量出貨警示")，剩餘半倉改用stop_pct(15%)移動停損出場；一買配兩賣，要用
-    simulate_scaleout_trades配對。也支援單一15%移動停損(stop_mode="pct")、ATR移動
-    停損("atr")、分批停損("tiered_pct")。
+    ("爆量出貨警示")，剩餘半倉改用stop_pct(現行:0.20，2026-08-16從0.15拉寬)移動停損
+    出場；一買配兩賣，要用simulate_scaleout_trades配對。拉寬理由：使用者提議進場濾網
+    已經加嚴、出場能否放寬換報酬，實測(scripts/backtest_wider_exit_stops.py)剩餘半倉
+    停損15%→20%是溫和的贏(10年獲利因子5.63→6.73、YTD 1.50→2.09都變好)，但25%就過頭
+    (YTD轉虧、樣本剩7筆)，故只採用20%這一檔；同批也測過拉高alert_volume_multiplier讓
+    警示更晚觸發，10年/YTD一致變差，未採用。也支援單一移動停損(stop_mode="pct")、ATR
+    移動停損("atr")、分批停損("tiered_pct")。
 
     進場是level-triggered(條件當天成立就觸發，不要求剛從False轉True)，停損出場後只要
     條件仍成立就能立刻重新進場(除非設定cooldown_days>0，研究參數，見下方)。

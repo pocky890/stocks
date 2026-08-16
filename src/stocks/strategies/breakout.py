@@ -16,8 +16,11 @@ class BreakoutStrategy:
     62.2→233.5，細節見atr_breakout.py同批說明+scripts/backtest_revenue_growth_
     filter.py。
 
-    出場：收盤價跌破前10日最低，或跌破「進場價-2倍14日ATR」停損(stop_mode="atr"，進場後
-    固定不動)，兩者先發生的為準。也支援stop_mode="pct"(移動停損)。
+    出場：收盤價跌破前10日最低，或跌破「進場價-3倍14日ATR」停損(stop_mode="atr"，進場後
+    固定不動，現行:atr_multiplier=3，2026-08-16從2倍拉寬)，兩者先發生的為準。也支援
+    stop_mode="pct"(移動停損)。拉寬理由跟atr_breakout同一批研究(scripts/backtest_
+    wider_exit_stops.py)：全觀察清單10年2→2.5→3倍總報酬3555→3618→3709、獲利因子
+    3.60→3.66→3.79同步小幅變好，回撤幾乎沒惡化，YTD也沒有變差，方向一致。
 
     斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
     2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.

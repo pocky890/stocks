@@ -23,9 +23,14 @@ class BullishDivergenceStrategy:
       ①初始結構停損防接刀：進場K棒最低點再往下5%緩衝(structural_stop_buffer_pct)
       ②獲利達12%(tiered_target_pct)或觸及60日均線(tiered_ma_period)先賣一半，剩餘部位
         停損上移至成本價保本(move_stop_to_breakeven_after_tier)
-      ③剩餘部位改用15%(stop_pct)寬幅移動停損，讓真正的大反轉抱好抱滿
+      ③剩餘部位改用25%(stop_pct，現行:0.25，2026-08-16從0.15拉寬)寬幅移動停損，讓真正
+        的大反轉抱好抱滿。拉寬理由：使用者質疑「進場濾網加嚴後出場能不能放寬換報酬」，
+        實測(scripts/backtest_wider_exit_stops_remaining4.py)全觀察清單10年15%→20%→
+        25%加總報酬3394.6→4175.5→5331.8、獲利因子1.71→1.94→2.34同步變好；更關鍵的是
+        現行15%在2026YTD其實是虧損中(加總報酬-81.0%、PF0.78)，拉寬到25%讓YTD轉正
+        (+40.6%、PF1.13)，兩個時間窗口方向一致，採用25%。
 
-    也支援單一停損：固定15%移動停損("pct")、ATR停損("atr")、分批停損("tiered_pct")、
+    也支援單一停損：固定移動停損("pct")、ATR停損("atr")、分批停損("tiered_pct")、
     或不搭配tiered_profit的純結構停損("structural"，注意：固定不動又沒有其他出場條件，
     獲利部位會一直持有到觸及停損為止，見structural_trail_after_pct/enable_tiered_profit
     參數註解的實測說明)。
