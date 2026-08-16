@@ -40,31 +40,6 @@ def test_fetch_institutional_flows_latest_parses_foreign_trust_dealer_total(monk
     assert row["total_net"] == -524899
 
 
-def test_fetch_margin_balances_latest_maps_covering_and_short_sale(monkeypatch):
-    payload = [
-        {
-            "Date": "1150804",
-            "SecuritiesCompanyCode": "8299",
-            "MarginPurchase": "82",
-            "MarginSales": "167",
-            "MarginPurchaseBalance": "3871",
-            "ShortConvering": "3",
-            "ShortSale": "0",
-            "ShortSaleBalance": "10",
-        }
-    ]
-    monkeypatch.setattr(tpex_client.requests, "get", lambda *a, **k: FakeResponse(payload))
-
-    rows = tpex_client.fetch_margin_balances_latest()
-
-    assert rows[0]["margin_buy"] == 82
-    assert rows[0]["margin_sell"] == 167
-    assert rows[0]["margin_balance"] == 3871
-    assert rows[0]["short_buy"] == 3, "ShortConvering (回補) maps to short_buy, matching TWSE semantics"
-    assert rows[0]["short_sell"] == 0, "ShortSale (放空) maps to short_sell"
-    assert rows[0]["short_balance"] == 10
-
-
 def test_fetch_valuations_latest_parses_pe_yield_pb(monkeypatch):
     payload = [
         {

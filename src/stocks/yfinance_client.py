@@ -18,6 +18,13 @@ def _bars_from_dataframe(symbol: str, df: pd.DataFrame) -> list[Bar]:
         if pd.isna(row["Open"]) or pd.isna(row["High"]) or pd.isna(row["Low"]) or pd.isna(row["Close"]):
             continue  # 當天還在盤中/尚未收盤，yfinance會回傳缺值OHLC(但Volume可能已經有部分值)，
             # 不是真正的K棒——跟shioaji_client.fetch_daily_quotes()的同一個防護一致。
+        if row["Volume"] == 0:
+            continue  # 2026-08-16發現：市場真的休市(例如颱風假)的那天，yfinance有時不會
+            # 直接跳過，而是回傳open=high=low=close(通常是前一天收盤價)+volume=0的假K棒——
+            # 查證過2026-07-10這天全觀察清單每一檔股票都是這個樣子，明顯是休市、不是真的
+            # 有成交。真正的交易日成交量幾乎不可能剛好是0，用這個當判斷依據很安全。跳過
+            # 不插入，讓rangebreaks(dashboard/charts.py)照現有邏輯把這天當成缺資料的假日
+            # 整批跳過，而不是畫出一根平盤、量能掛零的詭異K棒。
         bars.append(
             Bar(
                 symbol=symbol,

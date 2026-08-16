@@ -33,28 +33,6 @@ def fetch_institutional_flows_latest() -> list[dict]:
     return rows
 
 
-def fetch_margin_balances_latest() -> list[dict]:
-    resp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance", timeout=TIMEOUT)
-    resp.raise_for_status()
-    payload = resp.json()
-
-    rows = []
-    for row in payload:
-        rows.append(
-            {
-                "symbol": row["SecuritiesCompanyCode"],
-                "date": roc_date_to_iso(row["Date"]),
-                "margin_buy": to_number(row.get("MarginPurchase")),
-                "margin_sell": to_number(row.get("MarginSales")),
-                "margin_balance": to_number(row.get("MarginPurchaseBalance")),
-                "short_buy": to_number(row.get("ShortConvering")),
-                "short_sell": to_number(row.get("ShortSale")),
-                "short_balance": to_number(row.get("ShortSaleBalance")),
-            }
-        )
-    return rows
-
-
 def fetch_valuations_latest() -> list[dict]:
     resp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis", timeout=TIMEOUT)
     resp.raise_for_status()

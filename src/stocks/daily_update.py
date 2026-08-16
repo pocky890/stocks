@@ -2,13 +2,14 @@
 重用跟scripts/fetch_historical.py、scripts/fetch_market_data.py一樣的底層client/db函式，
 只是包成一個安靜、不印進度的版本，適合在網頁載入時跑。
 
-上市(TWSE)跟上櫃(TPEx)的籌碼資料走不同邏輯：三大法人/融資融券/估值三個都改用FinMind
-(可以指定日期範圍查詢)，TWSE用sync log追蹤還缺哪些日期backfill，TPEx用「上次抓到的
-日期+1」~「今天」的範圍查詢，不用額外的sync log(institutional_flows/margin_balances/
-valuations三張表都是symbol+date primary key，INSERT OR REPLACE蓋掉重疊範圍不會出錯)。
-2026-08-13把TPEx的融資融券/估值也從官方免費API換成FinMind——官方API(www.tpex.org.tw)
-常有SSL憑證問題(對方伺服器憑證本身的問題)，FinMind穩定得多。除權息預告表還是走TPEx
-官方API(沒觀察到同樣的SSL問題，也還沒查證FinMind有沒有等效資料集)。
+上市(TWSE)跟上櫃(TPEx)的籌碼資料走不同邏輯：三大法人/估值都改用FinMind(可以指定日期
+範圍查詢)，TWSE用sync log追蹤還缺哪些日期backfill，TPEx用「上次抓到的日期+1」~「今天」
+的範圍查詢，不用額外的sync log(institutional_flows/valuations兩張表都是symbol+date
+primary key，INSERT OR REPLACE蓋掉重疊範圍不會出錯)。2026-08-13把TPEx的估值也從官方
+免費API換成FinMind——官方API(www.tpex.org.tw)常有SSL憑證問題(對方伺服器憑證本身的
+問題)，FinMind穩定得多。除權息預告表還是走TPEx官方API(沒觀察到同樣的SSL問題，也還沒
+查證FinMind有沒有等效資料集)。融資融券資料2026-08-16拿掉(dashboard圖表用不到，改成
+成交量子圖)，不再抓取。
 """
 import time
 from datetime import datetime, timedelta
@@ -32,7 +33,6 @@ from stocks.db import (
     insert_bars_daily,
     insert_ex_dividend_schedule,
     insert_institutional_flows,
-    insert_margin_balances,
     insert_valuations,
     mark_market_data_synced,
     prune_signal_events,
@@ -77,16 +77,12 @@ def _refresh_market_data_twse(config: Config, symbols: set[str]) -> int:
     for date in todo_dates:
         flows = [r for r in twse_client.fetch_institutional_flows_for_date(date, retries=1) if r["symbol"] in symbols]
         time.sleep(config.batch_pacing_seconds)
-        margins = [r for r in twse_client.fetch_margin_balances_for_date(date, retries=1) if r["symbol"] in symbols]
-        time.sleep(config.batch_pacing_seconds)
         valuations = [r for r in twse_client.fetch_valuations_for_date(date, retries=1) if r["symbol"] in symbols]
         time.sleep(config.batch_pacing_seconds)
 
         with connect(config.db_path) as conn:
             if flows:
                 insert_institutional_flows(conn, flows)
-            if margins:
-                insert_margin_balances(conn, margins)
             if valuations:
                 insert_valuations(conn, valuations)
                 for row in valuations:
@@ -122,8 +118,8 @@ def _last_institutional_flow_date(conn, symbol: str) -> str | None:
 
 def _fetch_range_per_symbol(config: Config, symbols: set[str], table: str, fetch_fn, today_str: str) -> list[dict]:
     """幫每支股票各自查「上次抓到的日期(該table)+1」~「今天」，不是TPEx官方API那種
-    「只給最新一天」——三大法人/融資融券/估值都是同一套邏輯，只是查的table/FinMind
-    dataset不同，抽成共用函式避免三份幾乎一樣的迴圈。"""
+    「只給最新一天」——三大法人/估值都是同一套邏輯，只是查的table/FinMind
+    dataset不同，抽成共用函式避免兩份幾乎一樣的迴圈。"""
     rows = []
     for symbol in symbols:
         with connect(config.db_path) as conn:
@@ -139,11 +135,11 @@ def _fetch_range_per_symbol(config: Config, symbols: set[str], table: str, fetch
 
 
 def _refresh_market_data_tpex(config: Config, symbols: set[str]) -> bool:
-    """三大法人/融資融券/估值都改用FinMind：每支股票各自查「上次抓到的日期+1」~「今天」，
-    不是TPEx官方API那種「只給最新一天」——2026-08-13把融資融券/估值也換掉，原因是
+    """三大法人/估值都改用FinMind：每支股票各自查「上次抓到的日期+1」~「今天」，
+    不是TPEx官方API那種「只給最新一天」——2026-08-13把估值也換掉，原因是
     TPEx官方免費API(www.tpex.org.tw)常有SSL憑證問題(Missing Subject Key Identifier，
-    對方伺服器憑證本身的問題，不是我們這邊能修的)，三個資料源各自獨立try/except，任一個
-    失敗不影響其他兩個。除權息預告表沒有FinMind等效資料集查證過，繼續走TPEx官方API(這個
+    對方伺服器憑證本身的問題，不是我們這邊能修的)，兩個資料源各自獨立try/except，任一個
+    失敗不影響另一個。除權息預告表沒有FinMind等效資料集查證過，繼續走TPEx官方API(這個
     endpoint目前沒觀察到SSL問題)。FinMind沒有公司名稱欄位，不影響——名稱在新增股票當下
     就抓過了，之後不會變，不需要每天重新確認。用前後比對日期集合來判斷是不是真的有新資料
     (不能只看「有沒有呼叫成功」，否則每次開app都會誤報「已更新」)。"""
@@ -161,13 +157,6 @@ def _refresh_market_data_tpex(config: Config, symbols: set[str]) -> bool:
         flows = []
 
     try:
-        margins = _fetch_range_per_symbol(
-            config, symbols, "margin_balances", finmind_client.fetch_margin_balances_for_range, today_str
-        )
-    except requests.RequestException:
-        margins = []
-
-    try:
         valuations = _fetch_range_per_symbol(
             config, symbols, "valuations", finmind_client.fetch_valuations_for_range, today_str
         )
@@ -182,8 +171,6 @@ def _refresh_market_data_tpex(config: Config, symbols: set[str]) -> bool:
     with connect(config.db_path) as conn:
         if flows:
             insert_institutional_flows(conn, flows)
-        if margins:
-            insert_margin_balances(conn, margins)
         if valuations:
             insert_valuations(conn, valuations)
         if schedule:
@@ -256,16 +243,15 @@ def _resolve_symbol_input(user_input: str) -> tuple[str | None, str]:
 def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     """新增一檔股票：自動判斷上市/上櫃，抓近10年股價(跟觀察清單其他股票一致——2026-08-17
     使用者把回測期間從3年拉長到10年後，新股票也該用同樣長度，不然樣本會比其他股票明顯少)。
-    三大法人買賣超/融資融券：不管上市上櫃都透過FinMind直接補到跟股價一樣的10年歷史
-    (TaiwanStockInstitutionalInvestorsBuySell/TaiwanStockMarginPurchaseShortSale兩個
-    dataset都涵蓋兩個市場，一次API呼叫涵蓋整段範圍，不用像TWSE官方API那樣逐日查詢)——
-    原本上市只抓最新一天，是因為sync log是用「日期」而非「日期+股票」為單位在追蹤，其他
-    股票已經讓那些日期標記成「抓過了」，新股票不會自動觸發回頭補值，2026-08-08改成兩個
-    市場都直接用FinMind繞開這個限制，不用再手動跑`fetch_market_data.py --full`才能讓
-    新股票的籌碼類策略(chip_momentum等)有完整樣本可以判斷。FinMind失敗的話(額度/連線
-    問題)各自獨立退回只抓最新一天，不讓新增股票整個失敗。估值(PE/殖利率/PB)還是只抓
-    最新一天不變——FinMind有沒有等效資料集還沒查證，這個沒被任何策略用到，之後每天
-    累積即可。
+    三大法人買賣超：不管上市上櫃都透過FinMind直接補到跟股價一樣的10年歷史
+    (TaiwanStockInstitutionalInvestorsBuySell這個dataset涵蓋兩個市場，一次API呼叫涵蓋
+    整段範圍，不用像TWSE官方API那樣逐日查詢)——原本上市只抓最新一天，是因為sync log是用
+    「日期」而非「日期+股票」為單位在追蹤，其他股票已經讓那些日期標記成「抓過了」，新股票
+    不會自動觸發回頭補值，2026-08-08改成兩個市場都直接用FinMind繞開這個限制，不用再手動跑
+    `fetch_market_data.py --full`才能讓新股票的籌碼類策略(chip_momentum等)有完整樣本可以
+    判斷。FinMind失敗的話(額度/連線問題)退回只抓最新一天，不讓新增股票整個失敗。估值
+    (PE/殖利率/PB)還是只抓最新一天不變——FinMind有沒有等效資料集還沒查證，這個沒被任何
+    策略用到，之後每天累積即可。
 
     code參數也接受中文簡稱(例如「台積電」)，會先透過_resolve_symbol_input()解析成代號
     再往下走，跟純打代號是同一條路徑、同一個結果。"""
@@ -293,22 +279,15 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
 
     try:
         flows = finmind_client.fetch_institutional_flows_for_range(code, earliest_date, latest_date)
-        chips_note = "三大法人已透過FinMind補到近10年歷史"
+        chips_note = "三大法人已透過FinMind補到近10年歷史；估值只先抓最新一天，之後每天累積"
     except requests.RequestException:
         flows = []
-        chips_note = "三大法人歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料"
-
-    try:
-        margins = finmind_client.fetch_margin_balances_for_range(code, earliest_date, latest_date)
-        chips_note += "；融資融券已透過FinMind補到近10年歷史；估值只先抓最新一天，之後每天累積"
-    except requests.RequestException:
-        margins = []
-        chips_note += "；融資融券歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料；估值只先抓最新一天"
+        chips_note = "三大法人歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料；估值只先抓最新一天"
 
     if market == "TPEx":
         # 這裡故意還是打tpex_client(不是finmind_client)，因為新股票的名稱要從這個回應的
         # "name"欄位取得(FinMind的估值dataset沒有公司名稱)；用try/except包起來是因為
-        # www.tpex.org.tw常有SSL憑證問題(見上面融資融券/三大法人的說明)，失敗時退回
+        # www.tpex.org.tw常有SSL憑證問題(見上面三大法人的說明)，失敗時退回
         # name=""(不是讓新增股票整個crash)——2026-08-13修正，之前這裡沒有防護。
         try:
             valuations = [r for r in tpex_client.fetch_valuations_latest() if r["symbol"] == code]
@@ -371,8 +350,6 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
         export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
         if flows:
             insert_institutional_flows(conn, flows)
-        if margins:
-            insert_margin_balances(conn, margins)
         if valuations:
             insert_valuations(conn, valuations)
 

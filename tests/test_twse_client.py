@@ -86,36 +86,6 @@ def test_fetch_institutional_flows_returns_empty_on_bad_stat(monkeypatch):
     assert twse_client.fetch_institutional_flows_for_date("2026-08-04") == []
 
 
-def test_fetch_margin_balances_uses_second_table(monkeypatch):
-    payload = {
-        "stat": "OK",
-        "tables": [
-            {"title": "市場統計", "fields": [], "data": [["irrelevant"]]},
-            {
-                "title": "融資融券彙總",
-                "fields": [],
-                "data": [
-                    # idx: 0=symbol 1=name 2=margin_buy 3=margin_sell ... 6=margin_balance ...
-                    # 8=short_buy 9=short_sell ... 12=short_balance
-                    ["2330", "台積電", "100", "50", "0", "0", "9000", "0", "10", "5", "0", "0", "20", "0", "0", ""]
-                ],
-            },
-        ],
-    }
-    monkeypatch.setattr(twse_client.requests, "get", lambda *a, **k: FakeResponse(payload))
-
-    rows = twse_client.fetch_margin_balances_for_date("2026-08-04")
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["margin_buy"] == 100
-    assert row["margin_sell"] == 50
-    assert row["margin_balance"] == 9000
-    assert row["short_buy"] == 10
-    assert row["short_sell"] == 5
-    assert row["short_balance"] == 20
-
-
 def test_fetch_valuations_handles_dash_as_missing_pe(monkeypatch):
     payload = {
         "stat": "OK",

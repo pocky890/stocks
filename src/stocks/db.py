@@ -79,18 +79,6 @@ CREATE TABLE IF NOT EXISTS institutional_flows (
     PRIMARY KEY (symbol, date)
 );
 
-CREATE TABLE IF NOT EXISTS margin_balances (
-    symbol TEXT NOT NULL,
-    date TEXT NOT NULL,
-    margin_buy INTEGER,
-    margin_sell INTEGER,
-    margin_balance INTEGER,
-    short_buy INTEGER,
-    short_sell INTEGER,
-    short_balance INTEGER,
-    PRIMARY KEY (symbol, date)
-);
-
 CREATE TABLE IF NOT EXISTS valuations (
     symbol TEXT NOT NULL,
     date TEXT NOT NULL,
@@ -576,14 +564,14 @@ def attach_institutional_flows(bars_df: pd.DataFrame, institutional_rows) -> pd.
 
 def fetch_trading_dates(conn: sqlite3.Connection) -> list[str]:
     """Distinct trading dates already in bars_daily (all symbols share the same TWSE
-    calendar), used to backfill institutional/margin/valuation data over the same range
+    calendar), used to backfill institutional/valuation data over the same range
     without guessing at holidays."""
     rows = conn.execute("SELECT DISTINCT date FROM bars_daily ORDER BY date ASC").fetchall()
     return [r["date"] for r in rows]
 
 
 def fetch_synced_market_dates(conn: sqlite3.Connection) -> set[str]:
-    """Dates already attempted for institutional/margin/valuation data -- tracked
+    """Dates already attempted for institutional/valuation data -- tracked
     separately from whether TWSE actually had rows, so a date TWSE genuinely has no
     data for (a data gap, not a holiday) doesn't get retried forever."""
     rows = conn.execute("SELECT date FROM market_data_sync_log").fetchall()
@@ -617,27 +605,6 @@ def insert_institutional_flows(conn: sqlite3.Connection, rows: list[dict]) -> No
 def fetch_institutional_flows(conn: sqlite3.Connection, symbol: str):
     return conn.execute(
         "SELECT * FROM institutional_flows WHERE symbol = ? ORDER BY date ASC", (symbol,)
-    ).fetchall()
-
-
-def insert_margin_balances(conn: sqlite3.Connection, rows: list[dict]) -> None:
-    conn.executemany(
-        """INSERT OR REPLACE INTO margin_balances
-           (symbol, date, margin_buy, margin_sell, margin_balance, short_buy, short_sell, short_balance)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        [
-            (
-                r["symbol"], r["date"], r["margin_buy"], r["margin_sell"], r["margin_balance"],
-                r["short_buy"], r["short_sell"], r["short_balance"],
-            )
-            for r in rows
-        ],
-    )
-
-
-def fetch_margin_balances(conn: sqlite3.Connection, symbol: str):
-    return conn.execute(
-        "SELECT * FROM margin_balances WHERE symbol = ? ORDER BY date ASC", (symbol,)
     ).fetchall()
 
 

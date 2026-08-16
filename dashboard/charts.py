@@ -13,33 +13,31 @@ def _ma_label(window: int) -> str:
 def price_and_chip_chart(
     bars: pd.DataFrame,
     flow_df: pd.DataFrame | None = None,
-    margin_df: pd.DataFrame | None = None,
     ma_windows: list[int] = (5, 10, 20, 60),
 ) -> go.Figure:
-    """K線圖+均線+布林通道，下面依序疊三大法人買賣超、融資融券餘額、KD、MACD——
+    """K線圖+均線+布林通道，下面依序疊成交量、三大法人買賣超、KD、MACD——
     2026-08-15使用者要求把籌碼面資料搬到K線圖下方一起比對，不要分開頁籤來回切換，
-    後續又加碼要布林通道疊在K線上、KD/MACD各自一個子圖。用make_subplots(shared_xaxes=True)
-    疊成一張圖而不是好幾張獨立的圖，這樣拖曳/縮放任一段時間軸，其他段會跟著對齊，才能
-    直接對照「這段價格走勢的當下，籌碼/技術指標在做什麼」。flow_df/margin_df是可選的
-    (可能沒資料)，沒給或是空的就不畫那一段；KD/MACD只需要bars本身(high/low/close)就能算，
-    一定會畫。
+    後續又加碼要布林通道疊在K線上、KD/MACD各自一個子圖；2026-08-16改成K線正下方加成交量
+    子圖、拿掉融資融券(使用者確認用不到，資料來源也一併停止抓取，見daily_update.py/
+    scripts/fetch_market_data.py)。用make_subplots(shared_xaxes=True)疊成一張圖而不是
+    好幾張獨立的圖，這樣拖曳/縮放任一段時間軸，其他段會跟著對齊，才能直接對照「這段價格
+    走勢的當下，籌碼/技術指標在做什麼」。flow_df是可選的(可能沒資料)，沒給或是空的就不畫
+    那一段；成交量/KD/MACD只需要bars本身就能算，一定會畫。
 
     x軸預設只框住最近3個月，不是拉滿整段歷史——資料本身還是完整的(季線等長週期均線才算得準)，
     使用者可以直接在圖上拖曳/縮放看更長的區間。用rangebreaks把「這段歷史裡實際沒有交易
     資料的日期」(週末/國定假日)整批跳過不畫，K棒之間才會緊接在一起，不是拉滿整段日曆時間
-    留一堆空白。K線/KD/MACD/籌碼/融資融券每一段的y軸範圍都跟著這個可視窗口算，不是套用
+    留一堆空白。K線/成交量/KD/MACD/籌碼每一段的y軸範圍都跟著這個可視窗口算，不是套用
     plotly對「整段歷史資料」的預設autorange(那樣會被10年前的極端值拉爆比例，近3個月的細節
     被壓成一條線)——KD例外，固定[0,100]範圍，那本來就是它的定義域，不需要動態算。"""
     has_flow = flow_df is not None and not flow_df.empty
-    has_margin = margin_df is not None and not margin_df.empty
 
     row_specs = [{"secondary_y": False}]  # row 1: K線+均線+布林通道
     row_heights = [0.4]
+    row_specs.append({"secondary_y": False})  # 成交量
+    row_heights.append(0.15)
     if has_flow:
         row_specs.append({"secondary_y": False})
-        row_heights.append(0.15)
-    if has_margin:
-        row_specs.append({"secondary_y": True})  # 融資/融券左右各一個y軸
         row_heights.append(0.15)
     row_specs.append({"secondary_y": False})  # KD
     row_heights.append(0.15)
@@ -96,25 +94,18 @@ def price_and_chip_chart(
             col=1,
         )
 
-    flow_row = margin_row = None
-    next_row = 2
+    volume_row = 2
+    volume_colors = ["red" if c >= o else "green" for o, c in zip(bars["open"], close)]
+    fig.add_trace(go.Bar(x=bars.index, y=bars["volume"], name="成交量", marker_color=volume_colors, showlegend=False), row=volume_row, col=1)
+    fig.update_yaxes(title_text="成交量", row=volume_row, col=1)
+
+    flow_row = None
+    next_row = 3
     if has_flow:
         for col, label in [("foreign_net", "外資"), ("trust_net", "投信"), ("dealer_net", "自營商")]:
             fig.add_trace(go.Bar(x=flow_df["date"], y=flow_df[col], name=label), row=next_row, col=1)
         fig.update_yaxes(title_text="買賣超(股)", row=next_row, col=1)
         flow_row = next_row
-        next_row += 1
-    if has_margin:
-        fig.add_trace(go.Scatter(x=margin_df["date"], y=margin_df["margin_balance"], mode="lines", name="融資餘額"), row=next_row, col=1)
-        fig.add_trace(
-            go.Scatter(x=margin_df["date"], y=margin_df["short_balance"], mode="lines", name="融券餘額"),
-            row=next_row,
-            col=1,
-            secondary_y=True,
-        )
-        fig.update_yaxes(title_text="融資餘額(張)", row=next_row, col=1, secondary_y=False)
-        fig.update_yaxes(title_text="融券餘額(張)", row=next_row, col=1, secondary_y=True)
-        margin_row = next_row
         next_row += 1
 
     kd_row = next_row
@@ -172,7 +163,11 @@ def price_and_chip_chart(
 
         last_date = bars.index.max()
         x_start = last_date - pd.DateOffset(months=3)
-        fig.update_xaxes(range=[x_start, last_date])  # shared_xaxes讓這個範圍套用到全部子圖
+        # 2026-08-16使用者發現最右邊那根K棒被切到一半——candlestick的寬度是以K棒
+        # 為中心往兩側展開，range右端點如果剛好卡在last_date，最後一根K棒右半邊會超出
+        # 繪圖區被裁掉。往右多留1天當緩衝，不影響rangebreaks(那1天本來就沒有K棒)。
+        x_end = last_date + pd.Timedelta(days=1)
+        fig.update_xaxes(range=[x_start, x_end])  # shared_xaxes讓這個範圍套用到全部子圖
         visible_mask = bars.index >= x_start
 
         visible = bars.loc[visible_mask]
@@ -187,9 +182,14 @@ def price_and_chip_chart(
             pad = (y_high - y_low) * 0.08
             fig.update_yaxes(range=[max(0, y_low - pad), y_high + pad], row=1, col=1)
 
-        # 籌碼/融資融券/MACD的y軸範圍也比照K線那段，只用可視窗口內的資料抓高低點——不然
+        # 成交量/籌碼/MACD的y軸範圍也比照K線那段，只用可視窗口內的資料抓高低點——不然
         # 會套用plotly對「整段10年歷史」的預設autorange，近3個月的波動會被十年份的極端值
         # 壓成一條線，看不出細節。KD本身定義域就是[0,100]，不需要動態算，範圍固定就好。
+        visible_volume = bars.loc[visible_mask, "volume"]
+        if not visible_volume.empty:
+            y_high = visible_volume.max()
+            if y_high > 0:
+                fig.update_yaxes(range=[0, y_high * 1.08], row=volume_row, col=1)
         if has_flow:
             flow_dates = pd.to_datetime(flow_df["date"])
             visible_flow = flow_df.loc[flow_dates >= x_start, ["foreign_net", "trust_net", "dealer_net"]]
@@ -199,18 +199,6 @@ def price_and_chip_chart(
                 if y_high > y_low:
                     pad = (y_high - y_low) * 0.08
                     fig.update_yaxes(range=[y_low - pad, y_high + pad], row=flow_row, col=1)
-        if has_margin:
-            margin_dates = pd.to_datetime(margin_df["date"])
-            visible_margin = margin_df.loc[margin_dates >= x_start]
-            if not visible_margin.empty:
-                for value_col, secondary in [("margin_balance", False), ("short_balance", True)]:
-                    series = visible_margin[value_col]
-                    y_low, y_high = series.min(), series.max()
-                    if y_high > y_low:
-                        pad = (y_high - y_low) * 0.08
-                        fig.update_yaxes(
-                            range=[max(0, y_low - pad), y_high + pad], row=margin_row, col=1, secondary_y=secondary
-                        )
 
         visible_macd_values = pd.concat(
             [macd_line.loc[visible_mask], signal_line.loc[visible_mask], histogram.loc[visible_mask]]

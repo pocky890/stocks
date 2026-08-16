@@ -1,4 +1,4 @@
-"""證交所（TWSE，上市）免費公開資料（不需要金鑰、不需要開戶）。用來補三大法人/融資融券/
+"""證交所（TWSE，上市）免費公開資料（不需要金鑰、不需要開戶）。用來補三大法人/
 估值/除權息，跟Shioaji帳戶狀態完全無關。上櫃(TPEx)股票對應的資料在 tpex_client.py。"""
 import time
 
@@ -66,38 +66,6 @@ def fetch_institutional_flows_for_date(date_iso: str, retries: int = RETRIES) ->
                 "trust_net": to_number(row[idx["投信買賣超股數"]]),
                 "dealer_net": to_number(row[idx["自營商買賣超股數"]]),
                 "total_net": to_number(row[idx["三大法人買賣超股數"]]),
-            }
-        )
-    return rows
-
-
-def fetch_margin_balances_for_date(date_iso: str, retries: int = RETRIES) -> list[dict]:
-    date_str = date_iso.replace("-", "")
-    payload = _get_json(
-        "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN",
-        params={"date": date_str, "selectType": "ALL", "response": "json"},
-        retries=retries,
-    )
-    if payload.get("stat") != "OK":
-        return []
-
-    tables = payload.get("tables", [])
-    if len(tables) < 2:
-        return []
-    per_stock_table = tables[1]  # tables[0] is the market-wide summary, tables[1] is per-stock
-
-    rows = []
-    for row in per_stock_table.get("data", []):
-        rows.append(
-            {
-                "symbol": row[0],
-                "date": date_iso,
-                "margin_buy": to_number(row[2]),
-                "margin_sell": to_number(row[3]),
-                "margin_balance": to_number(row[6]),
-                "short_buy": to_number(row[8]),
-                "short_sell": to_number(row[9]),
-                "short_balance": to_number(row[12]),
             }
         )
     return rows

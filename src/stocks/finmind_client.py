@@ -14,7 +14,6 @@ import requests
 TIMEOUT = 15
 BASE_URL = "https://api.finmindtrade.com/api/v4/data"
 DATASET = "TaiwanStockInstitutionalInvestorsBuySell"
-MARGIN_DATASET = "TaiwanStockMarginPurchaseShortSale"
 VALUATION_DATASET = "TaiwanStockPER"
 STOCK_INFO_DATASET = "TaiwanStockInfo"
 
@@ -64,25 +63,6 @@ def fetch_institutional_flows_for_range(symbol: str, start_date: str, end_date: 
     ]
 
 
-def fetch_margin_balances_for_range(symbol: str, start_date: str, end_date: str) -> list[dict]:
-    """回傳[{symbol, date, margin_buy, margin_sell, margin_balance, short_buy, short_sell,
-    short_balance}, ...]，欄位跟twse_client.fetch_margin_balances_for_date對齊，方便
-    insert_margin_balances不用管資料來源是哪一邊。"""
-    return [
-        {
-            "symbol": symbol,
-            "date": row["date"],
-            "margin_buy": row["MarginPurchaseBuy"],
-            "margin_sell": row["MarginPurchaseSell"],
-            "margin_balance": row["MarginPurchaseTodayBalance"],
-            "short_buy": row["ShortSaleBuy"],
-            "short_sell": row["ShortSaleSell"],
-            "short_balance": row["ShortSaleTodayBalance"],
-        }
-        for row in _fetch_range(MARGIN_DATASET, symbol, start_date, end_date)
-    ]
-
-
 def fetch_valuations_for_range(symbol: str, start_date: str, end_date: str) -> list[dict]:
     """回傳[{symbol, date, pe_ratio, dividend_yield, pb_ratio}, ...]，欄位跟
     twse_client.fetch_valuations_for_date對齊——但FinMind的TaiwanStockPER沒有股票名稱欄位，
@@ -105,7 +85,7 @@ def fetch_stock_name(symbol: str) -> str:
     fetch_valuations_for_range的說明)確實沒有名稱欄位，但TaiwanStockInfo這個不同的
     dataset有——可以在daily_update.add_symbol_to_watchlist查完官方名稱API(TWSE/TPEx)
     後當最後備援，尤其TPEx官方API(www.tpex.org.tw)常因為對方SSL憑證問題整組查不到
-    (同一個問題已經讓margin/institutional/valuation三個TPEx資料源都改用FinMind，見
+    (同一個問題已經讓institutional/valuation兩個TPEx資料源都改用FinMind，見
     daily_update.py開頭2026-08-13那段說明，名稱查詢當時漏了改)。這個dataset不接受
     日期範圍查詢，只回傳「目前」的名稱，但公司名稱本來就幾乎不會變，不需要指定日期。"""
     resp = requests.get(BASE_URL, params={"dataset": STOCK_INFO_DATASET, "data_id": symbol}, timeout=TIMEOUT)

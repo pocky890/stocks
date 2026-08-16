@@ -118,3 +118,62 @@ stop_mode等)，pull完一定要重跑一次`python scripts/recompute_strategy_s
   (用`cum_window_days`/`recent_window_days`/`recent_min_buy_days`)，前兩個key
   目前完全沒被讀到——不是bug(不影響行為)，但容易讓人誤以為那是現行邏輯，之後如果
   要切回`entry_mode="default"`要記得這兩個key還在。
+
+## 2026-08-16：K線圖拿掉融資融券子圖、改成成交量子圖，整支融資融券資料來源移除
+
+使用者確認融資融券餘額圖表沒在用，整條資料管線都拿掉了，不是只藏起來不顯示：
+
+- `dashboard/charts.py`的`price_and_chip_chart()`拿掉`margin_df`參數跟融資/融券
+  雙y軸子圖，改成K線正下方(row 2)加一個成交量子圖(紅漲綠跌配色跟K棒一致)。
+- 資料抓取全部拿掉：`src/stocks/db.py`的`margin_balances`表(CREATE TABLE)/
+  `insert_margin_balances`/`fetch_margin_balances`、`daily_update.py`(TWSE逐日
+  路徑+TPEx FinMind路徑+新增股票時的10年回補，三處都有)、
+  `scripts/fetch_market_data.py`的歷史回補、`finmind_client.py`的
+  `fetch_margin_balances_for_range`/`MARGIN_DATASET`、`twse_client.py`的
+  `fetch_margin_balances_for_date`。`tpex_client.py`的`fetch_margin_balances_latest`
+  原本就已經是死碼(2026-08-13 TPEx路徑改用FinMind後就沒人呼叫了)，這次一併清掉。
+- **`data/*.db`裡舊有的`margin_balances`表不會被砍掉**(這裡只拿掉`CREATE TABLE IF
+  NOT EXISTS`那行schema，不是主動DROP TABLE)——沒有殺傷力，就是留著不再寫入，之後
+  真的要清也可以手動`DROP TABLE margin_balances`，不影響任何現行邏輯。
+- 這份資料从來沒被任何策略讀過(只有dashboard顯示用)，所以這次移除對策略邏輯/
+  `recompute_strategy_selection.py`完全沒有影響，不用重跑。
+
+## 2026-08-16：發現yfinance會在真的休市那天塞一根假K棒(量能掛零)，已修正+清過本機DB
+
+加成交量子圖之後意外曝光的bug：使用者發現K線圖最右邊那根K棒被裁到一半、某天成交量
+異常掛零。兩個各自獨立的問題：
+
+- **最右邊K棒被裁到**：`dashboard/charts.py`的x軸range右端點原本剛好卡在`last_date`，
+  但candlestick是以K棒為中心往兩側展開寬度，最後一根的右半邊會超出繪圖區被裁掉。
+  已修正：range右端點多留1天緩衝(`last_date + 1天`，那天本來就沒有K棒，不影響
+  rangebreaks)。
+- **2026-07-10全觀察清單每一檔都出現open=high=low=close+volume=0的假K棒**：查證
+  是市場真的休市(可能是颱風假)那天，yfinance沒有直接跳過，而是回傳前一天收盤價
+  當佔位K棒。`src/stocks/yfinance_client.py`的`_bars_from_dataframe()`已經加上
+  `volume==0`就跳過不插入的防護(真實交易日成交量幾乎不可能剛好是0，這個判斷很安全)——
+  這樣以後(不管是`_refresh_price_data`每日增量、還是新增股票時的10年回補)遇到同樣
+  情況都不會再把假K棒寫進`bars_daily`。
+  **但這只防得住「以後」，這台電腦`bars_daily`裡已經存在的舊假K棒不會自動消失**——
+  已經在這台電腦手動跑過`DELETE FROM bars_daily WHERE volume = 0`清掉1208筆(跨774個
+  不同日期，不是只有2026-07-10這天，過去10年偶爾都會有零星1、2檔股票單獨中招)。
+  **`data/*.db`是每台電腦各自獨立的，這個DELETE只清了這台電腦——如果另一台電腦的
+  K線圖也看到同樣詭異的平盤零成交量K棒，要在那台電腦上執行同樣的SQL清一次**：
+  ```sql
+  DELETE FROM bars_daily WHERE volume = 0;
+  ```
+  清掉之後，dashboard的rangebreaks邏輯會自動把這些日期當成缺資料的假日整批跳過
+  (不需要额外處理)。這個bug也代表過去的回測/`chip_momentum`新的ratio進場模式(除以
+  滾動成交量加總)如果剛好把這種假K棒算進rolling window，分母會被輕微低估——影響
+  應該很小(1208筆對全部76572筆bars_daily只占1.6%，且大多是單一股票單一天零星
+  出現)，沒有重新驗證過所有backtest數字，如果之後重新回測發現數字有小幅變動，
+  這就是原因。
+
+  使用者要求確認「以後真的遇到平日休市，圖表要正確跳過、不留空白」這件事有被驗證到，
+  不是只靠「應該會生效」的推論——查過`dashboard/charts.py`原本就有的rangebreaks邏輯
+  (`missing_days`/`holiday_days`那段)本來就是設計來處理這個情境的：只要某個交易日
+  在`bars_daily`裡完全沒有那一列資料(不是像yfinance假K棒那樣有資料但是假的)，就會被
+  歸進`missing_days`，過濾出平日(`weekday < 5`)後加進`rangebreaks`的`values`，
+  plotly就會把那天完全壓縮掉，不會留空白也不會畫K棒——這段邏輯本來就存在、不是這次
+  新寫的，這次只是驗證它跟「跳過假K棒」的修正接起來後仍然正確運作。已經補上
+  `tests/test_charts.py`鎖住這個行為(模擬拿掉一個平日當作holiday，驗證確實被抓進
+  rangebreaks)，避免以後改壞。

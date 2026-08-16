@@ -22,7 +22,6 @@ from stocks.db import (
     fetch_bars_daily,
     fetch_ex_dividend_schedule,
     fetch_institutional_flows,
-    fetch_margin_balances,
     fetch_signal_events,
     fetch_valuations,
     fetch_watchlist,
@@ -178,29 +177,26 @@ def _cached_overview_rows_for(_config, codes: tuple):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_chart_data(_config, symbol: str):
-    """K線圖頁籤的資料抓取+畫圖包一層快取——這張圖疊了K線+4條均線+布林通道+法人買賣超+
-    融資融券+KD+MACD好幾個指標，10年資料量下重算有一定成本；沒有這層快取的話，使用者
+    """K線圖頁籤的資料抓取+畫圖包一層快取——這張圖疊了K線+4條均線+布林通道+成交量+
+    法人買賣超+KD+MACD好幾個指標，10年資料量下重算有一定成本；沒有這層快取的話，使用者
     切換群組、點擊觀察清單的▲▼/移除等任何觸發整頁rerun的操作，都會連帶重新抓資料+
     重畫這張圖，即使使用者根本沒有在看這個頁籤。快取60秒，同一支股票短時間內重複顯示
     不用重算。"""
     with connect(_config.db_path) as conn:
         bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
         flow_rows = [dict(r) for r in fetch_institutional_flows(conn, symbol)]
-        margin_rows = [dict(r) for r in fetch_margin_balances(conn, symbol)]
         valuation_rows = [dict(r) for r in fetch_valuations(conn, symbol)]
         ex_div_rows = [dict(r) for r in fetch_ex_dividend_schedule(conn, symbol)]
 
     fig = None
     if not bars.empty:
         flow_df = pd.DataFrame(flow_rows) if flow_rows else None
-        margin_df = pd.DataFrame(margin_rows) if margin_rows else None
-        fig = price_and_chip_chart(bars, flow_df, margin_df, ma_windows=[5, 10, 20, 60])
+        fig = price_and_chip_chart(bars, flow_df, ma_windows=[5, 10, 20, 60])
 
     return {
         "bars_empty": bars.empty,
         "fig": fig,
         "has_flow": bool(flow_rows),
-        "has_margin": bool(margin_rows),
         "valuation_rows": valuation_rows,
         "ex_div_rows": ex_div_rows,
     }
@@ -472,8 +468,6 @@ def _render_chart_tab(config, watchlist: list[dict], symbols: list):
         st.plotly_chart(chart_data["fig"], use_container_width=True)
         if not chart_data["has_flow"]:
             st.info("沒有三大法人資料，先跑 `python scripts/fetch_market_data.py`")
-        if not chart_data["has_margin"]:
-            st.info("沒有融資融券資料，先跑 `python scripts/fetch_market_data.py`")
 
     st.markdown("#### 目前估值")
     valuation_rows = chart_data["valuation_rows"]
