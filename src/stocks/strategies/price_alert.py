@@ -5,7 +5,8 @@ from stocks.models import Direction, SignalEvent, Tier
 
 class PriceAlertStrategy:
     """No default params: target_price must be supplied per-symbol by the caller
-    (sourced from the price_alerts table), unlike the other 6 strategies."""
+    (sourced from the price_alerts table), unlike the other 6 strategies.
+    斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
 
     name = "price_alert"
 

@@ -5,6 +5,8 @@ from stocks.models import Direction, SignalEvent, Tier
 
 
 class RSIStrategy:
+    """RSI跌破30(超賣)進場、突破70(超買)出場。斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
+
     name = "rsi"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:

@@ -5,6 +5,8 @@ from stocks.models import Direction, SignalEvent, Tier
 
 
 class BollingerStrategy:
+    """觸及布林上軌賣出訊號、觸及下軌買入訊號。斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
+
     name = "bollinger"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:

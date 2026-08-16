@@ -5,6 +5,8 @@ from stocks.models import Direction, SignalEvent, Tier
 
 
 class MACrossoverStrategy:
+    """均線交叉：5日均線黃金/死亡交叉20日均線。斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
+
     name = "ma_crossover"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:

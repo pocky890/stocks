@@ -5,40 +5,26 @@ from stocks.models import Direction, SignalEvent
 
 
 class GoldenCrossScaleOutStrategy:
-    """進場打分制(2026-08-07第三次調整版，加上RSI濾網)：
-      MA5 > MA20            +2
-      收盤站上MA20           +1
-      三大法人(外資+投信)近5日合計買超  +2
-      收盤突破20日新高(不含當天，跟atr_breakout同樣shift(1)避免look-ahead) +2
-      當天成交量 > 20日均量   +1
-      RSI還沒超買(<rsi_overbought，預設70)  +1
-      總分達到score_threshold(預設5分)才進場，level-triggered(只要當天score>=threshold
-      就進場，不要求前一天score<threshold)——2026-08-17程式碼review發現原本用edge-
-      triggered(score從<5變成>=5的第一天才觸發)會卡死：分批出場走完階段1+階段2、
-      position變回0時，如果score從出場前到出場後一路都>=5(從未跌回threshold以下)，
-      entry_edge就再也不會是True，這支股票會被這個策略晾在旁邊，直到score先跌破5分
-      再重新站上才會恢復進場——跟trust_momentum/long_swing踩過的同一種bug(停損/出場後
-      條件還沒轉過一輪False→True就卡住進不了場)，改成level-triggered後只要position
-      == 0時score夠就能立刻再進場，不用等分數先掉下去再爬回來。前5項是「動能夠不夠強」，
-      RSI濾網問的是不同維度的問題「是不是
-      已經追太高了」——回測2454發現有些訊號分數很高但立刻反轉，一部分是追在超買區進場，
-      RSI在那種情況不加分，score就少1分。「法人5日買超」用「近5日合計>0」(不是連續買超
-      天數)，跟其他項一樣是加分項，不是硬性關卡，所以缺一項(例如籌碼沒過)只要其他項夠強
-      還是能靠分數補上。
+    """均線黃金交叉打分制策略。
 
-    出場預設(2026-08-15起)用單一15%移動停損全出(stop_mode="pct")，一買配一賣，跟其他
-    策略同樣的形狀，用simulate_round_trips配對即可。
+    進場：以下6項各自加分，總分達到5分(score_threshold)才進場，level-triggered(當天
+    分數達標就進場，不要求前一天未達標)：
+      MA5 > MA20                 +2
+      收盤站上MA20                +1
+      三大法人(外資+投信)近5日合計買超    +2
+      收盤突破20日新高(不含當天)        +2
+      當天成交量 > 20日均量            +1
+      RSI(14)未超買(<70)             +1
 
-    也支援stop_mode="ma_scaleout"切回原本(2026-08-07定案版，當時用回測比較過6種進場/
-    出場組合後確認這版勝率/平均報酬最高，比賣出打分制(嘗試過6項加權)、2日確認+20日均線
-    全出(嘗試過)兩版實測都好)的均線分批出場，分兩階段、不是一次全出：
-      階段1(賣一半)：收盤跌破5日均線，且當天成交量 > 20日均量(量能確認的真跌破，不是量縮
-        小回檔)
-      階段2(賣剩餘一半)：收盤跌破10日均線，或5日均線跌破20日均線(死亡交叉)，兩者任一即可
+    出場：跌破15%移動停損(stop_mode="pct")，一買配一賣。
 
-    ma_scaleout模式用兩個獨立的SELL事件代表兩次出場動作，detail會標明「賣出一半」/
-    「賣出剩餘一半」——跟pct模式「一次全出」的形狀不一樣，要用simulate_scaleout_trades
-    才能正確配對算報酬率，不能直接套simulate_round_trips的一買配一賣。"""
+    也支援stop_mode="ma_scaleout"：分兩階段出場，不是一次全出：
+      階段1(賣一半)：收盤跌破5日均線，且當天成交量>20日均量
+      階段2(賣剩餘一半)：收盤跌破10日均線，或5日均線跌破20日均線(死亡交叉)
+    這個模式一買配兩賣，要用simulate_scaleout_trades配對，不能套simulate_round_trips。
+
+    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己當下也跌破
+    月線時，暫停新的BUY(SELL不受影響)。"""
 
     name = "golden_cross_scaleout"
 
@@ -58,12 +44,8 @@ class GoldenCrossScaleOutStrategy:
         rsi_period = params.get("rsi_period", 14)
         rsi_overbought = params.get("rsi_overbought", 70)
         score_threshold = params.get("score_threshold", 5)
-        stop_mode = params.get("stop_mode", "pct")  # "pct"(單一15%移動停損全出) 或
-        # "ma_scaleout"(原本的均線分批出場)——2026-08-15用scripts/backtest_golden_cross_stop.py
-        # 全觀察清單10年回測比較過：ma_scaleout勝率較高(52%)但獲利因子/平均報酬/加總報酬
-        # 全面輸給pct15%(獲利因子2.31→3.06)，才把預設換成pct。"pct"模式回傳一買配一賣的
-        # 事件形狀，要用simulate_round_trips配對；"ma_scaleout"模式維持一買配兩賣，要用
-        # simulate_scaleout_trades配對——呼叫端要注意這個差異，不能對兩種模式的事件套同一種配對邏輯。
+        stop_mode = params.get("stop_mode", "pct")  # "pct"(現行:單一15%移動停損全出，一買
+        # 配一賣) 或 "ma_scaleout"(均線分批出場，一買配兩賣)
         stop_pct = params.get("stop_pct", 0.15)
 
         close = bars["close"]

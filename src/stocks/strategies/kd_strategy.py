@@ -5,6 +5,9 @@ from stocks.models import Direction, SignalEvent, Tier
 
 
 class KDStrategy:
+    """KD低檔(<20)黃金交叉發BUY、高檔(>80)死亡交叉發SELL。
+    斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
+
     name = "kd"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:

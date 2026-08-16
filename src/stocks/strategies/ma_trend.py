@@ -7,7 +7,8 @@ from stocks.models import Direction, SignalEvent
 class MATrendStrategy:
     """收盤價同時站上快線(預設5日)跟慢線(預設20日)，且慢線本身也在上揚(斜率為正)，
     三個條件到齊才算多方排列確立，edge-triggered只在三個條件第一次同時成立那天觸發一次。
-    只有BUY方向——使用者只描述了進場條件，沒有要求對稱的出場條件，不擅自發明。"""
+    只有BUY方向——使用者只描述了進場條件，沒有要求對稱的出場條件，不擅自發明。
+    斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
 
     name = "ma_trend"
 

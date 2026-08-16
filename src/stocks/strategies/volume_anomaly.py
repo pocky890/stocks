@@ -5,6 +5,8 @@ from stocks.models import Direction, SignalEvent, Tier
 
 
 class VolumeAnomalyStrategy:
+    """爆量(>2倍均量)當天上漲發BUY、下跌發SELL。斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
+
     name = "volume_anomaly"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:

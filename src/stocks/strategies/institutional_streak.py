@@ -7,9 +7,10 @@ _COLUMN_LABELS = [("foreign_net", "外資"), ("trust_net", "投信")]
 
 
 class InstitutionalStreakStrategy:
-    """外資、投信各自獨立判斷連續買超/賣超天數，天數剛好達到門檻時觸發一次
+    """外資、投信各自獨立判斷連續買超/賣超天數，天數剛好達到門檻(預設3天)時觸發一次
     （不是持續達標每天都發）。需要bars裡有foreign_net/trust_net欄位
-    （由db.attach_institutional_flows() join進來），沒有就直接跳過。"""
+    （由db.attach_institutional_flows() join進來），沒有就直接跳過。
+    斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
 
     name = "institutional_streak"
 

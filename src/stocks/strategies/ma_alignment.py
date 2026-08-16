@@ -6,7 +6,8 @@ from stocks.models import Direction, SignalEvent, Tier
 
 class MAAlignmentStrategy:
     """BUY fires once when price is simultaneously above the 5/10/20-day MA (AND-edge).
-    SELL fires independently for each MA the price drops below (up to 3 separate events)."""
+    SELL fires independently for each MA the price drops below (up to 3 separate events).
+    斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
 
     name = "ma_alignment"
 

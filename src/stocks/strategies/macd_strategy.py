@@ -5,6 +5,8 @@ from stocks.models import Direction, SignalEvent, Tier
 
 
 class MACDStrategy:
+    """MACD黃金/死亡交叉。斷路器：不適用(非NOTIFIABLE_STRATEGIES)。"""
+
     name = "macd"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:
