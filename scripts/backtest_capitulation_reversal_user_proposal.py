@@ -1,11 +1,9 @@
-"""研究用一次性腳本：使用者對bullish_divergence(背離抄底)提出的修正建議，全觀察清單
-10年+2026 YTD/7月回測比較，不動STRATEGY_REGISTRY的預設params：
-1. 停損從15%移動停損(stop_mode="pct")改成結構停損(stop_mode="structural"：進場K棒
-   最低點再往下2%緩衝，固定不動)。
-2. RSI門檻從<30放寬到<35。
-3. 三階段出場架構(enable_tiered_profit)：結構停損防接刀→獲利12%或觸及60日均線先賣
-   一半、剩餘部位停損上移保本→剩餘部位改15%寬幅移動停損——一買配兩賣，用
-   simulate_scaleout_trades配對，不能套simulate_round_trips。"""
+"""研究用一次性腳本：使用者對capitulation_reversal(爆量急殺止穩)提出的停損修正建議，全
+觀察清單10年+2026 YTD/7月回測比較，不動STRATEGY_REGISTRY的預設params：
+1. 停損從15%移動停損(stop_mode="pct")改成結構停損(stop_mode="structural"：爆量急殺
+   當天的最低點再往下5%緩衝，固定不動)。
+2. 加上反彈觸及10/20日均線先賣半倉的分批停利(enable_tiered_profit)，剩餘部位停損上移
+   保本後改15%寬幅移動停損——一買配兩賣，用simulate_scaleout_trades配對。"""
 import sys
 from pathlib import Path
 
@@ -15,35 +13,26 @@ import pandas as pd
 
 from stocks.config import load_config
 from stocks.db import bars_to_dataframe, connect, fetch_bars_daily, fetch_watchlist
-from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
+from stocks.strategies.capitulation_reversal import CapitulationReversalStrategy
 from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 
 BASE_PARAMS = {
-    "lookback_days": 20,
-    "rsi_period": 14,
-    "rsi_ceiling": 30,
+    "drop_threshold_pct": -5.0,
+    "volume_multiplier": 2.0,
+    "avg_volume_period": 20,
     "stop_mode": "pct",
     "stop_pct": 0.15,
     "atr_period": 14,
     "atr_multiplier": 2.5,
-    "require_reversal_confirm": True,
-    "require_reversal_macd": True,
 }
-STRUCTURAL_TRAIL = {"stop_mode": "structural", "structural_stop_buffer_pct": 0.02, "structural_trail_after_pct": 0.10}
-TIERED = {
-    "stop_mode": "structural",
-    "structural_stop_buffer_pct": 0.02,
-    "enable_tiered_profit": True,
-    "tiered_target_pct": 0.12,
-    "tiered_ma_period": 60,
-    "move_stop_to_breakeven_after_tier": True,
-}
+STRUCTURAL = {"stop_mode": "structural", "structural_stop_buffer_pct": 0.05}
+TIERED_20MA = {**STRUCTURAL, "enable_tiered_profit": True, "tiered_ma_period": 20, "move_stop_to_breakeven_after_tier": True}
+TIERED_10MA = {**TIERED_20MA, "tiered_ma_period": 10}
 CONFIGS = [
-    ("原本(15%移動停損,RSI<30)", {**BASE_PARAMS}, False),
-    ("結構停損+獲利10%後切15%移動停損", {**BASE_PARAMS, **STRUCTURAL_TRAIL}, False),
-    ("只放寬RSI<35", {**BASE_PARAMS, "rsi_ceiling": 35}, False),
-    ("三階段出場(結構停損→半倉保本→寬幅移動停損)", {**BASE_PARAMS, **TIERED}, True),
-    ("三階段出場+RSI<35", {**BASE_PARAMS, **TIERED, "rsi_ceiling": 35}, True),
+    ("原本(15%移動停損)", {**BASE_PARAMS}, False),
+    ("只改結構停損(固定不動,無其他出場)", {**BASE_PARAMS, **STRUCTURAL}, False),
+    ("結構停損+反彈觸及20MA先賣半倉", {**BASE_PARAMS, **TIERED_20MA}, True),
+    ("結構停損+反彈觸及10MA先賣半倉", {**BASE_PARAMS, **TIERED_10MA}, True),
 ]
 YTD_START = pd.Timestamp("2026-01-01")
 JULY_START = pd.Timestamp("2026-07-01")
@@ -66,7 +55,7 @@ def summarize(trades):
 
 def main():
     config = load_config()
-    strategy = BullishDivergenceStrategy()
+    strategy = CapitulationReversalStrategy()
 
     with connect(config.db_path) as conn:
         symbols = [(row["code"], row["name"]) for row in fetch_watchlist(conn)]

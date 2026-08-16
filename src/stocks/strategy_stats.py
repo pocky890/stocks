@@ -7,6 +7,21 @@ from dataclasses import dataclass
 from stocks.models import Direction, SignalEvent
 
 
+def is_scaleout_strategy(strategy_name: str, params: dict) -> bool:
+    """判斷這個策略在目前這組params下是不是「一買配兩賣」的分批出場形狀(要用
+    simulate_scaleout_trades配對，不能套simulate_round_trips)——golden_cross_scaleout
+    的stop_mode="ma_scaleout"、bullish_divergence跟capitulation_reversal的
+    enable_tiered_profit=True都是這個形狀。呼叫端(strategy_selection.py/
+    watchlist_view.py)算歷史表現/模擬交易紀錄時都要先查這個函式決定配對方式，不能對
+    所有NOTIFIABLE_STRATEGIES一律用simulate_round_trips，不然分批出場的第二次SELL
+    會被誤判成沒有對應BUY的孤兒事件直接丟掉，統計出來的勝率/報酬會嚴重失真。"""
+    if strategy_name == "golden_cross_scaleout":
+        return params.get("stop_mode", "pct") == "ma_scaleout"
+    if strategy_name in ("bullish_divergence", "capitulation_reversal"):
+        return bool(params.get("enable_tiered_profit", False))
+    return False
+
+
 @dataclass(frozen=True)
 class Trade:
     entry_ts: object

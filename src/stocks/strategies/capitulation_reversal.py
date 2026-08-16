@@ -1,17 +1,36 @@
 import pandas as pd
 
-from stocks.indicators import atr, rolling_avg_volume
+from stocks.indicators import atr, rolling_avg_volume, sma
 from stocks.models import Direction, SignalEvent
 
 
 class CapitulationReversalStrategy:
-    """單日重挫+爆量(恐慌性賣壓出盡的典型特徵)，隔天如果不再破前一天低點、收盤又收在
-    前一天收盤之上，視為止穩訊號進場——賭的是「該倒的都倒了」。跟bullish_divergence
-    (抓跌勢動能逐漸減弱的過程)是不同角度：這支抓的是單一事件式的恐慌出清，訊號更即時
-    (隔天就進場，不用等趨勢真正走弱)，但也更容易誤判成「還沒跌完」的假止穩(接刀子)。
-    出場預設用固定15%移動停損(stop_mode="pct")，也支援ATR移動停損(stop_mode="atr")跟
-    分批停損(stop_mode="tiered_pct")——實測比較結果跟改預設值的理由見bullish_divergence.py
-    同一段註解(2026-08-15backtest_bottom_pickers.py三支策略一起測出來的結論)。"""
+    """爆量急殺止穩策略。
+
+    進場：單日重挫≥5% + 成交量>2倍均量(恐慌性賣壓)，隔天不再破前一天低點、且收盤收在
+    前一天收盤之上(止穩確認)才進場。
+
+    出場(現行:stop_mode="structural"+enable_tiered_profit，一買配兩賣，跟bullish_
+    divergence同一套機制，要用simulate_scaleout_trades配對，不能套simulate_
+    round_trips)，兩階段：
+      ①初始結構停損防接刀：爆量急殺當天(不是進場當天)的最低點再往下5%緩衝
+        (structural_stop_buffer_pct)
+      ②反彈觸及20日均線(tiered_ma_period)先賣一半，剩餘部位停損上移至成本價保本
+        (move_stop_to_breakeven_after_tier)，之後改用15%(stop_pct)寬幅移動停損
+
+    也支援單一停損：固定15%移動停損("pct")、2.5倍ATR移動停損("atr")、分批停損
+    ("tiered_pct")、或不搭配tiered_profit的純結構停損("structural"，注意：固定不動
+    又沒有其他出場條件，獲利部位會一直持有到觸及停損為止，見enable_tiered_profit
+    參數註解的實測說明)。
+
+    斷路器：豁免（在CIRCUIT_BREAKER_EXEMPT_STRATEGIES清單內）。查過全觀察清單10年138次
+    BUY訊號：進場當天自己收盤價<20日均線的比例高達75.4%(單一股票急殺後本來就常常還在
+    自己月線下方)，但「全市場同產業≥60%也跌破月線」這個AND條件只在3.6%的進場天成立
+    (單一股票恐慌性急殺不代表整個產業同時系統性重挫)，兩者同時成立、真正會被斷路器
+    擋下的比例只有2.2%——跟bullish_divergence那種「進場前提本身就跟斷路器條件結構
+    互斥」不同，這2.2%不是結構性衝突。使用者2026-08-16仍選擇排除：這2.2%剛好是
+    「單一股票恐慌急殺+整個產業同時系統性重挫」同時發生的情況，可能正是最劇烈、最
+    值得抓的恐慌轉折點，寧可不設這道防線也不要錯過。"""
 
     name = "capitulation_reversal"
 
@@ -21,10 +40,34 @@ class CapitulationReversalStrategy:
         avg_volume_period = params.get("avg_volume_period", 20)
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2.5)
-        stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct" 或 "tiered_pct"
+        stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct"、"tiered_pct" 或
+        # "structural"(現行:爆量急殺當天最低點-緩衝%，固定不動，搭配enable_tiered_profit=
+        # True形成兩階段出場，見class docstring)
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
+        structural_stop_buffer_pct = params.get("structural_stop_buffer_pct", 0.05)  # stop_mode=
+        # "structural"時，停損=爆量急殺當天最低點再往下的緩衝百分比。
+        enable_tiered_profit = params.get("enable_tiered_profit", False)  # stop_mode=
+        # "structural"時額外啟用的兩階段出場架構(一買配兩賣，見class docstring)。現行
+        # (config.json):True。用scripts/backtest_capitulation_reversal_user_proposal.py
+        # 驗證過：跟trend_following/atr_breakout/long_swing那些「提早鎖利就系統性犧牲
+        # 總報酬」的結論不同，這支策略啟用後獲利因子不降反升(5.82→7.62)、最大回撤大幅
+        # 收斂(-110.1→-68.6)，代價是總報酬下滑(3863.0→1740.1)——原因可能是這支策略的
+        # 真正優勢本來就是「快、狠、準地吃到反彈」而不是「抱住大波段」，跟trend_following
+        # 那種regime-following策略的獲利結構不一樣。拆開逐檔看，有幾檔原本是正報酬
+        # (2337/2408/3526/6491/6187/7769/8299)套用後變成負報酬，不是全面受益；使用者
+        # 2026-08-16確認接受這個取捨，故採用為預設。只單純只改結構停損(不搭配
+        # tiered_profit)一樣有bullish_divergence踩過的問題：固定不動又沒有其他出場
+        # 條件，獲利部位永遠不出場，統計會失真(全觀察清單10年只剩53筆「完整」交易、
+        # 且全部虧損)，不要單獨使用。
+        tiered_ma_period = params.get("tiered_ma_period", 20)  # 賣出一半的觸發條件：收盤
+        # 觸及/站上這條均線(反彈碰上方均線壓力最容易回檔)。現行(config.json):20。10日
+        # 版本回測獲利因子更高(9.13)、MDD更小(-41.1)，但總報酬更低(1476.0)——20日是
+        # 總報酬/獲利因子/MDD三者較平衡的版本，故採用。
+        move_stop_to_breakeven_after_tier = params.get("move_stop_to_breakeven_after_tier", True)
+        # 賣出一半當下是否把剩餘部位的停損上移至進場成本價(保本)，False代表停損留在原本
+        # 的結構停損位置不動。
 
         close = bars["close"]
         low = bars["low"]
@@ -86,14 +129,83 @@ class CapitulationReversalStrategy:
 
             return events
 
+        if stop_mode == "structural" and enable_tiered_profit:
+            ma_tiered = sma(close, tiered_ma_period)
+            events: list[SignalEvent] = []
+            in_position = False
+            half_sold = False
+            entry_price = None
+            stop = None
+            peak = None
+
+            for t in bars.index:
+                c = close[t]
+                if in_position:
+                    if not half_sold:
+                        if c < stop:
+                            events.append(
+                                SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破結構停損 {stop:.2f}(恐慌未止穩，全部出場)")
+                            )
+                            in_position = False
+                            entry_price = None
+                            stop = None
+                        elif not pd.isna(ma_tiered[t]) and c >= ma_tiered[t]:
+                            events.append(
+                                SignalEvent(symbol, self.name, Direction.SELL, c, t, f"觸及{tiered_ma_period}日均線，賣出一半")
+                            )
+                            half_sold = True
+                            if move_stop_to_breakeven_after_tier:
+                                stop = entry_price
+                            peak = c
+                    else:
+                        if c < stop:
+                            label = "保本停損" if stop == entry_price else f"{stop_pct * 100:.0f}%移動停損"
+                            events.append(
+                                SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{label} {stop:.2f}，賣出剩餘一半")
+                            )
+                            in_position = False
+                            half_sold = False
+                            entry_price = None
+                            stop = None
+                            peak = None
+                        else:
+                            peak = max(peak, c)
+                            stop = max(stop, peak * (1 - stop_pct))
+                elif confirms_reversal[t]:
+                    entry_price = c
+                    stop = prev_low[t] * (1 - structural_stop_buffer_pct)
+                    half_sold = False
+                    peak = c
+                    events.append(
+                        SignalEvent(
+                            symbol,
+                            self.name,
+                            Direction.BUY,
+                            c,
+                            t,
+                            f"前日重挫{drop_threshold_pct:.0f}%+爆量{volume_multiplier:.0f}倍後隔日止穩，"
+                            f"結構停損{stop:.2f}(觸及{tiered_ma_period}日均線先賣一半)",
+                        )
+                    )
+                    in_position = True
+
+            return events
+
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
 
         def next_stop(c: float, t) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
+            if stop_mode == "structural":
+                return prev_low[t] * (1 - structural_stop_buffer_pct)
             return c - atr_multiplier * atr_value[t]
 
-        stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "ATR移動停損"
+        if stop_mode == "pct":
+            stop_label = f"{stop_pct * 100:.0f}%移動停損"
+        elif stop_mode == "structural":
+            stop_label = f"結構停損(急殺當天低點-{structural_stop_buffer_pct * 100:.0f}%)"
+        else:
+            stop_label = "ATR移動停損"
 
         events: list[SignalEvent] = []
         in_position = False
@@ -106,9 +218,11 @@ class CapitulationReversalStrategy:
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_label} {stop:.2f}"))
                     in_position = False
                     stop = None
-                elif stop_mode == "pct" or not pd.isna(atr_value[t]):
+                elif stop_mode == "pct" or (stop_mode == "atr" and not pd.isna(atr_value[t])):
+                    # structural停損進場後固定不動(保護的是恐慌是否真的止穩，不是拿來
+                    # 鎖定後續獲利用的移動停損)，所以這裡刻意不幫structural往上移動。
                     stop = max(stop, next_stop(c, t))
-            elif confirms_reversal[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
+            elif confirms_reversal[t] and (stop_mode in ("pct", "structural") or not pd.isna(atr_value[t])):
                 stop = next_stop(c, t)
                 events.append(
                     SignalEvent(

@@ -46,7 +46,7 @@ from stocks.strategy_selection import (
     MIN_TRADES_FOR_RANKING,
     MIN_TRADES_OVERRIDES,
 )
-from stocks.strategy_stats import simulate_round_trips, summarize_trades
+from stocks.strategy_stats import is_scaleout_strategy, simulate_round_trips, simulate_scaleout_trades, summarize_trades
 from stocks.watchlist_view import (
     build_overview_row_for_symbol,
     build_paper_trades_for_symbol,
@@ -139,8 +139,11 @@ def _compute_track_record_for_symbol(_config, code: str) -> dict | None:
 
     row = {"代號": code, "名稱": (name_row["name"] if name_row else None) or "—"}
     for name in TRACK_RECORD_STRATEGIES:
-        events = STRATEGY_REGISTRY[name].evaluate(code, bars, _config.strategy_params.get(name, {}))
-        trades, _ = simulate_round_trips(events)
+        strategy_params = _config.strategy_params.get(name, {})
+        events = STRATEGY_REGISTRY[name].evaluate(code, bars, strategy_params)
+        trades, _ = (
+            simulate_scaleout_trades(events) if is_scaleout_strategy(name, strategy_params) else simulate_round_trips(events)
+        )
         row[STRATEGY_LABELS[name].split("(")[0]] = cell_text(name, summarize_trades(trades))
     return row
 

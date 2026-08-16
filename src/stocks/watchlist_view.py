@@ -21,7 +21,7 @@ from stocks.indicators import bollinger_bands, macd, rolling_avg_volume, rsi, sm
 from stocks.models import Direction
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.strategies import STRATEGY_REGISTRY
-from stocks.strategy_stats import simulate_round_trips
+from stocks.strategy_stats import is_scaleout_strategy, simulate_round_trips, simulate_scaleout_trades
 
 MAX_SIGNAL_AGE_DAYS = 100  # 超過這個天數的舊訊號直接不列(不是變灰/變淡)——那個策略對這支
 # 股票已經一段時間沒有任何動作，不管上次是買還是賣都不算「現在還有意義的訊號」，2026-08-07
@@ -411,9 +411,12 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
     開始當作空手重新起算，跟simulate_round_trips本來的配對邏輯一致：先篩選事件範圍
     再配對)。還沒配到出場的部位標記「持有中」，「賣出價位」留空(還沒真的賣)，另外用
     「現價」欄位算未實現報酬率——兩者分開列，不能讓「持有中」那列的賣出價位看起來
-    像已經賣掉了。所有NOTIFIABLE_STRATEGIES現在都是一買配一賣的形狀(golden_cross_scaleout
-    2026-08-15起預設也改成單一停損全出，不再是一買配兩賣)，統一用simulate_round_trips
-    配對，不用再區分策略特殊處理。
+    像已經賣掉了。大多數NOTIFIABLE_STRATEGIES是一買配一賣的形狀，用simulate_round_trips
+    配對；分批出場的策略(is_scaleout_strategy()判斷為True，目前是golden_cross_scaleout
+    的ma_scaleout模式、bullish_divergence的enable_tiered_profit)改用
+    simulate_scaleout_trades，一筆ScaleoutTrade拆成「半倉」「剩餘半倉」兩列顯示(見
+    build_paper_trades_for_symbol)，讓使用者看得到兩次分批出場各自的價位，不是合併成
+    一個平均數字。
 
     這裡跟_compute_track_records不一樣：那裡是故意忽略排除清單(給使用者看「為什麼」
     被排除的歷史全貌)，這裡是模擬「照現在的設定實際會不會被通知」，所以個股已經被
@@ -508,6 +511,66 @@ def build_paper_trades_for_symbol(config: Config, symbol: str, start_date: str =
             continue
 
         base_row = {"代號": symbol, "名稱": name, "策略": strategy_name}
+
+        if is_scaleout_strategy(strategy_name, config.strategy_params.get(strategy_name, {})):
+            # 一買配兩賣的分批出場策略：拆成「半倉」「剩餘半倉」兩列各自的實際買賣價位/
+            # 報酬率，不用blended_exit_price合併成一個平均數字——使用者在這張表看到的
+            # 應該是真實發生過的兩次交易動作，跟策略訊號本身的detail("賣出一半"/
+            # 「賣出剩餘一半")一致。
+            trades, still_open = simulate_scaleout_trades(events_since)
+            for st in trades:
+                for leg_label, exit_ts, exit_price in [
+                    ("半倉", st.exit1_ts, st.exit1_price),
+                    ("剩餘半倉", st.exit2_ts, st.exit2_price),
+                ]:
+                    rows.append(
+                        {
+                            **base_row,
+                            "策略": f"{strategy_name}({leg_label})",
+                            "買進日期": st.entry_ts.strftime("%Y-%m-%d"),
+                            "買進價位": _round_or_none(st.entry_price),
+                            "賣出日期": exit_ts.strftime("%Y-%m-%d"),
+                            "賣出價位": _round_or_none(exit_price),
+                            "現價": _round_or_none(current_price),
+                            "報酬率(%)": _round_or_none((exit_price - st.entry_price) / st.entry_price * 100),
+                            "狀態": "已平倉",
+                        }
+                    )
+            if still_open:
+                entry = still_open["entry"]
+                exits = still_open["exits"]
+                if exits:
+                    half_exit = exits[0]
+                    rows.append(
+                        {
+                            **base_row,
+                            "策略": f"{strategy_name}(半倉)",
+                            "買進日期": entry.ts.strftime("%Y-%m-%d"),
+                            "買進價位": _round_or_none(entry.price),
+                            "賣出日期": half_exit.ts.strftime("%Y-%m-%d"),
+                            "賣出價位": _round_or_none(half_exit.price),
+                            "現價": _round_or_none(current_price),
+                            "報酬率(%)": _round_or_none((half_exit.price - entry.price) / entry.price * 100),
+                            "狀態": "已平倉",
+                        }
+                    )
+                    remaining_label = "剩餘半倉"
+                else:
+                    remaining_label = "全倉"
+                rows.append(
+                    {
+                        **base_row,
+                        "策略": f"{strategy_name}({remaining_label})",
+                        "買進日期": entry.ts.strftime("%Y-%m-%d"),
+                        "買進價位": _round_or_none(entry.price),
+                        "賣出日期": None,
+                        "賣出價位": None,
+                        "現價": _round_or_none(current_price),
+                        "報酬率(%)": _round_or_none((current_price - entry.price) / entry.price * 100),
+                        "狀態": "持有中(未實現)",
+                    }
+                )
+            continue
 
         trades, open_position = simulate_round_trips(events_since)
         for t in trades:

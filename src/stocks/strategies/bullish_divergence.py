@@ -1,78 +1,109 @@
 import pandas as pd
 
-from stocks.indicators import atr, macd, rsi, stochastic_kd
+from stocks.indicators import atr, macd, rsi, sma, stochastic_kd
 from stocks.models import Direction, SignalEvent
 
 
 class BullishDivergenceStrategy:
-    """價格創近N日新低，但RSI沒有跟著創新低(背離)，代表下跌動能已經在減弱——比單純
-    「RSI很低」更早抓到轉折，抓的是「這次探底跌勢有沒有比上次更兇」，而不是「現在夠不夠
-    便宜」。跟rsi_mean_reversion(短週期RSI(2)超賣+跌破布林下軌，設計給盤整行情用)不同，
-    這支用長週期RSI(14)、目標是抓單邊崩跌後的真正止穩，避免強趨勢中被巴來巴去。
-    出場預設用固定15%移動停損(stop_mode="pct")，也支援ATR移動停損(stop_mode="atr")、
-    分批停損(stop_mode="tiered_pct"：跌8%先賣一半、跌15%賣剩餘一半，2026-08-15新增
-    供實測比較用)，跟結構停損(stop_mode="structural"：固定在進場K棒低點再往下2%緩衝，
-    進場後不再往上移動，2026-08-15使用者建議新增——抄底的假設就是「這裡是底」，連進場
-    那天的最低點都跌破代表假設本身錯了，該立刻認賠，不該用固定15%這種跟這次進場邏輯
-    無關的空間繼續扛)——
-    2026-08-15用scripts/backtest_bottom_pickers.py實測比較8%/10%/15%固定停損跟2.5倍
-    ATR停損：8%/10%太緊，在崩跌剛止穩、行情還在震盪的階段常常被正常雜訊洗出場，抓不到
-    後面真正的大反轉；15%版本三個策略(這支+capitulation_reversal+chip_reversal_fast)
-    的平均報酬、加總報酬、獲利因子全面勝出(獲利因子2.01→2.96)，才改成15%當預設。
-    最大回撤數字看起來比ATR版更深，但那是單筆振幅變大的正常結果(賺賠都放大)，不代表
-    策略更不穩定——同樣的判斷邏輯用在strategy_selection.py的排除規則上：獲利因子才是
-    判斷好壞的依據，不是MDD。"""
+    """背離抄底策略。
+
+    初步訊號：收盤價創20日新低，但RSI(14)未跟著創新低(背離，代表下跌動能減弱)，
+    且RSI<35(還在偏弱區間，避免已強勢反彈完才進場)
+
+    確認進場(require_reversal_confirm)：初步訊號出現後不會立刻進場，最多等待10個交易日
+    (reversal_confirm_max_wait_days)，直到以下確認訊號中至少1項成立
+    (reversal_confirm_min_signals)才進場：
+      - 收盤站上5日均線，或站上前一日高點
+      - MACD柱狀圖比前一天回升(require_reversal_macd)
+    等待期間若出現更低的新低+背離，用新訊號重新起算等待。
+
+    出場(現行:stop_mode="structural"+enable_tiered_profit，一買配兩賣，跟golden_cross_
+    scaleout的ma_scaleout模式同樣要用simulate_scaleout_trades配對，不能套simulate_
+    round_trips)，三階段：
+      ①初始結構停損防接刀：進場K棒最低點再往下5%緩衝(structural_stop_buffer_pct)
+      ②獲利達12%(tiered_target_pct)或觸及60日均線(tiered_ma_period)先賣一半，剩餘部位
+        停損上移至成本價保本(move_stop_to_breakeven_after_tier)
+      ③剩餘部位改用15%(stop_pct)寬幅移動停損，讓真正的大反轉抱好抱滿
+
+    也支援單一停損：固定15%移動停損("pct")、ATR停損("atr")、分批停損("tiered_pct")、
+    或不搭配tiered_profit的純結構停損("structural"，注意：固定不動又沒有其他出場條件，
+    獲利部位會一直持有到觸及停損為止，見structural_trail_after_pct/enable_tiered_profit
+    參數註解的實測說明)。
+
+    斷路器：豁免（在CIRCUIT_BREAKER_EXEMPT_STRATEGIES清單內）。斷路器本身的條件是「全市場
+    同產業≥60%股票跌破月線、且這支股票自己當下也跌破月線」才擋新BUY——但這支策略的進場
+    前提就是「自己正跌破月線」，兩者天生衝突，故完全跳過檢查(見circuit_breaker.py)。"""
 
     name = "bullish_divergence"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:
         lookback_days = params.get("lookback_days", 20)
         rsi_period = params.get("rsi_period", 14)
-        rsi_ceiling = params.get("rsi_ceiling", 40)
+        rsi_ceiling = params.get("rsi_ceiling", 40)  # 現行(config.json):35。用
+        # scripts/backtest_bullish_divergence_user_proposal.py驗證過：比原本的30全觀察清單
+        # 10年加總報酬+22%(7842.8→9583.2)、勝率/平均報酬幾乎不變，才改成35當預設。
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2.5)
-        stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct"、"tiered_pct" 或 "structural"
+        stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct"(固定15%移動停損)、
+        # "tiered_pct"(分批停損) 或 "structural"(現行:進場K棒低點-緩衝%，固定不動，
+        # 搭配enable_tiered_profit=True形成三階段出場，見class docstring)
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
-        confirm_next_day = params.get("confirm_next_day", False)  # 2026-08-15研究中：
-        # 2026年7月的系統性重挫期間這支策略進場後平均還要再跌一段(13~28個交易日後才真正
-        # 落底)，訊號當天訊號一出現就進場，等於接刀。跟capitulation_reversal同一套「隔天
-        # 不再破前低+收盤收高才進場」的確認邏輯借過來試——那支策略同一段期間完全沒有誤觸發，
-        # 差別就在這個確認機制。預設False不影響既有行為。
-        require_macd_turn = params.get("require_macd_turn", False)  # 額外要求MACD柱狀圖
-        # 比前一天回升(下跌動能減弱的另一個角度佐證，不要求真正黃金交叉——那個太罕見，
-        # 幾乎篩不出任何訊號)。
-        require_kd_bullish = params.get("require_kd_bullish", False)  # 額外要求K>D(偏多)。
-        require_reversal_confirm = params.get("require_reversal_confirm", False)  # 2026-08-15
-        # 使用者建議：創新低+RSI背離只代表「下跌動能減弱」，不代表當天就是底，訊號當天直接
-        # 進場等於猜底部；改成隔天等到價格反轉訊號實際出現才進場，底部支撐是走出來的，不是
-        # 猜出來的。跟confirm_next_day(要求隔天不再破前低+收盤收高)是同一類「等確認」的
-        # 想法，但這裡的確認條件更嚴格、更具體。
-        reversal_confirm_ma_period = params.get("reversal_confirm_ma_period", 5)  # 「站上均線」
-        # 用哪一條均線——5日太敏感，一般助跌反彈就能站上，2026-08-15回測比較過改用10日。
+        confirm_next_day = params.get("confirm_next_day", False)  # 額外要求隔天不再破前低
+        # +收盤收高才進場(跟capitulation_reversal同一套確認邏輯)。預設False，未啟用。
+        require_macd_turn = params.get("require_macd_turn", False)  # 初步訊號額外要求MACD
+        # 柱狀圖比前一天回升。預設False，未啟用。
+        require_kd_bullish = params.get("require_kd_bullish", False)  # 初步訊號額外要求
+        # K>D(偏多)。預設False，未啟用。
+        require_reversal_confirm = params.get("require_reversal_confirm", False)  # 現行:True。
+        # 初步訊號出現後不直接進場，改成等待價格反轉確認訊號出現才進場(見class docstring)。
+        reversal_confirm_ma_period = params.get("reversal_confirm_ma_period", 5)  # 確認訊號
+        # 「站上均線」用哪一條均線，預設5日。
         require_reversal_kd = params.get("require_reversal_kd", False)  # 確認訊號額外納入
-        # KD(K>D)：2026-08-15使用者發現只看「站上均線/前高」門檻太低，一天雜訊反彈就過關，
-        # 建議多納入KD/MACD再判斷。
-        require_reversal_macd = params.get("require_reversal_macd", False)  # 確認訊號額外
-        # 納入MACD柱狀圖回升，跟require_reversal_kd同一次建議。
+        # KD(K>D)。預設False，未啟用。
+        require_reversal_macd = params.get("require_reversal_macd", False)  # 現行:True。
+        # 確認訊號額外納入MACD柱狀圖回升。
+        reversal_confirm_macd_positive = params.get("reversal_confirm_macd_positive", False)  # MACD
+        # 確認訊號額外要求柱狀圖轉正(>0)，不是只要求比昨天回升。預設False，未啟用。
+        reversal_confirm_macd_streak_days = params.get("reversal_confirm_macd_streak_days", 1)  # MACD
+        # 確認訊號要求連續N天都比前一天回升，預設1天(只要當天回升即可)。
         reversal_confirm_min_signals = params.get("reversal_confirm_min_signals", 1)  # 「價格
-        # 站上均線/前高」、「KD偏多」、「MACD回升」三個確認訊號(只計入有納入的)裡至少要有
-        # 幾個同時成立才算數——預設1(任一成立即可，門檻最低，也是原本只有價格確認時的
-        # 行為)；使用者可以調高到2或3(全部都要)換取更嚴格的確認，代價是進場筆數更少。
-        reversal_confirm_max_wait_days = params.get("reversal_confirm_max_wait_days", 10)  # 2026-08-15
-        # 使用者發現原本「只看隔天一次」漏掉真正的反轉：實測案例(3105穩懋7/29訊號)裡
-        # MACD/KD要到6個交易日後才真的轉正，隔天沒確認就永遠放棄=連底部都篩掉了。改成
-        # 持續等到確認出現才進場，但不能無限期等——等太久代表這次低點的參考意義已經過時
-        # (股價可能已經反彈一大段、風險報酬比不再有利)，預設最多等10個交易日，超過就放棄
-        # 這次訊號、等下一次創新低+背離重新判斷。
-        structural_stop_buffer_pct = params.get("structural_stop_buffer_pct", 0.02)  # 2026-08-15
-        # 使用者建議：抄底的假設就是「這裡是底」，如果進場那根K線的最低點都跌破，代表這個
-        # 假設本身就錯了，不該用跟這次進場邏輯無關的固定15%繼續扛——停損改成進場那天的
-        # 最低點再往下抓一個緩衝(預設2%，抓一點雜訊空間避免正常影線就被洗出場)，出場空間
-        # 通常比15%窄很多，符合「左側交易試錯成本要小」的精神。這個停損是固定的(進場後
-        # 不會再往上移動)，因為它保護的是「進場當時的結構是否還成立」，不是拿來鎖定後續
-        # 獲利用的移動停損。
+        # 確認」「KD偏多」「MACD回升」幾項確認訊號(只計入有啟用的)裡至少要有幾項同時成立，
+        # 預設1(任一成立即可)。
+        reversal_confirm_max_wait_days = params.get("reversal_confirm_max_wait_days", 10)  # 等待
+        # 確認訊號最多幾個交易日，超過就放棄這次初步訊號。
+        structural_stop_buffer_pct = params.get("structural_stop_buffer_pct", 0.02)  # stop_mode=
+        # "structural"時，停損=進場K棒最低點再往下的緩衝百分比。現行(config.json):0.05——
+        # 2%緩衝太貼近進場K棒本身、容易被正常回測雜訊洗出場，放寬到5%後(搭配下面
+        # enable_tiered_profit)全觀察清單10年勝率54.3%→56.5%、加總報酬3744.7→3975.1，
+        # 兩項都小幅變好，才改成5%當預設。
+        structural_trail_after_pct = params.get("structural_trail_after_pct", None)  # stop_mode=
+        # "structural"時，獲利達到這個百分比後改成用stop_pct移動停損取代固定的結構停損——
+        # 現行None代表不使用這個簡化版switch(改用下面enable_tiered_profit的完整三階段
+        # 架構)。注意：如果structural且這裡是None、enable_tiered_profit也是False，停損
+        # 進場後固定不動又沒有其他出場條件，獲利部位會一直持有到停損被觸及為止(可能持有
+        # 數年)——一開始就是因為這樣，backtest才會測出「全觀察清單10年只有115筆完整
+        # 進出場、且勝率0%」的假象：26/28檔股票的部位其實還「持有中」從未真正出場(部分
+        # 未實現獲利超過1000%)，虧損的才會被停損出場變成可統計的完整交易，勝率0%只是
+        # 統計口徑造成的假象，不是真的沒有一筆賺錢。
+        enable_tiered_profit = params.get("enable_tiered_profit", False)  # stop_mode=
+        # "structural"時額外啟用的三階段出場架構(一買配兩賣，見class docstring)。現行
+        # (config.json):True。用scripts/backtest_bullish_divergence_user_proposal.py
+        # 驗證過(simulate_scaleout_trades配對)：勝率是測過的版本裡最高(45.3%→56.9%)、
+        # 最大回撤也最小(-478.5→-202.8)，risk management本身有效；代價是總報酬
+        # (7842.8→3019.9)、獲利因子(3.82→3.06)都明顯變差——半倉在12%獲利或觸及季線就先
+        # 落袋，會犧牲掉少數幾筆抱到滿的巨大反轉。使用者2026-08-17確認要的是「更高勝率+
+        # 更平穩」勝過總報酬最大化，故採用為預設——這個取捨判斷跟這個codebase其他策略
+        # (long_swing/trend_following/atr_breakout)平常「獲利因子+總報酬優先」的預設不同，
+        # 是使用者明確的例外選擇，不是判斷標準本身改變。
+        tiered_target_pct = params.get("tiered_target_pct", 0.12)  # 賣出一半的獲利門檻。
+        tiered_ma_period = params.get("tiered_ma_period", 60)  # 賣出一半的另一個觸發條件：
+        # 收盤觸及/站上這條均線(季線，反彈碰壓力最容易回檔)，跟tiered_target_pct任一
+        # 成立即可，不用兩者都到。
+        move_stop_to_breakeven_after_tier = params.get("move_stop_to_breakeven_after_tier", True)
+        # 賣出一半當下是否把剩餘部位的停損上移至進場成本價(保本)，False代表停損留在原本
+        # 的結構停損位置不動。
 
         close = bars["close"]
         rsi_value = rsi(close, rsi_period)
@@ -111,7 +142,13 @@ class BullishDivergenceStrategy:
                 confirm_signals.append(confirm_k > confirm_d)
             if require_reversal_macd:
                 _, _, confirm_histogram = macd(close)
-                confirm_signals.append(confirm_histogram > confirm_histogram.shift(1))
+                rising = confirm_histogram > confirm_histogram.shift(1)
+                macd_confirms = rising.copy()
+                for streak_shift in range(1, reversal_confirm_macd_streak_days):
+                    macd_confirms = macd_confirms & rising.shift(streak_shift).fillna(False)
+                if reversal_confirm_macd_positive:
+                    macd_confirms = macd_confirms & (confirm_histogram > 0)
+                confirm_signals.append(macd_confirms)
             signal_count = sum(s.fillna(False).astype(int) for s in confirm_signals)
             confirmed_ok = (signal_count >= reversal_confirm_min_signals).to_numpy()
 
@@ -181,6 +218,72 @@ class BullishDivergenceStrategy:
 
             return events
 
+        if stop_mode == "structural" and enable_tiered_profit:
+            ma_tiered = sma(close, tiered_ma_period)
+            events: list[SignalEvent] = []
+            in_position = False
+            half_sold = False
+            entry_price = None
+            stop = None
+            peak = None
+
+            for t in bars.index:
+                c = close[t]
+                if in_position:
+                    if not half_sold:
+                        if c < stop:
+                            events.append(
+                                SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破結構停損 {stop:.2f}(背離失敗，全部出場)")
+                            )
+                            in_position = False
+                            entry_price = None
+                            stop = None
+                        else:
+                            profit_hit = (c - entry_price) / entry_price >= tiered_target_pct
+                            ma_hit = not pd.isna(ma_tiered[t]) and c >= ma_tiered[t]
+                            if profit_hit or ma_hit:
+                                reason = (
+                                    f"獲利達{tiered_target_pct * 100:.0f}%" if profit_hit else f"觸及{tiered_ma_period}日均線"
+                                )
+                                events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"{reason}，賣出一半"))
+                                half_sold = True
+                                if move_stop_to_breakeven_after_tier:
+                                    stop = entry_price
+                                peak = c
+                    else:
+                        if c < stop:
+                            label = "保本停損" if stop == entry_price else f"{stop_pct * 100:.0f}%移動停損"
+                            events.append(
+                                SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{label} {stop:.2f}，賣出剩餘一半")
+                            )
+                            in_position = False
+                            half_sold = False
+                            entry_price = None
+                            stop = None
+                            peak = None
+                        else:
+                            peak = max(peak, c)
+                            stop = max(stop, peak * (1 - stop_pct))
+                elif entry_edge[t] and not pd.isna(rolling_low_rsi[t]):
+                    entry_price = c
+                    stop = bars["low"][t] * (1 - structural_stop_buffer_pct)
+                    half_sold = False
+                    peak = c
+                    events.append(
+                        SignalEvent(
+                            symbol,
+                            self.name,
+                            Direction.BUY,
+                            c,
+                            t,
+                            f"價格創{lookback_days}日新低但RSI({rsi_period})未破底(背離)，結構停損{stop:.2f}"
+                            f"(獲利達{tiered_target_pct * 100:.0f}%或觸及{tiered_ma_period}日均線先賣一半)",
+                        )
+                    )
+                    in_position = True
+
+            return events
+
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
 
         def next_stop(c: float, t) -> float:
@@ -200,17 +303,34 @@ class BullishDivergenceStrategy:
         events: list[SignalEvent] = []
         in_position = False
         stop = None
+        entry_price = None
+        trailing_now = False  # structural_trail_after_pct啟用後，獲利切換成移動停損時設True
 
         for t in bars.index:
             c = close[t]
             if in_position:
+                if (
+                    stop_mode == "structural"
+                    and structural_trail_after_pct is not None
+                    and not trailing_now
+                    and (c - entry_price) / entry_price >= structural_trail_after_pct
+                ):
+                    trailing_now = True
+                    stop = max(stop, c * (1 - stop_pct))
+
                 if c < stop:
-                    events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_label} {stop:.2f}"))
+                    exit_label = f"{stop_pct * 100:.0f}%移動停損(獲利後切換)" if trailing_now else stop_label
+                    events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{exit_label} {stop:.2f}"))
                     in_position = False
                     stop = None
+                    entry_price = None
+                    trailing_now = False
+                elif trailing_now:
+                    stop = max(stop, c * (1 - stop_pct))
                 elif stop_mode == "pct" or (stop_mode == "atr" and not pd.isna(atr_value[t])):
                     # structural停損進場後固定不動(保護的是進場當下的結構是否還成立，不是
-                    # 拿來鎖定後續獲利用的移動停損)，所以這裡刻意不幫structural往上移動。
+                    # 拿來鎖定後續獲利用的移動停損)，所以這裡刻意不幫structural往上移動——
+                    # 除非structural_trail_after_pct已觸發(trailing_now，上面已處理)。
                     stop = max(stop, next_stop(c, t))
             elif (
                 entry_edge[t]
@@ -218,6 +338,8 @@ class BullishDivergenceStrategy:
                 and (stop_mode in ("pct", "structural") or not pd.isna(atr_value[t]))
             ):
                 stop = next_stop(c, t)
+                entry_price = c
+                trailing_now = False
                 events.append(
                     SignalEvent(
                         symbol,
