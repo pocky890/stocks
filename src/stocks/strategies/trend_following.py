@@ -5,10 +5,18 @@ from stocks.models import Direction, SignalEvent
 
 
 class TrendFollowingStrategy:
-    """20日均線站上60日均線、收盤價站上20日均線、且成交量放大(>20日均量)才進場——三個條件
-    都是「多頭排列+量能確認」，避免在盤整量縮時搶進。停損是進場當天的收盤價減2倍ATR，
-    固定不動(不像atr_breakout那樣往上移動)；出場則是收盤跌破20日均線、或20日均線本身
-    跌破60日均線(代表多頭排列瓦解)，兩者任一發生就出場。"""
+    """趨勢追蹤策略。
+
+    進場：20日均線>60日均線 + 收盤站上20日均線 + 成交量>20日均量(volume_multiplier，現行1倍)
+
+    出場：收盤跌破20日均線，或20日均線本身跌破60日均線(多頭排列瓦解)，兩者任一發生就
+    出場——20日均線跌破可用ma_break_confirm_days/ma_break_single_day_drop_pct加緩衝
+    (現行即時觸發，不緩衝)。停損為進場當天收盤價-2倍14日ATR，固定不動(stop_mode="atr")，
+    也支援stop_mode="pct"(移動停損)、"trailing_atr"(移動停利：股價自進場後最高點回落
+    N倍ATR即出場)。
+
+    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己當下也跌破
+    月線時，暫停新的BUY(SELL不受影響)。"""
 
     name = "trend_following"
 
@@ -16,11 +24,33 @@ class TrendFollowingStrategy:
         fast = params.get("fast", 20)
         slow = params.get("slow", 60)
         volume_avg_period = params.get("volume_avg_period", 20)
+        volume_multiplier = params.get("volume_multiplier", 1.0)  # 現行:1.0(僅需>均量)，
+        # 可調高至1.5/2.0要求更強的量能確認。用scripts/backtest_trend_following_user_proposal.py
+        # 驗證過：調高後勝率/獲利因子/最大回撤都變好，但交易筆數大減、加總報酬明顯下滑
+        # (10年7046.2→1.5倍6334.9→2倍5374.6)——用更少更精但更少的訊號換總報酬，是
+        # 品質/總量的取捨，不是單純的改善，未採用為預設。
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2)
-        stop_mode = params.get("stop_mode", "atr")  # "atr"(進場後固定不動) 或 "pct"(移動停損)，
-        # 2026-08-15新增供實測比較用，取捨說明同breakout.py。
+        stop_mode = params.get("stop_mode", "atr")  # "atr"(現行:進場後固定不動) 或
+        # "pct"(移動停損) 或 "trailing_atr"(移動停利：股價自進場後最高點回落
+        # trailing_atr_multiplier倍ATR即出場)——用scripts/backtest_trend_following_user_proposal.py
+        # 驗證過trailing_atr是負面調整：10年加總報酬7046.2→5366.6(-24%)、獲利因子2.71→2.15，
+        # 提前鎖利會系統性砍掉這支策略靠少數大波段撐報酬的真正獲利來源，跟long_swing
+        # docstring記錄過的同一個結論一樣，未採用為預設。
         stop_pct = params.get("stop_pct", 0.15)
+        trailing_atr_multiplier = params.get("trailing_atr_multiplier", 1.5)
+        ma_break_confirm_days = params.get("ma_break_confirm_days", 1)  # 現行:1(當天跌破
+        # 就算出場)，可調高要求連續N天收盤跌破20日均線才確認，過濾單日假跌破雜訊。
+        ma_break_single_day_drop_pct = params.get("ma_break_single_day_drop_pct", None)  # 即使
+        # 還沒滿ma_break_confirm_days天，只要單日跌幅(%)達到這個負值就立刻確認出場
+        # (例如-3.0代表單日跌超3%直接算數)。現行None代表不啟用這個豁免。用
+        # scripts/backtest_trend_following_user_proposal.py驗證過(連2天確認+單日3%豁免)：
+        # 10年加總報酬小幅轉正(7046.2→7243.1)但2026 YTD打平、7月轉差，效果不穩定，
+        # 也還沒有跟其他策略一起全面驗證過，暫不採用為預設，保留參數供之後測試用。
+        entry_trigger = params.get("entry_trigger", "edge")  # "edge"(現行:條件剛從False轉
+        # True那天才觸發) 或 "level"(條件當天成立就觸發，不要求邊緣)——已用
+        # scripts/backtest_trend_following_entry_trigger.py驗證過是no-op(加總報酬幾乎沒差)，
+        # 不需要改成level，保留參數供其他情境測試用。
 
         close = bars["close"]
         ma_fast = sma(close, fast)
@@ -28,20 +58,41 @@ class TrendFollowingStrategy:
         avg_volume = rolling_avg_volume(bars["volume"], volume_avg_period)
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
 
-        entry_condition = (ma_fast > ma_slow) & (close > ma_fast) & (bars["volume"] > avg_volume)
-        prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
-        entry_edge = entry_condition & ~prev_entry
+        entry_condition = (ma_fast > ma_slow) & (close > ma_fast) & (bars["volume"] > volume_multiplier * avg_volume)
+        if entry_trigger == "level":
+            entry_edge = entry_condition
+        else:
+            prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
+            entry_edge = entry_condition & ~prev_entry
+
+        below_fast = close < ma_fast
+        group_id = (below_fast != below_fast.shift()).cumsum()
+        below_streak = below_fast.groupby(group_id).cumcount() + 1
+        streak_confirmed = below_fast & (below_streak >= ma_break_confirm_days)
+        if ma_break_single_day_drop_pct is not None:
+            daily_return_pct = close.pct_change() * 100
+            single_day_break = below_fast & (daily_return_pct <= ma_break_single_day_drop_pct)
+        else:
+            single_day_break = pd.Series(False, index=bars.index)
 
         def next_stop(c: float, t) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
+            if stop_mode == "trailing_atr":
+                return c - trailing_atr_multiplier * atr_value[t]
             return c - atr_multiplier * atr_value[t]
 
-        stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "停損"
+        if stop_mode == "pct":
+            stop_label = f"{stop_pct * 100:.0f}%移動停損"
+        elif stop_mode == "trailing_atr":
+            stop_label = f"{trailing_atr_multiplier}倍ATR移動停利"
+        else:
+            stop_label = "停損"
 
         events: list[SignalEvent] = []
         in_position = False
         stop = None
+        peak = None
 
         for t in bars.index:
             c = close[t]
@@ -49,18 +100,27 @@ class TrendFollowingStrategy:
                 reasons = []
                 if c < stop:
                     reasons.append(f"跌破{stop_label}{stop:.2f}")
-                if c < ma_fast[t]:
-                    reasons.append(f"跌破{fast}日均線")
+                if streak_confirmed[t]:
+                    reasons.append(
+                        f"連續{ma_break_confirm_days}天跌破{fast}日均線" if ma_break_confirm_days > 1 else f"跌破{fast}日均線"
+                    )
+                elif single_day_break[t]:
+                    reasons.append(f"單日跌破{fast}日均線且跌幅達{abs(ma_break_single_day_drop_pct):.0f}%")
                 if ma_fast[t] < ma_slow[t]:
                     reasons.append(f"{fast}日均線跌破{slow}日均線")
                 if reasons:
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, "、".join(reasons)))
                     in_position = False
                     stop = None
+                    peak = None
                 elif stop_mode == "pct":
                     stop = max(stop, next_stop(c, t))
+                elif stop_mode == "trailing_atr" and not pd.isna(atr_value[t]):
+                    peak = max(peak, c)
+                    stop = max(stop, peak - trailing_atr_multiplier * atr_value[t])
             elif entry_edge[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
                 stop = next_stop(c, t)
+                peak = c
                 events.append(
                     SignalEvent(symbol, self.name, Direction.BUY, c, t, f"站上{fast}日均線且{fast}>{slow}日均線+爆量，{stop_label}{stop:.2f}")
                 )

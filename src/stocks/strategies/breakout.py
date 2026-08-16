@@ -5,11 +5,16 @@ from stocks.models import Direction, SignalEvent
 
 
 class BreakoutStrategy:
-    """收盤價創前20日新高(唐奇安通道上軌，不含當天，跟atr_breakout同樣用shift(1)避免
-    look-ahead)且成交量放大(>1.5倍均量)才進場，代表突破有量能支撐，濾掉量縮的假突破。
-    出場是收盤價跌破前10日最低，停損取「進場價-2倍ATR」跟「前10日最低」兩者中先跌破的
-    那個。屬於強勢單邊行情用的策略，跟trend_following的差異是這裡看的是「創新高」而不是
-    均線排列，進場反應更快但假訊號也可能更多。"""
+    """突破策略。
+
+    進場：收盤價創前20日新高(唐奇安通道上軌) + 成交量>1.5倍均量 + 週線趨勢確認
+    (require_weekly_trend：週MA20斜率向上)
+
+    出場：收盤價跌破前10日最低，或跌破「進場價-2倍14日ATR」停損(stop_mode="atr"，進場後
+    固定不動)，兩者先發生的為準。也支援stop_mode="pct"(移動停損)。
+
+    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己當下也跌破
+    月線時，暫停新的BUY(SELL不受影響)。"""
 
     name = "breakout"
 
@@ -20,19 +25,17 @@ class BreakoutStrategy:
         volume_multiplier = params.get("volume_multiplier", 1.5)
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2)
-        stop_mode = params.get("stop_mode", "atr")  # "atr"(進場後固定不動) 或 "pct"(移動停損)，
-        # 2026-08-15新增供實測比較用——pct模式會把停損改成會跟漲上移的移動停損，跟原本
-        # 進場後就固定不動的ATR停損是不同行為，不是單純換算距離的公式而已。
+        stop_mode = params.get("stop_mode", "atr")  # "atr"(現行:進場價-2倍ATR，固定不動) 或
+        # "pct"(移動停損)
         stop_pct = params.get("stop_pct", 0.15)
-        require_weekly_trend = params.get("require_weekly_trend", False)  # 2026-08-16
-        # 使用者建議：日線突破進場太容易遇到假突破，額外要求週線級別的趨勢確認。
-        # config.json已經設成true當正式預設(全觀察清單10年回測驗證：勝率42.9%→47.6%、
-        # 獲利因子2.85→3.57、最大回撤-311.0→-192.7，代價是筆數變少、加總報酬因此降低)；
-        # 這裡程式碼本身的fallback仍是False，只有沒被config.json覆蓋的呼叫才會退回
-        # 沒有週線濾網的舊行為。
-        weekly_trend_mode = params.get("weekly_trend_mode", "slope")  # "slope"或"above_ma"，
-        # 見indicators.weekly_trend_confirmed。
+        require_weekly_trend = params.get("require_weekly_trend", False)  # 現行:True，額外
+        # 要求週線級別的趨勢確認，過濾日線假突破。
+        weekly_trend_mode = params.get("weekly_trend_mode", "slope")  # "slope"(現行)或
+        # "above_ma"，見indicators.weekly_trend_confirmed。
         weekly_ma_period = params.get("weekly_ma_period", 20)
+        entry_trigger = params.get("entry_trigger", "edge")  # "edge"(現行) 或 "level"(條件
+        # 當天成立就觸發，不要求邊緣)——已用scripts/backtest_breakout_entry_trigger.py
+        # 驗證過是no-op(逐檔筆數/報酬完全一致)，不需要改成level，保留參數供其他情境測試用。
 
         close = bars["close"]
         donchian_upper = bars["high"].rolling(window=high_lookback_days).max().shift(1)
@@ -45,8 +48,11 @@ class BreakoutStrategy:
             entry_condition = entry_condition & weekly_trend_confirmed(
                 close, weekly_ma_period, require_slope_up=(weekly_trend_mode == "slope")
             )
-        prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
-        entry_edge = entry_condition & ~prev_entry
+        if entry_trigger == "level":
+            entry_edge = entry_condition
+        else:
+            prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
+            entry_edge = entry_condition & ~prev_entry
 
         def next_stop(c: float, t) -> float:
             if stop_mode == "pct":
