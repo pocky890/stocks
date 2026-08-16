@@ -136,3 +136,27 @@ def test_fetch_valuations_for_range_returns_empty_on_failure_message(monkeypatch
     monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
 
     assert finmind_client.fetch_valuations_for_range("2330", "2026-07-01", "2026-07-02") == []
+
+
+def test_fetch_stock_name_returns_stock_name_field(monkeypatch):
+    payload = {
+        "msg": "success",
+        "data": [{"industry_category": "光電業", "stock_id": "3595", "stock_name": "山太士", "type": "emerging", "date": "2026-08-16"}],
+    }
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    assert finmind_client.fetch_stock_name("3595") == "山太士"
+
+
+def test_fetch_stock_name_returns_empty_string_when_not_found(monkeypatch):
+    payload = {"msg": "success", "data": []}
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    assert finmind_client.fetch_stock_name("9999999") == ""
+
+
+def test_fetch_stock_name_returns_empty_string_on_failure_message(monkeypatch):
+    payload = {"msg": "error", "data": []}
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    assert finmind_client.fetch_stock_name("3595") == ""

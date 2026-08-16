@@ -140,6 +140,7 @@ def test_add_symbol_immediately_computes_disabled_strategies(tmp_path, monkeypat
     monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", lambda d: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_margin_balances_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", lambda code: "")
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
@@ -164,6 +165,7 @@ def test_add_symbol_tpex_backfills_three_years_via_finmind(tmp_path, monkeypatch
     monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: (bars, "TPEx"))
     monkeypatch.setattr(daily_update.finmind_client, "fetch_margin_balances_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_valuations_latest", lambda: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", lambda code: "")
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
@@ -184,10 +186,40 @@ def test_add_symbol_tpex_backfills_three_years_via_finmind(tmp_path, monkeypatch
     assert row["foreign_net"] == 100
 
 
-def test_add_symbol_tpex_survives_valuation_ssl_failure(tmp_path, monkeypatch):
+def test_add_symbol_tpex_falls_back_to_finmind_when_valuation_ssl_fails(tmp_path, monkeypatch):
     """2026-08-13修正：新增上櫃股票時查估值(順便拿名稱)那段沒有try/except保護，
-    www.tpex.org.tw常有的SSL憑證問題會讓整個新增股票crash——改成失敗時退回name=""，
-    股票還是加得進觀察清單，只是暫時沒有名稱(下次每日更新查得到valuations時會補上)。"""
+    www.tpex.org.tw常有的SSL憑證問題會讓整個新增股票crash——先改成失敗時退回name=""，
+    2026-08-16再加一層：TPEx官方查詢失敗時改問FinMind的TaiwanStockInfo當備援，這個
+    dataset不受tpex.org.tw的SSL問題影響，通常查得到名稱，不用再等下次每日更新才補上。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    bar = Bar(symbol="3595", ts=datetime(2026, 8, 7), open=10, high=11, low=9, close=10, volume=100)
+    monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TPEx"))
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_margin_balances_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+
+    def raise_ssl_error():
+        raise requests.exceptions.SSLError("Missing Subject Key Identifier")
+
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_valuations_latest", raise_ssl_error)
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", lambda code: "山太士")
+
+    result = daily_update.add_symbol_to_watchlist(config, "3595")
+
+    assert result["ok"] is True
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT code, name FROM symbols WHERE code = '3595'").fetchone()
+    assert row["code"] == "3595"
+    assert row["name"] == "山太士"
+
+
+def test_add_symbol_tpex_survives_when_finmind_name_fallback_also_fails(tmp_path, monkeypatch):
+    """TPEx官方查詢跟FinMind備援都失敗時，還是要退回name=""、股票照樣加得進觀察清單，
+    不是讓新增股票整個crash——下次每日更新查得到任一來源時會補上。"""
     db_path = str(tmp_path / "test.db")
     init_db(db_path)
     config = make_config(db_path)
@@ -202,7 +234,11 @@ def test_add_symbol_tpex_survives_valuation_ssl_failure(tmp_path, monkeypatch):
     def raise_ssl_error():
         raise requests.exceptions.SSLError("Missing Subject Key Identifier")
 
+    def raise_ssl_error_for_code(code):
+        raise requests.exceptions.SSLError("Missing Subject Key Identifier")
+
     monkeypatch.setattr(daily_update.tpex_client, "fetch_valuations_latest", raise_ssl_error)
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", raise_ssl_error_for_code)
 
     result = daily_update.add_symbol_to_watchlist(config, "8299")
 

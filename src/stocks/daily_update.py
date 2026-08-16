@@ -325,6 +325,16 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     else:
         name = ""
 
+    if not name:
+        # 2026-08-16發現：上面兩個官方名稱來源都失敗時(尤其TPEx的SSL問題)，還有FinMind
+        # 的TaiwanStockInfo這個dataset可以當最後備援(不是fetch_valuations_for_range用的
+        # TaiwanStockPER，那個真的沒有名稱欄位)——同一個try/except容錯慣例，失敗一樣
+        # 退回name=""，不讓新增股票整個crash。
+        try:
+            name = finmind_client.fetch_stock_name(code)
+        except requests.RequestException:
+            name = ""
+
     # 順便標記官方產業分類代碼給circuit_breaker.py用，並把「全市場同產業」的股票也一起
     # 拉進來(is_watchlist=0，不會出現在觀察清單畫面)——不能只查這支股票自己的分類就好，
     # 不然如果這支股票剛好是觀察清單目前還沒有的產業，斷路器會因為完全沒有同業資料可以
