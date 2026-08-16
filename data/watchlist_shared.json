@@ -23,7 +23,7 @@
     "market": "TWSE",
     "sort_order": 2,
     "groups": [
-      "Pocky",
+      "隊長",
       "板弟"
     ]
   },
@@ -33,7 +33,7 @@
     "market": "TWSE",
     "sort_order": 3,
     "groups": [
-      "Pocky"
+      "隊長"
     ]
   },
   {
@@ -42,7 +42,7 @@
     "market": "TWSE",
     "sort_order": 4,
     "groups": [
-      "Pocky"
+      "隊長"
     ]
   },
   {
@@ -51,16 +51,7 @@
     "market": "TWSE",
     "sort_order": 5,
     "groups": [
-      "Pocky"
-    ]
-  },
-  {
-    "code": "5439",
-    "name": "高技",
-    "market": "TPEx",
-    "sort_order": 6,
-    "groups": [
-      "Pocky"
+      "隊長"
     ]
   },
   {
@@ -79,42 +70,6 @@
     "sort_order": 8,
     "groups": [
       "Sasa"
-    ]
-  },
-  {
-    "code": "6442",
-    "name": "光聖",
-    "market": "TWSE",
-    "sort_order": 9,
-    "groups": [
-      "Pocky"
-    ]
-  },
-  {
-    "code": "3105",
-    "name": "穩懋",
-    "market": "TPEx",
-    "sort_order": 10,
-    "groups": [
-      "Pocky"
-    ]
-  },
-  {
-    "code": "2344",
-    "name": "華邦電",
-    "market": "TWSE",
-    "sort_order": 11,
-    "groups": [
-      "Pocky"
-    ]
-  },
-  {
-    "code": "2327",
-    "name": "國巨*",
-    "market": "TWSE",
-    "sort_order": 12,
-    "groups": [
-      "Pocky"
     ]
   },
   {
@@ -197,6 +152,105 @@
     "sort_order": 21,
     "groups": [
       "翔翔"
+    ]
+  },
+  {
+    "code": "3443",
+    "name": "創意",
+    "market": "TWSE",
+    "sort_order": 22,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "3037",
+    "name": "欣興",
+    "market": "TWSE",
+    "sort_order": 23,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "3680",
+    "name": "家登",
+    "market": "TPEx",
+    "sort_order": 24,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "6187",
+    "name": "萬潤",
+    "market": "TPEx",
+    "sort_order": 25,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "6239",
+    "name": "力成",
+    "market": "TWSE",
+    "sort_order": 26,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "6531",
+    "name": "愛普*",
+    "market": "TWSE",
+    "sort_order": 27,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "6903",
+    "name": "巨漢",
+    "market": "TPEx",
+    "sort_order": 28,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "7769",
+    "name": "鴻勁",
+    "market": "TWSE",
+    "sort_order": 29,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "8046",
+    "name": "南電",
+    "market": "TWSE",
+    "sort_order": 30,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "3595",
+    "name": "",
+    "market": "TPEx",
+    "sort_order": 31,
+    "groups": [
+      "隊長"
+    ]
+  },
+  {
+    "code": "6640",
+    "name": "均華",
+    "market": "TPEx",
+    "sort_order": 32,
+    "groups": [
+      "隊長"
     ]
   }
 ]
