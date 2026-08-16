@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr, rolling_avg_volume, weekly_trend_confirmed
+from stocks.indicators import atr, rolling_avg_volume, sma, weekly_trend_confirmed
 from stocks.models import Direction, SignalEvent
 
 
@@ -8,13 +8,20 @@ class BreakoutStrategy:
     """突破策略。
 
     進場：收盤價創前20日新高(唐奇安通道上軌) + 成交量>1.5倍均量 + 週線趨勢確認
-    (require_weekly_trend：週MA20斜率向上)
+    (require_weekly_trend：週MA20斜率向上) + 60日均線>120日均線(require_long_regime，
+    現行:True) + 收盤價>240日均線/年線(require_above_long_ma，現行:True，跟regime疊加、
+    不是取代) + 月營收年增率>=0%(require_revenue_growth，現行:True，2026-08-16加的
+    基本面濾網，見db.attach_monthly_revenue_growth())。這三道濾網都是2026-08-16加的，
+    全觀察清單10年獲利因子2.84→3.69(疊加後)，20支已知近年下跌很兇的股票上加總報酬
+    62.2→233.5，細節見atr_breakout.py同批說明+scripts/backtest_revenue_growth_
+    filter.py。
 
     出場：收盤價跌破前10日最低，或跌破「進場價-2倍14日ATR」停損(stop_mode="atr"，進場後
     固定不動)，兩者先發生的為準。也支援stop_mode="pct"(移動停損)。
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己當下也跌破
-    月線時，暫停新的BUY(SELL不受影響)。"""
+    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
+    2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
+    circuit_breaker_own_ma_period=None)，理由見circuit_breaker.py開頭說明。"""
 
     name = "breakout"
 
@@ -36,6 +43,23 @@ class BreakoutStrategy:
         entry_trigger = params.get("entry_trigger", "edge")  # "edge"(現行) 或 "level"(條件
         # 當天成立就觸發，不要求邊緣)——已用scripts/backtest_breakout_entry_trigger.py
         # 驗證過是no-op(逐檔筆數/報酬完全一致)，不需要改成level，保留參數供其他情境測試用。
+        require_long_regime = params.get("require_long_regime", False)  # 研究參數(2026-08-16
+        # 使用者提議)：額外要求regime_fast_period日均線>regime_slow_period日均線(跟
+        # long_swing同一套長期regime判斷)才能進場，過濾空頭市場裡的反彈假突破新高。
+        # 預設False，未啟用，見scripts/backtest_long_regime_filter.py。
+        regime_fast_period = params.get("regime_fast_period", 60)
+        regime_slow_period = params.get("regime_slow_period", 120)
+        require_above_long_ma = params.get("require_above_long_ma", False)  # 研究參數(2026-08-16
+        # 使用者轉述Gemini建議)：額外要求收盤價>long_ma_period(現行:240，約年線)日均線，
+        # 跟require_long_regime(60/120日均線交叉)不同，這個量的是長期絕對位階。預設
+        # False，未啟用，見scripts/backtest_macro_regime_filters.py。
+        long_ma_period = params.get("long_ma_period", 240)
+        require_revenue_growth = params.get("require_revenue_growth", False)  # 研究參數
+        # (2026-08-16)：額外要求月營收年增率(revenue_yoy_growth，由db.attach_monthly_
+        # revenue_growth()接到bars上，已處理FinMind公告日+10天緩衝的look-ahead)>=
+        # revenue_growth_min_pct(現行:0.0)。缺資料時當NaN，一律當作「未知不擋」。
+        # 見scripts/backtest_revenue_growth_filter.py。預設False，未啟用。
+        revenue_growth_min_pct = params.get("revenue_growth_min_pct", 0.0)
 
         close = bars["close"]
         donchian_upper = bars["high"].rolling(window=high_lookback_days).max().shift(1)
@@ -48,6 +72,15 @@ class BreakoutStrategy:
             entry_condition = entry_condition & weekly_trend_confirmed(
                 close, weekly_ma_period, require_slope_up=(weekly_trend_mode == "slope")
             )
+        if require_long_regime:
+            regime_active = sma(close, regime_fast_period) > sma(close, regime_slow_period)
+            entry_condition = entry_condition & regime_active
+        if require_above_long_ma:
+            entry_condition = entry_condition & (close > sma(close, long_ma_period))
+        if require_revenue_growth:
+            revenue_growth = bars.get("revenue_yoy_growth", pd.Series(float("nan"), index=bars.index))
+            growth_ok = (revenue_growth >= revenue_growth_min_pct) | revenue_growth.isna()
+            entry_condition = entry_condition & growth_ok
         if entry_trigger == "level":
             entry_edge = entry_condition
         else:

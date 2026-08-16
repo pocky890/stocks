@@ -37,6 +37,7 @@ def test_check_and_update_survives_one_source_failing(tmp_path, monkeypatch):
 
     monkeypatch.setattr(daily_update, "_refresh_price_data", lambda cfg, symbols: 1)
     monkeypatch.setattr(daily_update, "_refresh_market_data_twse", lambda cfg, symbols: 2)
+    monkeypatch.setattr(daily_update, "_refresh_monthly_revenue", lambda cfg, symbols: False)
 
     def raise_ssl_error(cfg, symbols):
         raise requests.exceptions.SSLError("certificate verify failed")
@@ -62,6 +63,7 @@ def test_check_and_update_reports_no_errors_when_everything_succeeds(tmp_path, m
     monkeypatch.setattr(daily_update, "_refresh_price_data", lambda cfg, symbols: 0)
     monkeypatch.setattr(daily_update, "_refresh_market_data_twse", lambda cfg, symbols: 0)
     monkeypatch.setattr(daily_update, "_refresh_market_data_tpex", lambda cfg, symbols: False)
+    monkeypatch.setattr(daily_update, "_refresh_monthly_revenue", lambda cfg, symbols: False)
 
     result = daily_update.check_and_update(config)
 
@@ -85,6 +87,7 @@ def test_check_and_update_prunes_signal_events_older_than_retention(tmp_path, mo
     monkeypatch.setattr(daily_update, "_refresh_price_data", lambda cfg, symbols: 0)
     monkeypatch.setattr(daily_update, "_refresh_market_data_twse", lambda cfg, symbols: 0)
     monkeypatch.setattr(daily_update, "_refresh_market_data_tpex", lambda cfg, symbols: False)
+    monkeypatch.setattr(daily_update, "_refresh_monthly_revenue", lambda cfg, symbols: False)
 
     daily_update.check_and_update(config)
 
@@ -112,6 +115,8 @@ def test_add_symbol_falls_back_to_earlier_date_when_todays_valuation_report_not_
 
     monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", fake_valuations)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
@@ -138,6 +143,8 @@ def test_add_symbol_immediately_computes_disabled_strategies(tmp_path, monkeypat
     monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TWSE"))
     monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", lambda d: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", lambda code: "")
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
@@ -173,6 +180,8 @@ def test_add_symbol_tpex_backfills_three_years_via_finmind(tmp_path, monkeypatch
         return [{"symbol": symbol, "date": start_date, "foreign_net": 100, "trust_net": 50, "dealer_net": 0, "total_net": 150}]
 
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", fake_flows)
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
 
     result = daily_update.add_symbol_to_watchlist(config, "8299")
 
@@ -195,6 +204,8 @@ def test_add_symbol_tpex_falls_back_to_finmind_when_valuation_ssl_fails(tmp_path
     bar = Bar(symbol="3595", ts=datetime(2026, 8, 7), open=10, high=11, low=9, close=10, volume=100)
     monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TPEx"))
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
@@ -223,6 +234,8 @@ def test_add_symbol_tpex_survives_when_finmind_name_fallback_also_fails(tmp_path
     bar = Bar(symbol="8299", ts=datetime(2026, 8, 7), open=10, high=11, low=9, close=10, volume=100)
     monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TPEx"))
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
@@ -272,6 +285,8 @@ def test_add_symbol_twse_also_backfills_three_years_via_finmind(tmp_path, monkey
         return [{"symbol": symbol, "date": start_date, "foreign_net": 100, "trust_net": 50, "dealer_net": 0, "total_net": 150}]
 
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", fake_flows)
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
 
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
@@ -280,6 +295,217 @@ def test_add_symbol_twse_also_backfills_three_years_via_finmind(tmp_path, monkey
     with connect(db_path) as conn:
         row = conn.execute("SELECT * FROM institutional_flows WHERE symbol = '2408'").fetchone()
     assert row["foreign_net"] == 100
+
+
+def test_add_symbol_twse_backfills_valuation_history_via_finmind(tmp_path, monkeypatch):
+    """2026-08-16修正：新增股票時估值(PE/殖利率/PB)之前只抓最新一天，其實
+    finmind_client.fetch_valuations_for_range()早就存在(既有股票的每日增量回補一直
+    在用)，只是新增股票這裡沒接上——比照三大法人，補到跟股價一樣的完整範圍。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    bars = [
+        Bar(symbol="2408", ts=datetime(2023, 8, 7), open=10, high=11, low=9, close=10, volume=100),
+        Bar(symbol="2408", ts=datetime(2026, 8, 7), open=12, high=13, low=11, close=12, volume=200),
+    ]
+    monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: (bars, "TWSE"))
+    monkeypatch.setattr(
+        daily_update.twse_client,
+        "fetch_valuations_for_date",
+        lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
+    )
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+
+    captured = {}
+
+    def fake_valuation_history(symbol, start_date, end_date):
+        captured["args"] = (symbol, start_date, end_date)
+        return [{"symbol": symbol, "date": start_date, "pe_ratio": 8.0, "dividend_yield": 3.0, "pb_ratio": 1.5}]
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", fake_valuation_history)
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
+
+    result = daily_update.add_symbol_to_watchlist(config, "2408")
+
+    assert result["ok"] is True
+    assert captured["args"] == ("2408", "2023-08-07", "2026-08-07")
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT * FROM valuations WHERE symbol = '2408' ORDER BY date").fetchall()
+    # 歷史回補那筆(2023-08-07)跟官方當天快照(2026-08-07)都要進去，且當天那筆維持官方
+    # 來源的值(pe_ratio=10)，不會被FinMind同一天的資料覆蓋掉——這裡兩者日期不同，
+    # 不會互相覆蓋，各自都在。
+    assert {r["date"] for r in rows} == {"2023-08-07", "2026-08-07"}
+    history_row = next(r for r in rows if r["date"] == "2023-08-07")
+    assert history_row["pe_ratio"] == 8.0
+    today_row = next(r for r in rows if r["date"] == "2026-08-07")
+    assert today_row["pe_ratio"] == 10
+
+
+def test_add_symbol_valuation_history_failure_does_not_block_flows(tmp_path, monkeypatch):
+    """估值歷史回補失敗不該讓三大法人回補或整個新增流程失敗——跟三大法人失敗時的
+    容錯是對稱的兩個獨立try/except。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    bar = Bar(symbol="2408", ts=datetime(2026, 8, 7), open=10, high=11, low=9, close=10, volume=100)
+    monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TWSE"))
+    monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", lambda d: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", lambda code: "")
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(
+        daily_update.finmind_client,
+        "fetch_institutional_flows_for_range",
+        lambda s, a, b: [{"symbol": s, "date": b, "foreign_net": 100, "trust_net": 50, "dealer_net": 0, "total_net": 150}],
+    )
+
+    def raise_error(symbol, start_date, end_date):
+        raise requests.exceptions.ConnectionError("boom")
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", raise_error)
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
+
+    result = daily_update.add_symbol_to_watchlist(config, "2408")
+
+    assert result["ok"] is True
+    with connect(db_path) as conn:
+        flow_row = conn.execute("SELECT * FROM institutional_flows WHERE symbol = '2408'").fetchone()
+        valuation_row = conn.execute("SELECT * FROM valuations WHERE symbol = '2408'").fetchone()
+    assert flow_row["foreign_net"] == 100
+    assert valuation_row is None
+
+
+def test_add_symbol_twse_backfills_monthly_revenue_via_finmind(tmp_path, monkeypatch):
+    """2026-08-16新增：新股票加入時月營收也比照三大法人/估值，用FinMind一次補到跟股價
+    一樣的完整範圍——基本面濾網研究用，目前沒有任何策略讀取這份資料。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    bars = [
+        Bar(symbol="2408", ts=datetime(2023, 8, 7), open=10, high=11, low=9, close=10, volume=100),
+        Bar(symbol="2408", ts=datetime(2026, 8, 7), open=12, high=13, low=11, close=12, volume=200),
+    ]
+    monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: (bars, "TWSE"))
+    monkeypatch.setattr(
+        daily_update.twse_client,
+        "fetch_valuations_for_date",
+        lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
+    )
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+
+    captured = {}
+
+    def fake_revenue_history(symbol, start_date, end_date):
+        captured["args"] = (symbol, start_date, end_date)
+        return [{"symbol": symbol, "date": start_date, "revenue_year": 2023, "revenue_month": 7, "revenue": 500}]
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", fake_revenue_history)
+
+    result = daily_update.add_symbol_to_watchlist(config, "2408")
+
+    assert result["ok"] is True
+    assert captured["args"] == ("2408", "2023-08-07", "2026-08-07")
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT * FROM monthly_revenue WHERE symbol = '2408'").fetchone()
+    assert row["revenue"] == 500
+    assert row["revenue_year"] == 2023
+    assert row["revenue_month"] == 7
+
+
+def test_add_symbol_monthly_revenue_failure_does_not_block_flows(tmp_path, monkeypatch):
+    """月營收歷史回補失敗不該讓三大法人/估值回補或整個新增流程失敗——三個FinMind呼叫
+    各自獨立try/except。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    bar = Bar(symbol="2408", ts=datetime(2026, 8, 7), open=10, high=11, low=9, close=10, volume=100)
+    monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TWSE"))
+    monkeypatch.setattr(daily_update.twse_client, "fetch_valuations_for_date", lambda d: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", lambda code: "")
+    monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
+    monkeypatch.setattr(
+        daily_update.finmind_client,
+        "fetch_institutional_flows_for_range",
+        lambda s, a, b: [{"symbol": s, "date": b, "foreign_net": 100, "trust_net": 50, "dealer_net": 0, "total_net": 150}],
+    )
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+
+    def raise_error(symbol, start_date, end_date):
+        raise requests.exceptions.ConnectionError("boom")
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", raise_error)
+
+    result = daily_update.add_symbol_to_watchlist(config, "2408")
+
+    assert result["ok"] is True
+    with connect(db_path) as conn:
+        flow_row = conn.execute("SELECT * FROM institutional_flows WHERE symbol = '2408'").fetchone()
+        revenue_row = conn.execute("SELECT * FROM monthly_revenue WHERE symbol = '2408'").fetchone()
+    assert flow_row["foreign_net"] == 100
+    assert revenue_row is None
+
+
+def test_refresh_monthly_revenue_queries_from_day_after_last_synced_date(tmp_path, monkeypatch):
+    """既有股票的月營收增量更新：查詢範圍是「這支股票monthly_revenue最後一筆日期+1」~
+    「今天」，跟三大法人/估值的TPEx增量路徑同一套_fetch_range_per_symbol邏輯，只是
+    不分市場(月營收兩個市場共用同一個FinMind dataset)。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    with connect(db_path) as conn:
+        add_to_watchlist(conn, "2330", market="TWSE")
+        conn.execute(
+            "INSERT INTO monthly_revenue (symbol, date, revenue_year, revenue_month, revenue) "
+            "VALUES ('2330', '2026-08-01', 2026, 7, 1000)"
+        )
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls):
+            return datetime(2026, 8, 7)
+
+    monkeypatch.setattr(daily_update, "datetime", FrozenDateTime)
+
+    captured = {}
+
+    def fake_revenue(symbol, start_date, end_date):
+        captured["args"] = (symbol, start_date, end_date)
+        return []
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", fake_revenue)
+
+    daily_update._refresh_monthly_revenue(config, {"2330"})
+
+    assert captured["args"] == ("2330", "2026-08-02", "2026-08-07")
+
+
+def test_refresh_monthly_revenue_failure_returns_false_without_crashing(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    with connect(db_path) as conn:
+        add_to_watchlist(conn, "2330", market="TWSE")
+
+    def raise_error(symbol, start_date, end_date):
+        raise requests.exceptions.ConnectionError("boom")
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", raise_error)
+
+    result = daily_update._refresh_monthly_revenue(config, {"2330"})
+
+    assert result is False
 
 
 def test_add_symbol_twse_falls_back_to_latest_day_when_finmind_fails(tmp_path, monkeypatch):
@@ -303,6 +529,8 @@ def test_add_symbol_twse_falls_back_to_latest_day_when_finmind_fails(tmp_path, m
         raise requests.exceptions.ConnectionError("boom")
 
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", raise_error)
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
 
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
@@ -399,6 +627,8 @@ def test_add_symbol_to_watchlist_accepts_chinese_name(tmp_path, monkeypatch):
     bar = Bar(symbol="2408", ts=datetime(2026, 8, 7), open=10, high=11, low=9, close=10, volume=100)
     monkeypatch.setattr(daily_update, "detect_market_and_fetch_bars", lambda code, period: ([bar], "TWSE"))
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
     monkeypatch.setattr(
         daily_update.twse_client,
         "fetch_valuations_for_date",
@@ -450,6 +680,7 @@ def test_refresh_market_data_tpex_queries_from_day_after_last_synced_date(tmp_pa
 
     monkeypatch.setattr(daily_update, "datetime", FrozenDateTime)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_ex_dividend_schedule", lambda: [])
 
     captured = {}
@@ -484,6 +715,7 @@ def test_refresh_market_data_tpex_skips_symbol_already_synced_today(tmp_path, mo
 
     monkeypatch.setattr(daily_update, "datetime", FrozenDateTime)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_ex_dividend_schedule", lambda: [])
 
     calls = []

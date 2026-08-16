@@ -16,6 +16,7 @@ BASE_URL = "https://api.finmindtrade.com/api/v4/data"
 DATASET = "TaiwanStockInstitutionalInvestorsBuySell"
 VALUATION_DATASET = "TaiwanStockPER"
 STOCK_INFO_DATASET = "TaiwanStockInfo"
+MONTHLY_REVENUE_DATASET = "TaiwanStockMonthRevenue"
 
 FOREIGN_NAMES = {"Foreign_Investor", "Foreign_Dealer_Self"}
 TRUST_NAMES = {"Investment_Trust"}
@@ -77,6 +78,29 @@ def fetch_valuations_for_range(symbol: str, start_date: str, end_date: str) -> l
             "pb_ratio": row["PBR"],
         }
         for row in _fetch_range(VALUATION_DATASET, symbol, start_date, end_date)
+    ]
+
+
+def fetch_monthly_revenue_for_range(symbol: str, start_date: str, end_date: str) -> list[dict]:
+    """回傳[{symbol, date, revenue_year, revenue_month, revenue}, ...]，日期升序排列。
+    TaiwanStockMonthRevenue不分上市/上櫃，兩個市場都適用同一個dataset，不用像
+    institutional_flows/valuations那樣分開處理。
+
+    2026-08-16基本面濾網研究：這個dataset的"date"欄位是「營收所屬月份的下個月1號」
+    (例如2025年1月營收的date是2025-02-01)，不是公司實際公告日期——公司法規公告
+    期限是次月10日前，所以用這個date當作「這筆資料何時可以取得」的近似值，會提早
+    最多約9天知道這筆營收，用於策略回測時要注意這個微小的look-ahead——目前這份資料
+    還沒有任何策略讀取，之後設計進場濾網時要處理這個時間差(用date往後加幾天當作真正
+    可用日期，或直接用月底當保守估計)，不能假設date當天就查得到。"""
+    return [
+        {
+            "symbol": symbol,
+            "date": row["date"],
+            "revenue_year": row["revenue_year"],
+            "revenue_month": row["revenue_month"],
+            "revenue": row["revenue"],
+        }
+        for row in _fetch_range(MONTHLY_REVENUE_DATASET, symbol, start_date, end_date)
     ]
 
 

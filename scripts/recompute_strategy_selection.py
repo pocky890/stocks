@@ -20,10 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from stocks.config import load_config
 from stocks.db import (
     attach_institutional_flows,
+    attach_monthly_revenue_growth,
     bars_to_dataframe,
     connect,
     fetch_bars_daily,
     fetch_institutional_flows,
+    fetch_monthly_revenue,
     fetch_watchlist,
     get_disabled_strategies,
     set_disabled_strategies,
@@ -34,7 +36,6 @@ from stocks.strategy_selection import (
     MIN_PROFIT_FACTOR,
     MIN_TOTAL_RETURN_PCT,
     MIN_TRADES_FOR_RANKING,
-    MIN_TRADES_OVERRIDES,
     should_disable,
     summarize_strategy,
 )
@@ -56,18 +57,18 @@ def main():
                 print(f"{symbol} {name}: 沒有日線資料，跳過")
                 continue
             bars = attach_institutional_flows(bars, fetch_institutional_flows(conn, symbol))
+            bars = attach_monthly_revenue_growth(bars, [dict(r) for r in fetch_monthly_revenue(conn, symbol)])
             previously_disabled = get_disabled_strategies(conn, symbol)
 
         print(f"=== {symbol} {name} ===")
         newly_disabled = []
         for strategy_name in sorted(NOTIFIABLE_STRATEGIES):
             summary = summarize_strategy(symbol, bars, strategy_name, config.strategy_params.get(strategy_name, {}))
-            disable = should_disable(summary, strategy_name)  # 每種情況都統一交給should_disable判斷，不要各自分支硬寫
-            min_trades = MIN_TRADES_OVERRIDES.get(strategy_name, MIN_TRADES_FOR_RANKING)
+            disable = should_disable(summary)  # 每種情況都統一交給should_disable判斷，不要各自分支硬寫
 
             if not summary:
                 print(f"  {strategy_name}: 沒有完整的買賣配對 -> {'排除' if disable else '保留'}")
-            elif summary["n"] < min_trades:
+            elif summary["n"] < MIN_TRADES_FOR_RANKING:
                 print(f"  {strategy_name}: {summary['n']}筆(樣本太少) -> {'排除' if disable else '保留'}")
             else:
                 excl_best = summary.get("avg_return_excluding_best_pct")

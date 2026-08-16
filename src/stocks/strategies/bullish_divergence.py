@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr, macd, rsi, sma, stochastic_kd
+from stocks.indicators import atr, macd, rolling_avg_volume, rsi, sma, stochastic_kd
 from stocks.models import Direction, SignalEvent
 
 
@@ -56,6 +56,20 @@ class BullishDivergenceStrategy:
         # 柱狀圖比前一天回升。預設False，未啟用。
         require_kd_bullish = params.get("require_kd_bullish", False)  # 初步訊號額外要求
         # K>D(偏多)。預設False，未啟用。
+        require_capitulation_volume = params.get("require_capitulation_volume", False)  # 研究
+        # 參數(2026-08-16使用者轉述Gemini建議)：初步訊號(創新低)當天額外要求成交量放大
+        # (恐慌性拋售換手)。預設False，未啟用，見
+        # scripts/backtest_bullish_divergence_volume_confirm.py。
+        capitulation_volume_avg_period = params.get("capitulation_volume_avg_period", 20)
+        capitulation_volume_multiplier = params.get("capitulation_volume_multiplier", 1.5)
+        require_long_uptrend_intact = params.get("require_long_uptrend_intact", False)  # 研究
+        # 參數(2026-08-16使用者轉述Gemini建議)：額外要求long_trend_ma_period(現行:120)日
+        # 均線斜率向上，才准許抄底——不是要求「當下站上」這條均線(那樣會跟抄底的前提
+        # 矛盾)，是區分「長線仍是多頭、只是短線跌深」(抄底有效) vs「結構性空頭裡的死貓
+        # 反彈」(抄底容易被巴)，跟long_swing原本就有的regime判斷同一個精神，套用在
+        # 抄底類策略上。預設False，未啟用，見scripts/backtest_macro_regime_filters.py。
+        long_trend_ma_period = params.get("long_trend_ma_period", 120)
+        long_trend_slope_lookback = params.get("long_trend_slope_lookback", 20)
         require_reversal_confirm = params.get("require_reversal_confirm", False)  # 現行:True。
         # 初步訊號出現後不直接進場，改成等待價格反轉確認訊號出現才進場(見class docstring)。
         reversal_confirm_ma_period = params.get("reversal_confirm_ma_period", 5)  # 確認訊號
@@ -64,6 +78,13 @@ class BullishDivergenceStrategy:
         # KD(K>D)。預設False，未啟用。
         require_reversal_macd = params.get("require_reversal_macd", False)  # 現行:True。
         # 確認訊號額外納入MACD柱狀圖回升。
+        require_reversal_volume = params.get("require_reversal_volume", False)  # 研究參數
+        # (2026-08-16使用者轉述Gemini建議)：確認訊號額外納入「反轉當天量能放大」(換手量)，
+        # 跟require_reversal_kd/require_reversal_macd同一套confirm_signals機制、一起計入
+        # reversal_confirm_min_signals。預設False，未啟用，見
+        # scripts/backtest_bullish_divergence_volume_confirm.py。
+        reversal_volume_avg_period = params.get("reversal_volume_avg_period", 20)
+        reversal_volume_multiplier = params.get("reversal_volume_multiplier", 1.5)
         reversal_confirm_macd_positive = params.get("reversal_confirm_macd_positive", False)  # MACD
         # 確認訊號額外要求柱狀圖轉正(>0)，不是只要求比昨天回升。預設False，未啟用。
         reversal_confirm_macd_streak_days = params.get("reversal_confirm_macd_streak_days", 1)  # MACD
@@ -125,6 +146,12 @@ class BullishDivergenceStrategy:
         if require_kd_bullish:
             k, d = stochastic_kd(bars["high"], bars["low"], close)
             entry_condition = entry_condition & (k > d)
+        if require_capitulation_volume:
+            avg_vol_capitulation = rolling_avg_volume(bars["volume"], capitulation_volume_avg_period)
+            entry_condition = entry_condition & (bars["volume"] > capitulation_volume_multiplier * avg_vol_capitulation)
+        if require_long_uptrend_intact:
+            long_trend_ok = sma(close, long_trend_ma_period).diff(long_trend_slope_lookback) > 0
+            entry_condition = entry_condition & long_trend_ok
 
         prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
         entry_edge = entry_condition & ~prev_entry
@@ -149,6 +176,9 @@ class BullishDivergenceStrategy:
                 if reversal_confirm_macd_positive:
                     macd_confirms = macd_confirms & (confirm_histogram > 0)
                 confirm_signals.append(macd_confirms)
+            if require_reversal_volume:
+                avg_vol_reversal = rolling_avg_volume(bars["volume"], reversal_volume_avg_period)
+                confirm_signals.append(bars["volume"] > reversal_volume_multiplier * avg_vol_reversal)
             signal_count = sum(s.fillna(False).astype(int) for s in confirm_signals)
             confirmed_ok = (signal_count >= reversal_confirm_min_signals).to_numpy()
 

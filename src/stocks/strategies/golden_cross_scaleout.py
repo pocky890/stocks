@@ -16,6 +16,14 @@ class GoldenCrossScaleOutStrategy:
       當天成交量 > 20日均量            +1
       RSI(14)未超買(<70)             +1
 
+    達標分數之外，另外要求60日均線>120日均線(require_long_regime，現行:True) + 收盤價
+    >240日均線/年線(require_above_long_ma，現行:True，跟regime疊加、不是取代) + 月營收
+    年增率>=0%(require_revenue_growth，現行:True，2026-08-16加的基本面濾網，見
+    db.attach_monthly_revenue_growth())才能進場。這三道濾網都是2026-08-16加的，
+    全觀察清單10年獲利因子2.54→2.81(疊加regime+MA240+營收後)、20支已知近年下跌很兇
+    的股票上獲利因子0.79→0.92~0.96，細節見scripts/backtest_long_regime_filter.py/
+    backtest_macro_regime_filters.py/backtest_revenue_growth_filter.py。
+
     出場：跌破15%移動停損(stop_mode="pct")，一買配一賣。
 
     也支援stop_mode="ma_scaleout"：分兩階段出場，不是一次全出：
@@ -23,8 +31,9 @@ class GoldenCrossScaleOutStrategy:
       階段2(賣剩餘一半)：收盤跌破10日均線，或5日均線跌破20日均線(死亡交叉)
     這個模式一買配兩賣，要用simulate_scaleout_trades配對，不能套simulate_round_trips。
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己當下也跌破
-    月線時，暫停新的BUY(SELL不受影響)。"""
+    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
+    2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
+    circuit_breaker_own_ma_period=None)，理由見circuit_breaker.py開頭說明。"""
 
     name = "golden_cross_scaleout"
 
@@ -47,6 +56,24 @@ class GoldenCrossScaleOutStrategy:
         stop_mode = params.get("stop_mode", "pct")  # "pct"(現行:單一15%移動停損全出，一買
         # 配一賣) 或 "ma_scaleout"(均線分批出場，一買配兩賣)
         stop_pct = params.get("stop_pct", 0.15)
+        require_long_regime = params.get("require_long_regime", False)  # 研究參數(2026-08-16
+        # 使用者提議)：額外要求regime_fast_period日均線>regime_slow_period日均線(跟
+        # long_swing同一套長期regime判斷)才能進場——這支策略的打分制6項條件全部是5~20天
+        # 級別的短線型態，空頭市場的反彈一樣容易達標，缺一道長期趨勢確認。預設False，
+        # 未啟用，見scripts/backtest_long_regime_filter.py。
+        regime_fast_period = params.get("regime_fast_period", 60)
+        regime_slow_period = params.get("regime_slow_period", 120)
+        require_above_long_ma = params.get("require_above_long_ma", False)  # 研究參數(2026-08-16
+        # 使用者轉述Gemini建議)：額外要求收盤價>long_ma_period(現行:240，約年線)日均線，
+        # 跟require_long_regime(60/120日均線交叉)不同，這個量的是長期絕對位階。預設
+        # False，未啟用，見scripts/backtest_macro_regime_filters.py。
+        long_ma_period = params.get("long_ma_period", 240)
+        require_revenue_growth = params.get("require_revenue_growth", False)  # 研究參數
+        # (2026-08-16)：額外要求月營收年增率(revenue_yoy_growth，由db.attach_monthly_
+        # revenue_growth()接到bars上，已處理FinMind公告日+10天緩衝的look-ahead)>=
+        # revenue_growth_min_pct(現行:0.0)。缺資料時當NaN，一律當作「未知不擋」。
+        # 見scripts/backtest_revenue_growth_filter.py。預設False，未啟用。
+        revenue_growth_min_pct = params.get("revenue_growth_min_pct", 0.0)
 
         close = bars["close"]
         ma_fast = sma(close, fast)
@@ -76,6 +103,15 @@ class GoldenCrossScaleOutStrategy:
             + not_overbought.astype(int) * score_rsi
         )
         entry_state = score >= score_threshold
+        if require_long_regime:
+            regime_active = sma(close, regime_fast_period) > sma(close, regime_slow_period)
+            entry_state = entry_state & regime_active
+        if require_above_long_ma:
+            entry_state = entry_state & (close > sma(close, long_ma_period))
+        if require_revenue_growth:
+            revenue_growth = bars.get("revenue_yoy_growth", pd.Series(float("nan"), index=bars.index))
+            growth_ok = (revenue_growth >= revenue_growth_min_pct) | revenue_growth.isna()
+            entry_state = entry_state & growth_ok
 
         if stop_mode == "pct":
             events: list[SignalEvent] = []

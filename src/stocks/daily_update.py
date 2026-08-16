@@ -10,6 +10,11 @@ primary key，INSERT OR REPLACE蓋掉重疊範圍不會出錯)。2026-08-13把TP
 問題)，FinMind穩定得多。除權息預告表還是走TPEx官方API(沒觀察到同樣的SSL問題，也還沒
 查證FinMind有沒有等效資料集)。融資融券資料2026-08-16拿掉(dashboard圖表用不到，改成
 成交量子圖)，不再抓取。
+
+月營收(monthly_revenue)：2026-08-16新增，基本面濾網研究用。跟三大法人/估值不同的是
+不分上市/上櫃，兩個市場共用同一個FinMind dataset(`TaiwanStockMonthRevenue`)，`_refresh_
+monthly_revenue`對整個觀察清單(不分市場)用同一套`_fetch_range_per_symbol`。目前還沒有
+任何策略讀取這份資料。
 """
 import time
 from datetime import datetime, timedelta
@@ -21,11 +26,13 @@ from stocks.config import Config
 from stocks.db import (
     add_to_watchlist,
     attach_institutional_flows,
+    attach_monthly_revenue_growth,
     bars_to_dataframe,
     connect,
     export_watchlist_snapshot,
     fetch_bars_daily,
     fetch_institutional_flows,
+    fetch_monthly_revenue,
     fetch_synced_market_dates,
     fetch_trading_dates,
     fetch_watchlist,
@@ -33,6 +40,7 @@ from stocks.db import (
     insert_bars_daily,
     insert_ex_dividend_schedule,
     insert_institutional_flows,
+    insert_monthly_revenue,
     insert_valuations,
     mark_market_data_synced,
     prune_signal_events,
@@ -97,11 +105,11 @@ def _refresh_market_data_twse(config: Config, symbols: set[str]) -> int:
     return len(todo_dates)
 
 
-def _fetched_dates_for_symbols(config: Config, symbols: set[str]) -> set[str]:
+def _fetched_dates_for_symbols(config: Config, symbols: set[str], table: str = "institutional_flows") -> set[str]:
     placeholders = ",".join("?" * len(symbols))
     with connect(config.db_path) as conn:
         rows = conn.execute(
-            f"SELECT DISTINCT date FROM institutional_flows WHERE symbol IN ({placeholders})",
+            f"SELECT DISTINCT date FROM {table} WHERE symbol IN ({placeholders})",
             tuple(symbols),
         ).fetchall()
     return {r["date"] for r in rows}
@@ -132,6 +140,36 @@ def _fetch_range_per_symbol(config: Config, symbols: set[str], table: str, fetch
         if start_date <= today_str:
             rows += fetch_fn(symbol, start_date, today_str)
     return rows
+
+
+def _refresh_monthly_revenue(config: Config, symbols: set[str]) -> bool:
+    """月營收(monthly_revenue)跟三大法人/估值不一樣：TaiwanStockMonthRevenue不分上市/
+    上櫃，兩個市場共用同一個FinMind dataset，不需要像institutional_flows/valuations
+    那樣依市場分成TWSE官方API/TPEx FinMind兩條路——這裡對整個觀察清單(不分市場)用同一套
+    `_fetch_range_per_symbol`(跟TPEx那條路共用同一個helper，只是table/fetch_fn換成
+    monthly_revenue/fetch_monthly_revenue_for_range)。月營收本身一個月才更新一次，
+    這裡沒有額外做「本月是否已經抓過」的節流判斷——`_fetch_range_per_symbol`本來就是
+    查「上次抓到的日期+1」~「今天」，同一個月內重複執行時FinMind會回傳空結果(還沒有
+    下個月的資料)，INSERT OR REPLACE也不會製造重複，多跑幾次沒有副作用，不需要額外
+    的節流機制。"""
+    if not symbols:
+        return False
+
+    dates_before = _fetched_dates_for_symbols(config, symbols, table="monthly_revenue")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    try:
+        revenue_rows = _fetch_range_per_symbol(
+            config, symbols, "monthly_revenue", finmind_client.fetch_monthly_revenue_for_range, today_str
+        )
+    except requests.RequestException:
+        revenue_rows = []
+
+    with connect(config.db_path) as conn:
+        if revenue_rows:
+            insert_monthly_revenue(conn, revenue_rows)
+
+    dates_after = _fetched_dates_for_symbols(config, symbols, table="monthly_revenue")
+    return len(dates_after - dates_before) > 0
 
 
 def _refresh_market_data_tpex(config: Config, symbols: set[str]) -> bool:
@@ -249,9 +287,22 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     「日期」而非「日期+股票」為單位在追蹤，其他股票已經讓那些日期標記成「抓過了」，新股票
     不會自動觸發回頭補值，2026-08-08改成兩個市場都直接用FinMind繞開這個限制，不用再手動跑
     `fetch_market_data.py --full`才能讓新股票的籌碼類策略(chip_momentum等)有完整樣本可以
-    判斷。FinMind失敗的話(額度/連線問題)退回只抓最新一天，不讓新增股票整個失敗。估值
-    (PE/殖利率/PB)還是只抓最新一天不變——FinMind有沒有等效資料集還沒查證，這個沒被任何
-    策略用到，之後每天累積即可。
+    判斷。FinMind失敗的話(額度/連線問題)退回只抓最新一天，不讓新增股票整個失敗。
+
+    估值(PE/殖利率/PB)：2026-08-16之前這裡只抓最新一天，docstring寫著「FinMind有沒有
+    等效資料集還沒查證」——後來發現`finmind_client.fetch_valuations_for_range()`
+    (TaiwanStockPER)其實早就存在、而且`_fetch_range_per_symbol`那條既有股票每日增量
+    回補的路徑本來就在用它，只是新增股票這裡沒接上，純粹是漏掉，不是真的沒有對應
+    API。跟三大法人同一套try/except容錯(FinMind失敗就退回只有當天快照)，兩個
+    FinMind呼叫各自獨立try/except，其中一個失敗不影響另一個。當天的估值快照(有
+    公司名稱可以用，FinMind的PER dataset沒有名稱欄位)還是照舊從TWSE/TPEx官方API抓，
+    只是現在會在FinMind回補的10年歷史"之後"再寫入一次，確保當天這筆用的是官方來源、
+    不會被FinMind同一天的資料蓋掉。
+
+    月營收(monthly_revenue)：2026-08-16新增，基本面濾網研究用——`TaiwanStockMonthRevenue`
+    不分上市/上櫃，兩個市場都適用同一個dataset，不用像三大法人/估值那樣分開處理。跟前兩者
+    同一套try/except容錯，三個FinMind呼叫各自獨立，任一個失敗不影響其他兩個。目前還沒有
+    任何策略讀取這份資料，純粹先把歷史補齊供之後設計濾網/回測用。
 
     code參數也接受中文簡稱(例如「台積電」)，會先透過_resolve_symbol_input()解析成代號
     再往下走，跟純打代號是同一條路徑、同一個結果。"""
@@ -279,10 +330,26 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
 
     try:
         flows = finmind_client.fetch_institutional_flows_for_range(code, earliest_date, latest_date)
-        chips_note = "三大法人已透過FinMind補到近10年歷史；估值只先抓最新一天，之後每天累積"
+        flows_note = "三大法人已透過FinMind補到近10年歷史"
     except requests.RequestException:
         flows = []
-        chips_note = "三大法人歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料；估值只先抓最新一天"
+        flows_note = "三大法人歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料"
+
+    try:
+        valuation_history = finmind_client.fetch_valuations_for_range(code, earliest_date, latest_date)
+        valuation_note = "估值(PE/殖利率/PB)已透過FinMind補到近10年歷史"
+    except requests.RequestException:
+        valuation_history = []
+        valuation_note = "估值歷史回補失敗(FinMind連線問題)，先只有之後每天累積的資料"
+
+    try:
+        revenue_history = finmind_client.fetch_monthly_revenue_for_range(code, earliest_date, latest_date)
+        revenue_note = "月營收已透過FinMind補到近10年歷史"
+    except requests.RequestException:
+        revenue_history = []
+        revenue_note = "月營收歷史回補失敗(FinMind連線問題)，先只有之後每月累積的資料"
+
+    chips_note = f"{flows_note}；{valuation_note}；{revenue_note}"
 
     if market == "TPEx":
         # 這裡故意還是打tpex_client(不是finmind_client)，因為新股票的名稱要從這個回應的
@@ -350,8 +417,14 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
         export_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
         if flows:
             insert_institutional_flows(conn, flows)
+        if valuation_history:
+            insert_valuations(conn, valuation_history)
         if valuations:
+            # 官方來源(有名稱)的當天快照最後寫入，確保今天這筆不會被上面FinMind範圍
+            # 回補的同一天資料覆蓋掉(INSERT OR REPLACE以後寫入的為準)。
             insert_valuations(conn, valuations)
+        if revenue_history:
+            insert_monthly_revenue(conn, revenue_history)
 
     # 新增當下立刻跑一次排除評估，不用等到下個月的排程——兩個市場這時三大法人都已經有
     # 10年歷史(FinMind)，chip_momentum/golden_cross_scaleout這種靠籌碼判斷的策略可以馬上
@@ -361,6 +434,7 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
     with connect(config.db_path) as conn:
         symbol_bars = bars_to_dataframe(fetch_bars_daily(conn, code), ts_field="date")
         symbol_bars = attach_institutional_flows(symbol_bars, fetch_institutional_flows(conn, code))
+        symbol_bars = attach_monthly_revenue_growth(symbol_bars, [dict(r) for r in fetch_monthly_revenue(conn, code)])
         disabled = compute_disabled_strategies(code, symbol_bars, config.strategy_params)
         set_disabled_strategies(conn, code, disabled)
 
@@ -434,6 +508,12 @@ def check_and_update(config: Config) -> dict:
     except requests.RequestException as exc:
         errors.append(f"上櫃籌碼更新失敗：{exc}")
 
+    revenue_synced = False
+    try:
+        revenue_synced = _refresh_monthly_revenue(config, watchlist)
+    except requests.RequestException as exc:
+        errors.append(f"月營收更新失敗：{exc}")
+
     with connect(config.db_path) as conn:
         prune_signal_events(conn)
 
@@ -442,5 +522,6 @@ def check_and_update(config: Config) -> dict:
         "new_price_days": new_price_days,
         "new_market_days": new_market_days,
         "otc_synced": otc_synced,
+        "revenue_synced": revenue_synced,
         "errors": errors,
     }

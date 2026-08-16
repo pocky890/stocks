@@ -15,6 +15,7 @@ from stocks.daily_update import add_symbol_to_watchlist, check_and_update, is_ma
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.db import (
     attach_institutional_flows,
+    attach_monthly_revenue_growth,
     bars_list_to_dataframe,
     bars_to_dataframe,
     connect,
@@ -22,6 +23,7 @@ from stocks.db import (
     fetch_bars_daily,
     fetch_ex_dividend_schedule,
     fetch_institutional_flows,
+    fetch_monthly_revenue,
     fetch_signal_events,
     fetch_valuations,
     fetch_watchlist,
@@ -43,7 +45,6 @@ from stocks.strategy_selection import (
     MIN_PROFIT_FACTOR,
     MIN_TOTAL_RETURN_PCT,
     MIN_TRADES_FOR_RANKING,
-    MIN_TRADES_OVERRIDES,
 )
 from stocks.strategy_stats import is_scaleout_strategy, simulate_round_trips, simulate_scaleout_trades, summarize_trades
 from stocks.watchlist_view import (
@@ -111,14 +112,19 @@ def _compute_track_record_for_symbol(_config, code: str) -> dict | None:
     同一支股票不管出現在哪個群組都是同一個快取鍵，只有真的沒被任何畫面算過的股票才需要
     重新算，切換群組多半是全部cache hit、瞬間完成。
 
-    「（已排除）」標記對應scripts/recompute_strategy_selection.py寫進symbols.
-    disabled_strategies的排除清單——run_live.py/run_batch.py評估這支股票時會跳過這些
-    策略，不會通知/寫進signal_events，但這裡的歷史勝率分析不受影響，照樣完整顯示，
-    讓使用者知道「這個策略對這支股票表現不好，所以被排除」的理由是什麼。"""
+    ❌前綴對應scripts/recompute_strategy_selection.py寫進symbols.disabled_strategies的
+    排除清單——run_live.py/run_batch.py評估這支股票時會跳過這些策略，不會通知/寫進
+    signal_events，但這裡的歷史勝率分析不受影響，照樣完整顯示，讓使用者知道「這個策略
+    對這支股票表現不好，所以被排除」的理由是什麼。2026-08-16改用❌emoji前綴取代原本
+    文字後綴「(已排除)」——st.dataframe的儲存格是純文字(MarkdownColumn也只有點開儲存格
+    才會顯示成markdown，不是直接顯示在格子裡)，沒辦法只把「已排除」這幾個字變色，emoji
+    本身就是有色圖案字元，不用任何markdown/HTML技巧就能在儲存格裡直接顯示紅色標記，
+    使用者確認這樣比純文字後綴更好辨識。"""
     with connect(_config.db_path) as conn:
         name_row = conn.execute("SELECT name FROM symbols WHERE code = ?", (code,)).fetchone()
         bars = bars_to_dataframe(fetch_bars_daily(conn, code), ts_field="date")
         bars = attach_institutional_flows(bars, fetch_institutional_flows(conn, code))
+        bars = attach_monthly_revenue_growth(bars, [dict(r) for r in fetch_monthly_revenue(conn, code)])
         if bars.empty:
             return None
         disabled = set(get_disabled_strategies(conn, code))
@@ -134,7 +140,7 @@ def _compute_track_record_for_symbol(_config, code: str) -> dict | None:
             )
         else:
             text = "尚無完整交易紀錄"
-        return f"{text} (已排除)" if name in disabled else text
+        return f"❌ {text}" if name in disabled else text
 
     row = {"代號": code, "名稱": (name_row["name"] if name_row else None) or "—"}
     for name in TRACK_RECORD_STRATEGIES:
@@ -698,7 +704,7 @@ with tab_watchlist:
         indicator_keys = [k for k in STRATEGY_LABELS if k not in NOTIFIABLE_STRATEGIES]
         st.caption(
             f"每檔股票套用 {len(indicator_keys)} 種指標訊號 + {len(strategy_keys)} 種策略，"
-            "策略部分依scripts/recompute_strategy_selection.py的backtest結果各自排除表現不好的（見下方「策略歷史勝率參考」的「(已排除)」標記）："
+            "策略部分依scripts/recompute_strategy_selection.py的backtest結果各自排除表現不好的（見下方「策略歷史勝率參考」的「❌」標記）："
         )
         st.caption(f"📊 策略（會推播Telegram）：{'、'.join(STRATEGY_LABELS[k] for k in strategy_keys)}")
         st.caption(f"📈 指標訊號（只記錄不推播）：{'、'.join(STRATEGY_LABELS[k] for k in indicator_keys)}")
@@ -716,7 +722,7 @@ with tab_watchlist:
         with st.expander("📊 策略歷史勝率參考（不是自動下單依據，只是這個策略在這支股票過去表現如何）"):
             track_records = _compute_track_records(config, tuple(symbols))
             if track_records:
-                st.dataframe(pd.DataFrame(track_records), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(track_records), hide_index=True)
             else:
                 st.caption("歷史資料不足，算不出任何一次完整的進出場")
     else:
@@ -742,9 +748,10 @@ with tab_strategy_logic:
         "disabled_strategies，不會推播Telegram，但這裡跟「策略歷史勝率參考」照樣完整顯示全部策略供參考)。"
         "由scripts/recompute_strategy_selection.py手動執行重跑更新，不是即時計算。"
     )
-    overrides_text = "、".join(f"{strategy_label(name)}除外(改用{n}筆)" for name, n in MIN_TRADES_OVERRIDES.items())
     st.markdown(
-        f"- 交易次數 < **{MIN_TRADES_FOR_RANKING}筆**（樣本不足，含完全沒有完整買賣配對；{overrides_text}）\n"
+        f"- 交易次數 < **{MIN_TRADES_FOR_RANKING}筆**（樣本不足，含完全沒有完整買賣配對；"
+        "所有策略統一用這個門檻，2026-08-16之前曾有per-strategy override，濾網疊加後"
+        "重新校準成統一值，見strategy_selection.py說明）\n"
         f"- 平均報酬率 < **{MIN_AVG_RETURN_PCT:+.1f}%**\n"
         f"- 加總報酬 <= **{MIN_TOTAL_RETURN_PCT:+.1f}%**\n"
         f"- 獲利因子 < **{MIN_PROFIT_FACTOR:.1f}**（完全沒有虧損時獲利因子視為∞，不排除）\n\n"

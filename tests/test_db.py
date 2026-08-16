@@ -303,6 +303,55 @@ def test_attach_institutional_flows_returns_bars_unchanged_when_empty():
     assert "foreign_net" not in merged.columns
 
 
+def test_attach_monthly_revenue_growth_computes_yoy_and_forward_fills():
+    bars = pd.DataFrame(
+        {"close": [10.0, 11.0, 12.0]},
+        index=pd.to_datetime(["2026-02-15", "2026-02-20", "2026-03-15"]),
+    )
+    revenue_rows = [
+        {"date": "2025-02-01", "revenue_year": 2025, "revenue_month": 1, "revenue": 100},
+        {"date": "2026-02-01", "revenue_year": 2026, "revenue_month": 1, "revenue": 150},
+    ]
+
+    merged = db.attach_monthly_revenue_growth(bars, revenue_rows, report_lag_days=10)
+
+    # 2026年1月營收(date=2026-02-01)要+10天緩衝，2026-02-11才「可用」，所以2026-02-15/
+    # 2026-02-20/2026-03-15都拿得到這筆算出來的年增率(150-100)/100*100=50%。
+    assert merged.loc["2026-02-15", "revenue_yoy_growth"] == 50.0
+    assert merged.loc["2026-02-20", "revenue_yoy_growth"] == 50.0
+    assert merged.loc["2026-03-15", "revenue_yoy_growth"] == 50.0
+
+
+def test_attach_monthly_revenue_growth_hides_data_before_lagged_available_date():
+    bars = pd.DataFrame({"close": [10.0]}, index=pd.to_datetime(["2026-02-05"]))
+    revenue_rows = [
+        {"date": "2025-02-01", "revenue_year": 2025, "revenue_month": 1, "revenue": 100},
+        {"date": "2026-02-01", "revenue_year": 2026, "revenue_month": 1, "revenue": 150},
+    ]
+
+    merged = db.attach_monthly_revenue_growth(bars, revenue_rows, report_lag_days=10)
+
+    # 2026-02-05比「2026-02-01+10天」的可用日期還早，還不該看得到這筆年增率
+    # (避免look-ahead：這天實際上這份月營收還沒公布)。
+    assert pd.isna(merged.loc["2026-02-05", "revenue_yoy_growth"])
+
+
+def test_attach_monthly_revenue_growth_skips_months_without_prior_year_base():
+    bars = pd.DataFrame({"close": [10.0]}, index=pd.to_datetime(["2026-03-01"]))
+    revenue_rows = [{"date": "2026-02-01", "revenue_year": 2026, "revenue_month": 1, "revenue": 150}]
+
+    merged = db.attach_monthly_revenue_growth(bars, revenue_rows, report_lag_days=10)
+
+    assert pd.isna(merged.loc["2026-03-01", "revenue_yoy_growth"]), "沒有去年同期基期，不該硬算出一個誤導的年增率"
+
+
+def test_attach_monthly_revenue_growth_returns_nan_column_when_empty():
+    bars = pd.DataFrame({"close": [10.0]}, index=pd.to_datetime(["2026-01-05"]))
+    merged = db.attach_monthly_revenue_growth(bars, [])
+    assert "revenue_yoy_growth" in merged.columns
+    assert pd.isna(merged.loc["2026-01-05", "revenue_yoy_growth"])
+
+
 def test_fetch_bars_5min_today_excludes_earlier_days(tmp_path):
     from stocks.models import Bar
 

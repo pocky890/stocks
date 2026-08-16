@@ -19,6 +19,8 @@ def is_scaleout_strategy(strategy_name: str, params: dict) -> bool:
         return params.get("stop_mode", "pct") == "ma_scaleout"
     if strategy_name in ("bullish_divergence", "capitulation_reversal"):
         return bool(params.get("enable_tiered_profit", False))
+    if strategy_name in ("chip_momentum", "trust_momentum"):
+        return params.get("stop_mode", "pct") == "volume_alert_scaleout"
     return False
 
 

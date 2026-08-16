@@ -6,7 +6,6 @@ from stocks.strategy_selection import (
     MIN_PROFIT_FACTOR,
     MIN_TOTAL_RETURN_PCT,
     MIN_TRADES_FOR_RANKING,
-    MIN_TRADES_OVERRIDES,
     compute_disabled_strategies,
     should_disable,
 )
@@ -82,16 +81,20 @@ def test_should_disable_false_even_when_positive_average_relies_entirely_on_the_
     assert should_disable(summary) is False
 
 
-def test_should_disable_uses_per_strategy_trade_override():
-    # 2026-08-08使用者確認：long_swing持倉數月，交易天生比其他策略少，用同一套5筆門檻
-    # 某些個股要等好幾年才達標，所以long_swing自己的門檻降到3筆——樣本剛好等於override
-    # 門檻就該通過(只要平均報酬跟加總報酬也過關)，不是繼續套用全域的MIN_TRADES_FOR_RANKING。
-    override_n = MIN_TRADES_OVERRIDES["long_swing"]
-    summary = make_summary(n=override_n, win_rate=50.0, avg_return_pct=MIN_AVG_RETURN_PCT, total_return_pct=MIN_TOTAL_RETURN_PCT + 10)
-    assert should_disable(summary, "long_swing") is False
-    # 沒有strategy_name(或是其他沒被override的策略)一樣要用全域門檻擋下來
-    assert should_disable(summary) is True
-    assert should_disable(summary, "chip_momentum") is True
+def test_should_disable_uses_single_uniform_trade_threshold_for_every_strategy():
+    # 2026-08-16使用者確認：拿掉per-strategy override(long_swing/capitulation_reversal/
+    # atr_breakout/chip_momentum/trust_momentum/golden_cross_scaleout/breakout各自
+    # 不同門檻)，統一改用MIN_TRADES_FOR_RANKING(現行:5)——2026-08-16那批regime/MA240/
+    # 月營收濾網疊加後交易頻率大減，個別override的邏輯已經追不上，使用者要求簡化成
+    # 一個數字，不分策略。should_disable()不再接受strategy_name參數。
+    summary = make_summary(
+        n=MIN_TRADES_FOR_RANKING, win_rate=50.0, avg_return_pct=MIN_AVG_RETURN_PCT, total_return_pct=MIN_TOTAL_RETURN_PCT + 10
+    )
+    assert should_disable(summary) is False
+    summary_too_few = make_summary(
+        n=MIN_TRADES_FOR_RANKING - 1, win_rate=50.0, avg_return_pct=MIN_AVG_RETURN_PCT, total_return_pct=MIN_TOTAL_RETURN_PCT + 10
+    )
+    assert should_disable(summary_too_few) is True
 
 
 def test_should_disable_true_when_profit_factor_below_threshold_even_with_good_average():

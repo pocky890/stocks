@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr, weekly_trend_confirmed
+from stocks.indicators import atr, rolling_avg_volume, sma, weekly_trend_confirmed
 from stocks.models import Direction, SignalEvent
 
 
@@ -8,7 +8,13 @@ class ATRBreakoutStrategy:
     """ATR動態通道突破策略。
 
     進場：收盤價創20日新高(唐奇安通道上軌) + 週線趨勢確認(require_weekly_trend：週MA20
-    斜率向上)
+    斜率向上) + 60日均線>120日均線(require_long_regime，現行:True) + 收盤價>240日均線/
+    年線(require_above_long_ma，現行:True，跟regime疊加、不是取代) + 月營收年增率>=0%
+    (require_revenue_growth，現行:True，2026-08-16加的基本面濾網，見db.attach_
+    monthly_revenue_growth())。這三道濾網都是2026-08-16加的：見scripts/backtest_
+    long_regime_filter.py/backtest_macro_regime_filters.py/backtest_revenue_growth_
+    filter.py，全觀察清單10年獲利因子3.10→4.06(疊加後)、最大回撤收斂約15%，20支已知
+    近年下跌很兇的股票上獲利因子0.89→1.01(轉正)。
 
     出場：跌破15%移動停損(stop_mode="pct")。停損只進不退：每天先用前一天算出的停損線
     判斷是否出場，沒出場才用當天收盤價把停損線往上拉，避免look-ahead。
@@ -17,11 +23,11 @@ class ATRBreakoutStrategy:
     (stop_mode="two_stage"：進場時先用較窄的初始停損(進場K棒最低點或1.5倍ATR)，等獲利
     超過profit_switch_pct(預設10%)後才切換成15%移動停損)。
 
-    斷路器：適用（名義上）——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己
-    當下也跌破月線時，暫停新的BUY。但這支策略的進場前提是收盤價創20日新高，實務上
-    幾乎不可能同時跌破自己的20日均線——查過全觀察清單10年355次BUY訊號，進場當天收盤價
-    低於自己20日均線的次數是0，也就是「自己也跌破月線」這個AND條件對這支策略從未成立過，
-    斷路器對這支策略等於形同虛設，只在SELL/既有部位這端沒有影響（本來就不擋SELL）。"""
+    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY。2026-08-16
+    之前還要求「這支股票自己當下也跌破月線」才擋(AND條件)，但這支策略的進場前提是
+    創20日新高，實務上幾乎不可能同時跌破自己的月線，AND條件對這支策略形同虛設
+    (10年355次BUY訊號、擋下率0%)。使用者確認拿掉AND條件、改成純看產業寬度(config.
+    circuit_breaker_own_ma_period=None)，見circuit_breaker.py開頭說明。"""
 
     name = "atr_breakout"
 
@@ -51,12 +57,47 @@ class ATRBreakoutStrategy:
         weekly_trend_mode = params.get("weekly_trend_mode", "slope")  # "slope"(現行:週MA本身
         # 斜率向上) 或 "above_ma"(收盤站上週MA)，見indicators.weekly_trend_confirmed。
         weekly_ma_period = params.get("weekly_ma_period", 20)
+        require_entry_volume = params.get("require_entry_volume", False)  # 研究參數(2026-08-16
+        # 使用者提議)：突破當天額外要求成交量>volume_multiplier倍均量，跟姊妹策略breakout
+        # (唐奇安通道突破+1.5倍均量)同一套命名，過濾量縮盤整後的假突破新高。預設False，
+        # 未啟用，見scripts/backtest_atr_breakout_volume_filter.py。
+        volume_avg_period = params.get("volume_avg_period", 20)
+        volume_multiplier = params.get("volume_multiplier", 1.5)
+        require_long_regime = params.get("require_long_regime", False)  # 研究參數(2026-08-16
+        # 使用者提議)：額外要求regime_fast_period日均線>regime_slow_period日均線(跟
+        # long_swing同一套長期regime判斷)才能進場，過濾空頭市場裡的反彈假突破新高。
+        # 預設False，未啟用，見scripts/backtest_long_regime_filter.py。
+        regime_fast_period = params.get("regime_fast_period", 60)
+        regime_slow_period = params.get("regime_slow_period", 120)
+        require_above_long_ma = params.get("require_above_long_ma", False)  # 研究參數(2026-08-16
+        # 使用者轉述Gemini建議)：額外要求收盤價>long_ma_period(現行:240，約年線)日均線，
+        # 跟require_long_regime(60/120日均線交叉)不同，這個量的是長期絕對位階。預設
+        # False，未啟用，見scripts/backtest_macro_regime_filters.py。
+        long_ma_period = params.get("long_ma_period", 240)
+        require_revenue_growth = params.get("require_revenue_growth", False)  # 研究參數
+        # (2026-08-16)：額外要求月營收年增率(revenue_yoy_growth，由db.attach_monthly_
+        # revenue_growth()接到bars上，已處理FinMind公告日+10天緩衝的look-ahead)>=
+        # revenue_growth_min_pct(現行:0.0)。缺資料時當NaN，一律當作「未知不擋」。
+        # 見scripts/backtest_revenue_growth_filter.py。預設False，未啟用。
+        revenue_growth_min_pct = params.get("revenue_growth_min_pct", 0.0)
 
         close = bars["close"]
         donchian_upper = bars["high"].rolling(window=donchian_period).max().shift(1)
         entry_gate = pd.Series(True, index=bars.index)
         if require_weekly_trend:
             entry_gate = weekly_trend_confirmed(close, weekly_ma_period, require_slope_up=(weekly_trend_mode == "slope"))
+        if require_above_long_ma:
+            entry_gate = entry_gate & (close > sma(close, long_ma_period))
+        if require_entry_volume:
+            avg_vol = rolling_avg_volume(bars["volume"], volume_avg_period)
+            entry_gate = entry_gate & (bars["volume"] > volume_multiplier * avg_vol)
+        if require_long_regime:
+            regime_active = sma(close, regime_fast_period) > sma(close, regime_slow_period)
+            entry_gate = entry_gate & regime_active
+        if require_revenue_growth:
+            revenue_growth = bars.get("revenue_yoy_growth", pd.Series(float("nan"), index=bars.index))
+            growth_ok = (revenue_growth >= revenue_growth_min_pct) | revenue_growth.isna()
+            entry_gate = entry_gate & growth_ok
 
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []

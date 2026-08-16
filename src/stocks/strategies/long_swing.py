@@ -1,6 +1,6 @@
 import pandas as pd
 
-from stocks.indicators import atr, rsi, sma
+from stocks.indicators import atr, rolling_avg_volume, rsi, sma
 from stocks.models import Direction, SignalEvent
 
 
@@ -18,8 +18,9 @@ class LongSwingStrategy:
     - 收盤連續3天跌破60日均線，或
     - 跌破3.5倍20日ATR移動停損(stop_mode="atr")，也支援固定百分比移動停損("pct")
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己當下也跌破
-    月線時，暫停新的BUY(SELL不受影響)。
+    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
+    2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
+    circuit_breaker_own_ma_period=None)，理由見circuit_breaker.py開頭說明。
 
     沒有foreign_net/trust_net任一欄位(bars沒join到institutional_flows)就直接跳過。"""
 
@@ -41,6 +42,23 @@ class LongSwingStrategy:
         stop_mode = params.get("stop_mode", "atr")  # "atr"(現行:3.5倍ATR移動停損) 或
         # "pct"(固定百分比移動停損)
         stop_pct = params.get("stop_pct", 0.15)
+        require_reentry_volume = params.get("require_reentry_volume", False)  # 研究參數
+        # (2026-08-16使用者轉述Gemini建議)：重新進場(站回reentry_ma_period日均線)額外要求
+        # 「量縮洗盤+出量表態」——回踩期間(前reentry_contraction_days天)量能均值<20日均量
+        # (代表沒人要賣了)，且重新站回當天量>reentry_volume_confirm_period日均量(微幅放量
+        # 即可，不用像突破策略要求爆量)。只套用在兩種重新進場路徑，不影響首次進場。預設
+        # False，未啟用，見scripts/backtest_long_swing_reentry_volume.py。
+        reentry_volume_confirm_period = params.get("reentry_volume_confirm_period", 10)
+        reentry_contraction_days = params.get("reentry_contraction_days", 5)
+        reentry_contraction_avg_period = params.get("reentry_contraction_avg_period", 20)
+        require_within_drawdown_limit = params.get("require_within_drawdown_limit", False)  # 研究
+        # 參數(2026-08-16使用者轉述Gemini建議)：額外要求收盤價沒有從過去drawdown_lookback_
+        # days(現行:252，約一年)的高點回落超過max_drawdown_from_high_pct(現行:40%)，套用
+        # 在所有進場路徑(首次+兩種重新進場)。60/120日均線regime有時仍會在空頭市場的反彈
+        # 裡短暫轉多，這道濾網用絕對跌幅擋掉「均線騙線但實際上跌很深」的股票。預設False，
+        # 未啟用，見scripts/backtest_macro_regime_filters.py。
+        drawdown_lookback_days = params.get("drawdown_lookback_days", 252)
+        max_drawdown_from_high_pct = params.get("max_drawdown_from_high_pct", 0.40)
 
         close = bars["close"]
         ma_fast = sma(close, trend_fast)
@@ -57,6 +75,19 @@ class LongSwingStrategy:
         regime_active = ma_fast > ma_slow
         price_above_fast = close > ma_fast
         price_above_reentry = close > ma_reentry
+
+        within_drawdown_limit = pd.Series(True, index=bars.index)
+        if require_within_drawdown_limit:
+            rolling_high = bars["high"].rolling(drawdown_lookback_days).max().shift(1)
+            within_drawdown_limit = close > (1 - max_drawdown_from_high_pct) * rolling_high
+
+        reentry_volume_ok = pd.Series(True, index=bars.index)
+        if require_reentry_volume:
+            avg_vol_20 = rolling_avg_volume(bars["volume"], reentry_contraction_avg_period)
+            avg_vol_confirm = rolling_avg_volume(bars["volume"], reentry_volume_confirm_period)
+            contraction_ok = bars["volume"].rolling(reentry_contraction_days).mean().shift(1) < avg_vol_20.shift(1)
+            expansion_today = bars["volume"] > avg_vol_confirm
+            reentry_volume_ok = contraction_ok & expansion_today
 
         below_fast = close < ma_fast
         group_id = (below_fast != below_fast.shift()).cumsum()
@@ -95,7 +126,7 @@ class LongSwingStrategy:
                     stop = None
                 else:
                     stop = max(stop, next_stop(c, t))
-            elif regime_active[t] and price_above_fast[t]:
+            elif regime_active[t] and price_above_fast[t] and within_drawdown_limit[t]:
                 if not had_entry_this_regime:
                     if chip_support[t] and not_overbought[t]:
                         stop = next_stop(c, t)
@@ -111,7 +142,7 @@ class LongSwingStrategy:
                                 f"首次進場：{trend_fast}日>{trend_slow}日均線多頭排列，法人近{chip_lookback_days}日買超為正，RSI未超買",
                             )
                         )
-                elif price_above_reentry[t] and trend_strong[t]:
+                elif price_above_reentry[t] and trend_strong[t] and reentry_volume_ok[t]:
                     stop = next_stop(c, t)
                     in_position = True
                     events.append(
@@ -124,7 +155,7 @@ class LongSwingStrategy:
                             f"同趨勢重新進場：站回{reentry_ma_period}日均線且{trend_fast}日均線仍上揚",
                         )
                     )
-                elif price_above_reentry[t] and chip_support[t] and not_overbought[t]:
+                elif price_above_reentry[t] and chip_support[t] and not_overbought[t] and reentry_volume_ok[t]:
                     stop = next_stop(c, t)
                     in_position = True
                     events.append(

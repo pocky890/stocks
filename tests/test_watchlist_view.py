@@ -659,6 +659,7 @@ def test_build_paper_trades_suppresses_buy_blocked_by_industry_circuit_breaker(t
         strategy_params={"atr_breakout": {"donchian_period": 3}},
         db_path=db_path,
         circuit_breaker_ma_period=15,
+        circuit_breaker_own_ma_period=15,
     )
 
     peer_dates = [date(2025, 12, 16) + timedelta(days=i) for i in range(31)]  # 涵蓋到2026-01-15
@@ -708,6 +709,7 @@ def test_build_paper_trades_exempts_bullish_divergence_from_circuit_breaker(tmp_
         strategy_params={"bullish_divergence": {"lookback_days": 5, "rsi_period": 3, "rsi_ceiling": 90}},
         db_path=db_path,
         circuit_breaker_ma_period=5,
+        circuit_breaker_own_ma_period=5,
     )
 
     peer_dates = [date(2025, 12, 20) + timedelta(days=i) for i in range(21)]  # 涵蓋到2026-01-09

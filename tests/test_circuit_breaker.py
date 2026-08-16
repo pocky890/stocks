@@ -110,17 +110,33 @@ def test_is_buy_suppressed_requires_both_industry_active_and_own_ma_broken():
 
     # Industry active, but this stock itself hasn't broken its own MA -- must not suppress
     # (the 3711 false-positive case this feature was built to fix).
-    assert is_buy_suppressed("3711", industry_codes, {"24": True}, bars_above_own_ma, ma_period=3) is False
+    assert is_buy_suppressed("3711", industry_codes, {"24": True}, bars_above_own_ma, own_ma_period=3) is False
 
     # Industry active AND stock itself below its own MA -- suppress.
-    assert is_buy_suppressed("3711", industry_codes, {"24": True}, bars_below_own_ma, ma_period=3) is True
+    assert is_buy_suppressed("3711", industry_codes, {"24": True}, bars_below_own_ma, own_ma_period=3) is True
 
     # Industry not active -- never suppress regardless of the stock's own trend.
-    assert is_buy_suppressed("3711", industry_codes, {"24": False}, bars_below_own_ma, ma_period=3) is False
+    assert is_buy_suppressed("3711", industry_codes, {"24": False}, bars_below_own_ma, own_ma_period=3) is False
 
 
 def test_is_buy_suppressed_never_blocks_unclassified_symbol():
-    assert is_buy_suppressed("9999", {}, {"24": True}, pd.DataFrame({"close": [12, 10, 8]}), ma_period=3) is False
+    assert is_buy_suppressed("9999", {}, {"24": True}, pd.DataFrame({"close": [12, 10, 8]}), own_ma_period=3) is False
+
+
+def test_is_buy_suppressed_with_own_ma_period_none_ignores_own_trend():
+    # 2026-08-16使用者確認：own_ma_period=None(現行預設)拿掉「自己也跌破均線」這道AND
+    # 條件，純看產業寬度是否觸發——golden_cross_scaleout/trend_following/long_swing/
+    # atr_breakout/breakout這幾支策略的進場條件本身就要求「站上」某條均線，跟這道AND
+    # 條件幾乎互斥，導致實測擋下率是0%(見scripts/backtest_circuit_breaker_own_ma.py)。
+    industry_codes = {"3711": "24"}
+    bars_above_own_ma = pd.DataFrame({"close": [8, 10, 12]})
+
+    # 產業寬度沒觸發：即使own_ma_period=None，一樣不擋。
+    assert is_buy_suppressed("3711", industry_codes, {"24": False}, bars_above_own_ma, own_ma_period=None) is False
+
+    # 產業寬度觸發，own_ma_period=None：不管這支股票自己站不站得上均線都擋——這是拿掉
+    # AND條件後的代價(3711那種逆勢股會被誤擋)，是使用者看過具體案例後接受的取捨。
+    assert is_buy_suppressed("3711", industry_codes, {"24": True}, bars_above_own_ma, own_ma_period=None) is True
 
 
 def test_compute_breadth_series_returns_pct_for_every_day_not_just_latest(tmp_path):

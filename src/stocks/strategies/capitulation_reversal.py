@@ -23,6 +23,14 @@ class CapitulationReversalStrategy:
     又沒有其他出場條件，獲利部位會一直持有到觸及停損為止，見enable_tiered_profit
     參數註解的實測說明)。
 
+    現行(config.json):loss_cooldown_days=180——上一次進場如果真的觸發「跌破結構停損、
+    恐慌未止穩、全部出場」(代表這支股票的恐慌沒有真的止穩)，對這支股票暫停180天再重新
+    進場；正常止穩獲利出場則完全不受影響。這是2026-08-16取代原本考慮過的120MA斜率
+    濾網(require_long_uptrend_intact，全面性擋掉「120MA沒有上揚」的股票，全觀察清單
+    總報酬會砍71%)的精準版方案：只針對「這支股票自己」反覆抄底失敗才冷卻，20支已知
+    近年下跌很兇的股票上獲利因子從0.65拉到0.94(接近打平)，但全觀察清單10年總報酬只
+    犧牲7%(獲利因子甚至微幅變好)，見scripts/backtest_capitulation_loss_cooldown.py。
+
     斷路器：豁免（在CIRCUIT_BREAKER_EXEMPT_STRATEGIES清單內）。查過全觀察清單10年138次
     BUY訊號：進場當天自己收盤價<20日均線的比例高達75.4%(單一股票急殺後本來就常常還在
     自己月線下方)，但「全市場同產業≥60%也跌破月線」這個AND條件只在3.6%的進場天成立
@@ -68,6 +76,20 @@ class CapitulationReversalStrategy:
         move_stop_to_breakeven_after_tier = params.get("move_stop_to_breakeven_after_tier", True)
         # 賣出一半當下是否把剩餘部位的停損上移至進場成本價(保本)，False代表停損留在原本
         # 的結構停損位置不動。
+        require_long_uptrend_intact = params.get("require_long_uptrend_intact", False)  # 研究
+        # 參數(2026-08-16使用者轉述Gemini建議)：額外要求long_trend_ma_period(現行:120)日
+        # 均線斜率向上才准進場，跟bullish_divergence同一套「長線仍多頭、只是短線跌深」
+        # 判斷，區分正常急殺反彈vs結構性空頭裡的死貓反彈。預設False，未啟用，見
+        # scripts/backtest_macro_regime_filters.py。
+        long_trend_ma_period = params.get("long_trend_ma_period", 120)
+        long_trend_slope_lookback = params.get("long_trend_slope_lookback", 20)
+        loss_cooldown_days = params.get("loss_cooldown_days", 0)  # 研究參數(2026-08-16)：
+        # require_long_uptrend_intact是全面性的regime濾網，會連正常整理(120MA走平但不是
+        # 結構性空頭)的健康股票也一起濾掉，全觀察清單10年總報酬砍71%代價太大。這個是更
+        # 精準的替代方案：只有這支股票自己的上一次進場「真的觸發全部出場的結構停損」
+        # (恐慌沒有真的止穩，代表這支股票可能還在結構性下跌)才進入冷卻期，不影響其他
+        # 正常運作的股票、也不影響同一支股票下一次表現正常的抄底訊號。預設0(不啟用)，
+        # 見scripts/backtest_capitulation_loss_cooldown.py。
 
         close = bars["close"]
         low = bars["low"]
@@ -82,6 +104,9 @@ class CapitulationReversalStrategy:
         prev_close = close.shift(1)
         prev_low = low.shift(1)
         confirms_reversal = prev_is_capitulation & (close > prev_close) & (low >= prev_low)
+        if require_long_uptrend_intact:
+            long_trend_ok = sma(close, long_trend_ma_period).diff(long_trend_slope_lookback) > 0
+            confirms_reversal = confirms_reversal & long_trend_ok
 
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []
@@ -137,6 +162,7 @@ class CapitulationReversalStrategy:
             entry_price = None
             stop = None
             peak = None
+            cooldown_remaining = 0
 
             for t in bars.index:
                 c = close[t]
@@ -149,6 +175,7 @@ class CapitulationReversalStrategy:
                             in_position = False
                             entry_price = None
                             stop = None
+                            cooldown_remaining = loss_cooldown_days
                         elif not pd.isna(ma_tiered[t]) and c >= ma_tiered[t]:
                             events.append(
                                 SignalEvent(symbol, self.name, Direction.SELL, c, t, f"觸及{tiered_ma_period}日均線，賣出一半")
@@ -171,6 +198,8 @@ class CapitulationReversalStrategy:
                         else:
                             peak = max(peak, c)
                             stop = max(stop, peak * (1 - stop_pct))
+                elif cooldown_remaining > 0:
+                    cooldown_remaining -= 1
                 elif confirms_reversal[t]:
                     entry_price = c
                     stop = prev_low[t] * (1 - structural_stop_buffer_pct)

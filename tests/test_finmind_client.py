@@ -97,6 +97,37 @@ def test_fetch_valuations_for_range_returns_empty_on_failure_message(monkeypatch
     assert finmind_client.fetch_valuations_for_range("2330", "2026-07-01", "2026-07-02") == []
 
 
+def test_fetch_monthly_revenue_for_range_maps_finmind_fields(monkeypatch):
+    payload = {
+        "msg": "success",
+        "data": [
+            {
+                "date": "2025-02-01",
+                "stock_id": "2330",
+                "country": "Taiwan",
+                "revenue": 293288038000,
+                "revenue_month": 1,
+                "revenue_year": 2025,
+                "create_time": "",
+            }
+        ],
+    }
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = finmind_client.fetch_monthly_revenue_for_range("2330", "2025-01-01", "2025-02-28")
+
+    assert rows == [
+        {"symbol": "2330", "date": "2025-02-01", "revenue_year": 2025, "revenue_month": 1, "revenue": 293288038000}
+    ]
+
+
+def test_fetch_monthly_revenue_for_range_returns_empty_on_failure_message(monkeypatch):
+    payload = {"msg": "error", "data": []}
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    assert finmind_client.fetch_monthly_revenue_for_range("2330", "2025-01-01", "2025-02-28") == []
+
+
 def test_fetch_stock_name_returns_stock_name_field(monkeypatch):
     payload = {
         "msg": "success",

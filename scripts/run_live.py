@@ -17,6 +17,7 @@ from stocks.config import load_config
 from stocks.daily_update import check_and_update
 from stocks.db import (
     attach_institutional_flows,
+    attach_monthly_revenue_growth,
     bars_to_dataframe,
     connect,
     fetch_all_industry_codes,
@@ -25,6 +26,7 @@ from stocks.db import (
     fetch_bars_daily,
     fetch_ex_dividend_schedule,
     fetch_institutional_flows,
+    fetch_monthly_revenue,
     fetch_signal_events,
     fetch_watchlist,
     get_disabled_strategies,
@@ -124,6 +126,7 @@ def build_daily_bars_with_today(conn, symbol: str) -> pd.DataFrame:
     加回去的動作只需要做在「今天」這一根，不用往回處理更早的資料。"""
     history = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
     history = attach_institutional_flows(history, fetch_institutional_flows(conn, symbol))
+    history = attach_monthly_revenue_growth(history, [dict(r) for r in fetch_monthly_revenue(conn, symbol)])
 
     today = datetime.now().date()
     dividend_addback = todays_cash_dividend(conn, symbol, today)
@@ -249,7 +252,7 @@ def main():
                     for e in new_events
                     if e.direction != Direction.BUY
                     or e.strategy in CIRCUIT_BREAKER_EXEMPT_STRATEGIES
-                    or not is_buy_suppressed(symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_ma_period)
+                    or not is_buy_suppressed(symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_own_ma_period)
                 ]
             if notifiable_events:
                 with connect(config.db_path) as conn:
@@ -294,7 +297,7 @@ def main():
                     if r["direction"] != Direction.BUY.value
                     or r["strategy"] in CIRCUIT_BREAKER_EXEMPT_STRATEGIES
                     or not is_buy_suppressed(
-                        symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_ma_period
+                        symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_own_ma_period
                     )
                 ]
                 if still_valid:

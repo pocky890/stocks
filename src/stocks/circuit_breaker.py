@@ -1,8 +1,5 @@
 """全市場同產業寬度斷路器：某產業≥60%的股票跌破自己20日均線時，暫停對「這個產業裡
-的股票」發送新的BUY通知(SELL永遠不擋、既有部位一樣可以出場)——即使這支股票自己還在噴，
-也只有在它自己「當下」也跌破自己的20日均線時才會被擋，避免同業平均被拖累而錯殺逆勢股
-(3711日月光投控2~4月的案例：全市場半導體寬度觸發，但3711自己沒破月線，純產業寬度斷路器
-會誤殺它8筆好進場，加上這個AND條件後幾乎完全救回)。
+的股票」發送新的BUY通知(SELL永遠不擋、既有部位一樣可以出場)。
 
 全市場產業寬度用「前一交易日收盤」算(run_batch.py收盤後14:00才更新，見refresh_industry_
 states)；個股自己是否跌破月線用「當下即時價格」(run_live.py本來就在追蹤，含今天盤中
@@ -13,8 +10,21 @@ partial K)——兩者新鮮度不同，是2026-08-16使用者確認接受的設
 2年回測驗證過的：不設斷路器時2026年7月系統性重挫獲利因子只有0、加總虧損-1099；加這個
 「全市場同產業+自己須破月線」版本後，2026 YTD總報酬回升到3984(比純產業寬度版的3327好，
 但不如更寬鬆版本)，7月虧損-441.5(比純產業版的-241.3多，但遠比不設斷路器的-1099.4好)——
-這是使用者確認要的「比較平衡」版本，不是唯一正確答案，門檻本身也在50%~70%的區間內測過，
-是平滑的風險/報酬取捨，不是找到了神奇甜蜜點。
+當時使用者選了這個「比較平衡」的AND版本(還要求自己也跌破均線才擋)，理由是避免同業平均
+被拖累而錯殺逆勢股(3711日月光投控2~4月的案例：全市場半導體寬度觸發，但3711自己沒破
+月線，純產業寬度斷路器會誤殺它8筆好進場，加上這個AND條件後幾乎完全救回)。
+
+2026-08-16後續發現並修正：使用者檢討「隊長」群組(15檔同產業半導體設備/封測股)2026年
+6-7月經歷產業性重挫時，這個AND條件對golden_cross_scaleout/trend_following/long_swing/
+atr_breakout/breakout這5支策略實測擋下率是0%——這幾支策略的進場條件本身就要求「站上」
+某條均線(創新高/均線交叉)，跟AND條件要求的「自己也跌破均線」幾乎互斥，等於這道防線對
+這5支策略形同虛設(拉長own_ma_period到120日一樣沒用，見scripts/backtest_circuit_
+breaker_own_ma.py)。改成拿掉AND條件(config.circuit_breaker_own_ma_period=None，
+只看產業寬度)後，隊長組實測擋下率從0%升到38.3%，long_swing從獲利因子0.79(淨虧)翻正
+到1.39；全觀察清單10年整體只犧牲3~4%總報酬。代價：3711那筆+30.7%的好單(當初AND條件
+要保護的原始案例)在新設定下會被誤擋——使用者看過這個具體代價後仍確認要拿掉AND條件，
+是接受「少數逆勢股好單被誤殺」換「同產業系統性重挫時的整體保護」，不是發現AND條件
+本身是錯的、也不是否定當時的判斷，是新場景(隊長組的產業集中度)下重新評估的取捨。
 """
 import json
 
@@ -132,22 +142,35 @@ def is_buy_suppressed(
     industry_codes: dict,
     active_state: dict,
     own_bars_with_today: pd.DataFrame,
-    ma_period: int,
+    own_ma_period: int | None,
 ) -> bool:
     """純函式，不碰DB——industry_codes/active_state是呼叫端(run_live.py)在迴圈開始前
     讀好一次的{symbol: industry_code}/{industry_code: bool}，避免每個5分K tick、每支
     股票都重新查一次DB(這兩份資料一整天內不會變：industry_codes只在新增股票時變、
     active_state只有run_batch.py收盤後才會更新)。own_bars_with_today是呼叫端已經算好
     的「歷史日K+今天partial K」(build_daily_bars_with_today)，用來判斷這支股票自己
-    當下是否跌破自己的月線。兩個條件都成立才回傳True(該擋)。"""
+    當下是否跌破own_ma_period日均線。
+
+    own_ma_period是None(2026-08-16後的現行預設)時，只看產業寬度是否觸發，不再額外
+    要求「自己也跌破均線」——這道AND條件原本是為了避免同業平均拖累而錯殺逆勢股(3711
+    日月光投控2~4月的案例)，但實測對golden_cross_scaleout/trend_following/long_swing/
+    atr_breakout/breakout這5支策略幾乎形同虛設(擋下率0%，這幾支的進場條件本身就要求
+    「站上」某條均線，跟「自己也跌破均線」幾乎互斥，拉長own_ma_period到120日一樣沒用，
+    見scripts/backtest_circuit_breaker_own_ma.py)。使用者2026-08-16在看過「拿掉AND
+    條件會讓3711那筆+30.7%的好單被誤擋」這個具體代價後，權衡隊長組同產業修正的實質
+    改善(long_swing獲利因子0.79→1.39翻正)後，確認拿掉這道AND條件。若要恢復舊行為，
+    把own_ma_period設成非None的整數(例如20)即可。"""
     industry_code = industry_codes.get(symbol)
     if industry_code is None or not active_state.get(industry_code, False):
         return False
 
-    if own_bars_with_today.empty or len(own_bars_with_today) < ma_period:
+    if own_ma_period is None:
+        return True
+
+    if own_bars_with_today.empty or len(own_bars_with_today) < own_ma_period:
         return False
     close = own_bars_with_today["close"]
-    latest_ma = close.rolling(ma_period).mean().iloc[-1]
+    latest_ma = close.rolling(own_ma_period).mean().iloc[-1]
     if pd.isna(latest_ma):
         return False
     return bool(close.iloc[-1] < latest_ma)

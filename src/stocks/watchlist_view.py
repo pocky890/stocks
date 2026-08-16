@@ -8,12 +8,14 @@ from stocks.circuit_breaker import CIRCUIT_BREAKER_EXEMPT_STRATEGIES, compute_br
 from stocks.config import Config
 from stocks.db import (
     attach_institutional_flows,
+    attach_monthly_revenue_growth,
     bars_to_dataframe,
     connect,
     fetch_all_industry_codes,
     fetch_bars_5min_latest_day,
     fetch_bars_daily,
     fetch_institutional_flows,
+    fetch_monthly_revenue,
     fetch_watchlist,
     get_disabled_strategies,
 )
@@ -374,6 +376,7 @@ def build_strategy_recommendations_for_symbol(config: Config, symbol: str) -> li
 
         flows = fetch_institutional_flows(conn, symbol)
         merged = attach_institutional_flows(bars, flows)
+        merged = attach_monthly_revenue_growth(merged, [dict(r) for r in fetch_monthly_revenue(conn, symbol)])
         today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
         current_price = _round_or_none(_current_price(bars, today_bars))
         disabled = set(get_disabled_strategies(conn, symbol))
@@ -471,6 +474,7 @@ def build_paper_trades_for_symbol(config: Config, symbol: str, start_date: str =
 
         flows = fetch_institutional_flows(conn, symbol)
         merged = attach_institutional_flows(bars, flows)
+        merged = attach_monthly_revenue_growth(merged, [dict(r) for r in fetch_monthly_revenue(conn, symbol)])
         today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
         current_price = _current_price(bars, today_bars)
         disabled = set(get_disabled_strategies(conn, symbol))
@@ -480,7 +484,7 @@ def build_paper_trades_for_symbol(config: Config, symbol: str, start_date: str =
         own_below_ma = None
         effective_active_state = None
         if industry_code is not None:
-            own_ma = merged["close"].rolling(config.circuit_breaker_ma_period).mean()
+            own_ma = merged["close"].rolling(config.circuit_breaker_own_ma_period).mean()
             own_below_ma = merged["close"] < own_ma
             breadth_pct = compute_breadth_series(conn, industry_code, config.circuit_breaker_ma_period)
             active_state = replay_active_state(

@@ -252,5 +252,166 @@
     "groups": [
       "隊長"
     ]
+  },
+  {
+    "code": "6806",
+    "name": "森崴能源",
+    "market": "TWSE",
+    "sort_order": 33,
+    "groups": []
+  },
+  {
+    "code": "2314",
+    "name": "台揚",
+    "market": "TWSE",
+    "sort_order": 34,
+    "groups": []
+  },
+  {
+    "code": "4763",
+    "name": "材料*-KY",
+    "market": "TWSE",
+    "sort_order": 35,
+    "groups": []
+  },
+  {
+    "code": "5904",
+    "name": "寶雅",
+    "market": "TPEx",
+    "sort_order": 36,
+    "groups": []
+  },
+  {
+    "code": "6763",
+    "name": "綠界科技*",
+    "market": "TPEx",
+    "sort_order": 37,
+    "groups": []
+  },
+  {
+    "code": "8444",
+    "name": "綠河-KY",
+    "market": "TPEx",
+    "sort_order": 38,
+    "groups": []
+  },
+  {
+    "code": "2929",
+    "name": "淘帝-KY",
+    "market": "TWSE",
+    "sort_order": 39,
+    "groups": []
+  },
+  {
+    "code": "4426",
+    "name": "利勤",
+    "market": "TWSE",
+    "sort_order": 40,
+    "groups": []
+  },
+  {
+    "code": "8437",
+    "name": "大地-KY",
+    "market": "TPEx",
+    "sort_order": 41,
+    "groups": []
+  },
+  {
+    "code": "4174",
+    "name": "浩鼎",
+    "market": "TPEx",
+    "sort_order": 42,
+    "groups": []
+  },
+  {
+    "code": "8044",
+    "name": "網家",
+    "market": "TPEx",
+    "sort_order": 43,
+    "groups": []
+  },
+  {
+    "code": "1340",
+    "name": "勝悅-KY",
+    "market": "TWSE",
+    "sort_order": 44,
+    "groups": []
+  },
+  {
+    "code": "00664R",
+    "name": "國泰臺灣加權反1",
+    "market": "TWSE",
+    "sort_order": 45,
+    "groups": []
+  },
+  {
+    "code": "2239",
+    "name": "英利-KY",
+    "market": "TWSE",
+    "sort_order": 46,
+    "groups": []
+  },
+  {
+    "code": "3552",
+    "name": "同致",
+    "market": "TPEx",
+    "sort_order": 47,
+    "groups": []
+  },
+  {
+    "code": "4529",
+    "name": "淳紳",
+    "market": "TPEx",
+    "sort_order": 48,
+    "groups": []
+  },
+  {
+    "code": "8429",
+    "name": "金麗-KY",
+    "market": "TWSE",
+    "sort_order": 49,
+    "groups": []
+  },
+  {
+    "code": "2726",
+    "name": "雅茗-KY",
+    "market": "TPEx",
+    "sort_order": 50,
+    "groups": []
+  },
+  {
+    "code": "1338",
+    "name": "廣華-KY",
+    "market": "TWSE",
+    "sort_order": 51,
+    "groups": []
+  },
+  {
+    "code": "1565",
+    "name": "精華",
+    "market": "TPEx",
+    "sort_order": 52,
+    "groups": []
+  },
+  {
+    "code": "4552",
+    "name": "力達-KY",
+    "market": "TWSE",
+    "sort_order": 53,
+    "groups": []
+  },
+  {
+    "code": "4416",
+    "name": "三圓",
+    "market": "TPEx",
+    "sort_order": 54,
+    "groups": []
+  },
+  {
+    "code": "8450",
+    "name": "霹靂",
+    "market": "TPEx",
+    "sort_order": 55,
+    "groups": []
   }
 ]

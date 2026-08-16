@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS valuations (
     PRIMARY KEY (symbol, date)
 );
 
+CREATE TABLE IF NOT EXISTS monthly_revenue (
+    symbol TEXT NOT NULL,
+    date TEXT NOT NULL,
+    revenue_year INTEGER NOT NULL,
+    revenue_month INTEGER NOT NULL,
+    revenue REAL,
+    PRIMARY KEY (symbol, revenue_year, revenue_month)
+);
+
 CREATE TABLE IF NOT EXISTS ex_dividend_schedule (
     symbol TEXT NOT NULL,
     ex_date TEXT NOT NULL,
@@ -562,6 +571,51 @@ def attach_institutional_flows(bars_df: pd.DataFrame, institutional_rows) -> pd.
     return bars_df.join(inst_df, how="left")
 
 
+def attach_monthly_revenue_growth(bars_df: pd.DataFrame, revenue_rows, report_lag_days: int = 10) -> pd.DataFrame:
+    """把月營收年增率(revenue_yoy_growth，百分比)接到bars_df上，供基本面濾網研究用。
+    跟attach_institutional_flows不同的是不能直接join——月營收一個月才一筆，中間的
+    交易日要往前forward-fill沿用「最近一次已公布的年增率」，而且要避免look-ahead：
+    FinMind的date欄位是「營收所屬月份的下個月1號」，不是公司實際公告日(公司法規公告
+    期限是次月10日前)，這裡用date+report_lag_days(預設10天，抓公告期限的上緣，寧可
+    晚一點才算「已知」也不要提早)當作這筆年增率真正「可以被拿來用」的日期，這個日期
+    之前的交易日這筆資料一律當作還不知道(NaN)。
+
+    年增率=（今年這個月營收-去年同月營收）/去年同月營收，任一邊缺資料(通常是資料
+    還沒回補到10年前、或是新股票剛上市不到一年)就跳過那個月，不會拿0或錯誤基期
+    硬算出一個誤導的數字。沒有任何一筆算得出年增率(revenue_rows是空的、或每一筆都
+    缺去年同期基期)時，整欄位是NaN，呼叫端(策略/濾網)要自己決定NaN要不要當作
+    「未知就不擋」還是「未知就保守擋」。"""
+    if not revenue_rows:
+        bars_df = bars_df.copy()
+        bars_df["revenue_yoy_growth"] = float("nan")
+        return bars_df
+
+    by_period = {(r["revenue_year"], r["revenue_month"]): r["revenue"] for r in revenue_rows}
+
+    records = []
+    for r in revenue_rows:
+        year, month, revenue = r["revenue_year"], r["revenue_month"], r["revenue"]
+        prior = by_period.get((year - 1, month))
+        if prior is None or not prior or revenue is None:
+            continue
+        yoy_growth = (revenue - prior) / prior * 100
+        available_date = pd.Timestamp(r["date"]) + pd.Timedelta(days=report_lag_days)
+        records.append((available_date, yoy_growth))
+
+    bars_df = bars_df.copy()
+    if not records:
+        bars_df["revenue_yoy_growth"] = float("nan")
+        return bars_df
+
+    growth = pd.Series(
+        [v for _, v in records], index=pd.DatetimeIndex([d for d, _ in records]), name="revenue_yoy_growth"
+    ).sort_index()
+    combined_index = bars_df.index.union(growth.index)
+    growth_filled = growth.reindex(combined_index).ffill()
+    bars_df["revenue_yoy_growth"] = growth_filled.reindex(bars_df.index)
+    return bars_df
+
+
 def fetch_trading_dates(conn: sqlite3.Connection) -> list[str]:
     """Distinct trading dates already in bars_daily (all symbols share the same TWSE
     calendar), used to backfill institutional/valuation data over the same range
@@ -619,6 +673,20 @@ def insert_valuations(conn: sqlite3.Connection, rows: list[dict]) -> None:
 def fetch_valuations(conn: sqlite3.Connection, symbol: str):
     return conn.execute(
         "SELECT * FROM valuations WHERE symbol = ? ORDER BY date ASC", (symbol,)
+    ).fetchall()
+
+
+def insert_monthly_revenue(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    conn.executemany(
+        """INSERT OR REPLACE INTO monthly_revenue (symbol, date, revenue_year, revenue_month, revenue)
+           VALUES (?, ?, ?, ?, ?)""",
+        [(r["symbol"], r["date"], r["revenue_year"], r["revenue_month"], r["revenue"]) for r in rows],
+    )
+
+
+def fetch_monthly_revenue(conn: sqlite3.Connection, symbol: str):
+    return conn.execute(
+        "SELECT * FROM monthly_revenue WHERE symbol = ? ORDER BY revenue_year ASC, revenue_month ASC", (symbol,)
     ).fetchall()
 
 
