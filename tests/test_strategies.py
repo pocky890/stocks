@@ -716,3 +716,10 @@ def test_every_registered_strategy_has_a_chinese_label():
 def test_strategy_label_strips_parenthetical_explanation():
     assert strategy_label("atr_breakout") == "ATR動態通道突破"
     assert strategy_label("unknown_strategy") == "unknown_strategy", "沒有標籤的鍵值原樣顯示，不該爆錯"
+
+
+def test_strategy_label_translates_scaleout_leg_suffix():
+    # watchlist_view.py的分批出場策略會組出"bullish_divergence(半倉)"這種字串，
+    # 要能正確翻成"背離抄底(半倉)"，不是掉回英文鍵值
+    assert strategy_label("bullish_divergence(半倉)") == "背離抄底(半倉)"
+    assert strategy_label("capitulation_reversal(剩餘半倉)") == "爆量急殺止穩(剩餘半倉)"

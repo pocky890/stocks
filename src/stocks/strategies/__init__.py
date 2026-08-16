@@ -82,5 +82,9 @@ STRATEGY_LABELS: dict[str, str] = {
 def strategy_label(name: str) -> str:
     """策略/指標的英文鍵值(例如"chip_momentum")只在程式內部跟資料庫用，畫面上/通知裡
     一律要顯示中文——STRATEGY_LABELS的中文說明常常後面還帶一段括號解釋參數，這裡只取
-    名稱本體。"""
-    return STRATEGY_LABELS.get(name, name).split("(")[0]
+    名稱本體。分批出場策略在watchlist_view.py組出來的"策略"欄位長得像
+    "bullish_divergence(半倉)"，要先拆掉這個尾巴的leg標籤再查表，翻完再接回去，
+    不然會查不到鍵值、直接掉回英文(而且尾巴的leg標籤也會被後面的split("(")吃掉)。"""
+    base, sep, suffix = name.partition("(")
+    label = STRATEGY_LABELS.get(base, base).split("(")[0]
+    return f"{label}({suffix}" if sep else label
