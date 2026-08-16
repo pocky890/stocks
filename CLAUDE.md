@@ -656,3 +656,75 @@ wider_exit_stops.py`)只測了這次session有新增regime/MA240/營收濾網的
 策略上，10年跟今年(2026 YTD)常常方向不一致，是否採用要兩個時間窗口一起看，不能
 只看10年數字好看就決定。已重跑`recompute_strategy_selection.py`，16檔股票的排除
 清單有變化。
+
+## 2026-08-16：模擬交易紀錄頁籤crash修正——own_ma_period=None沒有處理乾淨
+
+dashboard「訊號紀錄」頁籤的「模擬交易紀錄」表格丟`ValueError: window must be an
+integer 0 or greater`整個壞掉。原因：2026-08-16較早把斷路器`circuit_breaker.
+own_ma_period`改成`None`(拿掉「自己也跌破均線」AND條件、純看產業寬度)時，
+`circuit_breaker.is_buy_suppressed()`有正確處理`None`，但`watchlist_view.py`的
+`build_paper_trades_for_symbol()`裡有一份獨立重寫的同類邏輯(要回放歷史上「當時」
+的斷路器狀態，不能直接呼叫只看「當下最新一天」的`is_buy_suppressed()`)，沒有跟著
+更新，直接執行`merged["close"].rolling(None).mean()`——pandas看到`None`當window
+直接丟例外。只要股票有掛產業代碼(絕大多數都有)就會觸發，不是特定股票的問題，也不是
+暫時性的。
+
+**已修正**(`src/stocks/watchlist_view.py`)：`own_ma_period`是`None`時完全跳過自己
+均線這道檢查，`_buy_suppressed()`只要產業寬度斷路器on就直接判定擋下，跟
+`circuit_breaker.is_buy_suppressed()`的邏輯一致，不是繞過crash的權宜之計。補了
+`tests/test_watchlist_view.py`的`test_build_paper_trades_own_ma_period_none_
+suppresses_on_breadth_alone`——用一支從未跌破自己均線的股票驗證：不只是不crash，
+BUY確實被純產業寬度擋下來(證明修好的是純看寬度的邏輯本身)。
+
+## 2026-08-16：Gemini建議放寬排除門檻(平均報酬>2% AND 獲利因子>1.5)——查證後採用
+
+使用者轉述Gemini建議「把門檻放寬為平均報酬>2% AND 獲利因子>1.5(現行:4.0%/2.0)，
+這個區間內的策略上線實戰時績效最不容易變形(robust)」。這個說法本身沒有針對這份
+資料驗證過，不能只憑聽起來合理就採用，用`scripts/backtest_looser_ranking_
+thresholds.py`對現行觀察清單全部459個(策略,股票)組合實測：
+
+- **現行4%/2.0排除291個、保留168個。放寬到2%/1.5後，有27個組合會從排除變保留**，
+  全部樣本數都>=11筆(最小的是chip_momentum n=11、breakout n=12)，不是之前
+  MIN_TRADES_OVERRIDES查證時發現的1~2筆巧合等級，沒有重新引入雜訊風險。
+- **但這27個裡17個集中在`trend_following`一支策略**(該策略51檔裡從10檔保留變
+  27檔保留，接近三倍)——查看這17檔的數字，多半獲利因子已經是2.0以上(甚至到
+  3.20)，只是平均報酬卡在2%~4%之間被現行門檻擋下，樣本數也是全表現裡最大的一批
+  (n=50~75)。判斷是`trend_following`本身的樣貌就是「靠大量中等勝率(26%~39%)、
+  中等單筆報酬堆出總報酬」，4%平均報酬門檻對這種樣貌天生不利，不是這些股票真的
+  比較差。其餘10個(golden_cross_scaleout/long_swing/bullish_divergence各幾檔)
+  樣本數15~30筆，看起來是真實但相對溫和的邊緣案例。
+- 效果高度集中在單一策略、不是均勻分散在9支策略上，使用者看過這個集中效應後
+  仍確認採用。
+
+**已採用**：`strategy_selection.py`的`MIN_AVG_RETURN_PCT`4.0→2.0、
+`MIN_PROFIT_FACTOR`2.0→1.5，`MIN_TOTAL_RETURN_PCT`(50.0)跟`MIN_TRADES_FOR_
+RANKING`(5)維持不變。已重跑`recompute_strategy_selection.py`，19檔股票的排除
+清單有變化。
+
+## 2026-08-16：atr_breakout十年只剩204筆——拆解濾網疊加+停損拉寬各自的影響，停用MA240
+
+使用者質疑「atr_breakout十年筆數少的不合理，肯定是濾網太緊」。用`scripts/backtest_
+atr_breakout_entry_ablation.py`拆解，發現筆數變少其實是兩個各自獨立的原因疊加，
+不是單一問題：
+
+- **完全不設任何進場濾網時基準是532筆**(只留唐奇安通道突破本身，固定現行stop_pct=
+  0.25)。四道進場濾網(require_weekly_trend/require_long_regime/require_above_
+  long_ma/require_revenue_growth)疊加式加上去：532→319(+週線趨勢，-40%)→267
+  (+regime，再-16%)→245(+MA240，再-8%)→204(+營收，再-17%)。單獨拆開看每道各自
+  的殺傷力(相對於532)：週線趨勢確認自己就砍40%，其次regime(-37%)、MA240(-30%)、
+  營收(-24%)——四道濾網高度重疊(本質上都在問「是不是長期多頭」)，疊加時邊際效果
+  遞減，不是1+1+1+1直接相加。
+- **這輪剛採用的停損拉寬(0.15→0.25)又獨立砍掉一批**：286→204(-29%，四項進場濾網
+  固定不動)，這跟進場濾網完全無關，是停損放寬讓每筆抱更久、同一段10年時間裡能
+  進場的次數自然變少的機制性副作用，不是訊號變嚴——而且這段總報酬是明顯變好的
+  (4242→8057，+90%)，不是筆數換來的代價。
+- 532筆(不設濾網)→204筆(現行)的-62%，是進場濾網(532→286，-46%)跟停損拉寬
+  (286→204，再-29%)兩個原因加總，不是單一原因。
+
+**已採用**：`atr_breakout`停用`require_above_long_ma`(MA240)——這是四道進場濾網裡
+邊際貢獻最薄弱的一道：疊加時只多貢獻8%的筆數縮減(267→245)換取獲利因子4.86→5.01
+這一點提升；單獨開啟時總報酬11604.9還輸給單獨開regime的11550.4，PF卻明顯較差
+(3.94 vs 4.49)，本質上跟`require_long_regime`高度重疊，是同一種「長期多頭位階」
+判斷。已重跑`recompute_strategy_selection.py`。`require_weekly_trend`/
+`require_long_regime`/`require_revenue_growth`維持開啟，沒有停用理由(各自邊際
+貢獻都比MA240明顯)。

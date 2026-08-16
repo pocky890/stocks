@@ -484,19 +484,22 @@ def build_paper_trades_for_symbol(config: Config, symbol: str, start_date: str =
         own_below_ma = None
         effective_active_state = None
         if industry_code is not None:
-            own_ma = merged["close"].rolling(config.circuit_breaker_own_ma_period).mean()
-            own_below_ma = merged["close"] < own_ma
             breadth_pct = compute_breadth_series(conn, industry_code, config.circuit_breaker_ma_period)
             active_state = replay_active_state(
                 breadth_pct, config.circuit_breaker_enter_threshold, config.circuit_breaker_exit_threshold
             )
             effective_active_state = active_state.shift(1).fillna(False)
+            if config.circuit_breaker_own_ma_period is not None:
+                own_ma = merged["close"].rolling(config.circuit_breaker_own_ma_period).mean()
+                own_below_ma = merged["close"] < own_ma
 
     def _buy_suppressed(ts) -> bool:
         if effective_active_state is None:
             return False
         if ts not in effective_active_state.index or not effective_active_state.loc[ts]:
             return False
+        if own_ma is None:  # own_ma_period=None(現行)：純看產業寬度，不要求自己也跌破均線，
+            return True     # 跟circuit_breaker.is_buy_suppressed()同一套邏輯，見該函式docstring
         if ts not in own_ma.index or pd.isna(own_ma.loc[ts]):
             return False
         return bool(own_below_ma.loc[ts])

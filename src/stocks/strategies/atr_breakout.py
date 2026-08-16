@@ -8,13 +8,20 @@ class ATRBreakoutStrategy:
     """ATR動態通道突破策略。
 
     進場：收盤價創20日新高(唐奇安通道上軌) + 週線趨勢確認(require_weekly_trend：週MA20
-    斜率向上) + 60日均線>120日均線(require_long_regime，現行:True) + 收盤價>240日均線/
-    年線(require_above_long_ma，現行:True，跟regime疊加、不是取代) + 月營收年增率>=0%
+    斜率向上) + 60日均線>120日均線(require_long_regime，現行:True) + 月營收年增率>=0%
     (require_revenue_growth，現行:True，2026-08-16加的基本面濾網，見db.attach_
-    monthly_revenue_growth())。這三道濾網都是2026-08-16加的：見scripts/backtest_
+    monthly_revenue_growth())。這幾道濾網都是2026-08-16加的：見scripts/backtest_
     long_regime_filter.py/backtest_macro_regime_filters.py/backtest_revenue_growth_
     filter.py，全觀察清單10年獲利因子3.10→4.06(疊加後)、最大回撤收斂約15%，20支已知
     近年下跌很兇的股票上獲利因子0.89→1.01(轉正)。
+
+    也支援收盤價>240日均線/年線(require_above_long_ma，現行:False，2026-08-16停用)：
+    使用者質疑10年只剩204筆「筆數少的不合理」，用scripts/backtest_atr_breakout_entry_
+    ablation.py逐道濾網ablation後發現，MA240是四道進場濾網裡邊際貢獻最薄弱的一道
+    (疊加時只多貢獻8%的筆數縮減換取獲利因子4.86→5.01這一點提升；單獨開啟時總報酬
+    11604.9還輸給單獨開regime的11550.4，PF卻明顯較差3.94 vs 4.49，本質上是跟
+    require_long_regime高度重疊的同一種「長期多頭位階」判斷)，故停用，只留週線趨勢+
+    regime+營收三道。
 
     出場：跌破25%移動停損(stop_mode="pct"，現行:0.25，2026-08-16從15%拉寬)。停損只進
     不退：每天先用前一天算出的停損線判斷是否出場，沒出場才用當天收盤價把停損線往上拉，

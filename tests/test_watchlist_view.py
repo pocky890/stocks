@@ -680,6 +680,56 @@ def test_build_paper_trades_suppresses_buy_blocked_by_industry_circuit_breaker(t
     assert not any(r["策略"] == "atr_breakout" for r in rows), "產業寬度斷路器on+自己跌破月線時，這筆BUY該被擋下來"
 
 
+def test_build_paper_trades_own_ma_period_none_suppresses_on_breadth_alone(tmp_path):
+    # 2026-08-16 dashboard實際崩潰的回歸測試：circuit_breaker_own_ma_period=None(現行
+    # config.json的預設，拿掉「自己也跌破均線」AND條件、純看產業寬度)時，
+    # build_paper_trades_for_symbol先前會直接merged["close"].rolling(None)，pandas
+    # 對None window丟ValueError: window must be an integer 0 or greater，整個模擬交易
+    # 紀錄頁籤直接壞掉。這裡用一支持續創新高、從未跌破自己均線的股票(2454，確保如果
+    # 是舊的AND邏輯絕對不會被擋)，搭配產業寬度100%(斷路器on)，驗證：①不會crash，
+    # ②BUY照樣被純產業寬度擋下來(不要求自己也跌破均線)，證明修好的是純看寬度邏輯，
+    # 不是隨便補一個不crash但邏輯錯的短路。
+    closes = list(range(10, 26))  # 10,11,...,25，單調上升，任何回看均線都在收盤價之下
+    dates = [datetime(2026, 1, 1) + timedelta(days=i) for i in range(len(closes))]
+    bars = [
+        Bar(symbol="2454", ts=ts, open=c, high=c + 1, low=c - 1, close=c, volume=1000)
+        for ts, c in zip(dates, closes)
+    ]
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = Config(
+        shioaji_api_key="",
+        shioaji_secret_key="",
+        telegram_bot_token="",
+        telegram_chat_id="",
+        market_open="09:00",
+        market_close="13:30",
+        bar_interval_minutes=5,
+        batch_pacing_seconds=0,
+        strategy_params={"atr_breakout": {"donchian_period": 3}},
+        db_path=db_path,
+        circuit_breaker_ma_period=15,
+        circuit_breaker_own_ma_period=None,
+    )
+
+    peer_dates = [date(2025, 12, 16) + timedelta(days=i) for i in range(32)]  # 涵蓋到2026-01-16
+    peer_rows = [
+        {"symbol": sym, "date": d.isoformat(), "industry_code": "24", "close": 100 - i}
+        for sym in ("PEERA", "PEERB")
+        for i, d in enumerate(peer_dates)
+    ]
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, bars)
+        db.add_to_watchlist(conn, "2454", name="群聯")
+        db.set_industry_code(conn, "2454", "24")
+        db.insert_industry_closes(conn, peer_rows)
+
+    rows = build_paper_trades(config, start_date=dates[0].strftime("%Y-%m-%d"))  # 不crash就先過一半
+
+    assert not any(r["策略"] == "atr_breakout" for r in rows), "own_ma_period=None時該純看產業寬度擋下BUY，即使自己從未跌破均線"
+
+
 def test_build_paper_trades_exempts_bullish_divergence_from_circuit_breaker(tmp_path):
     # 2026-08-15使用者發現：背離抄底調校成RSI<30+右側確認後，實測2026-07~08的進場訊號
     # 被斷路器擋下的比例是100%(包括後來漲了23%~41%的大贏家)，因為「自己也跌破月線」
