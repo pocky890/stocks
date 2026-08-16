@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -269,8 +269,13 @@ SIGNAL_EVENTS_RETENTION_DAYS = 90  # 2026-08-14使用者要求「訊號歷史紀
 
 
 def prune_signal_events(conn: sqlite3.Connection, retention_days: int = SIGNAL_EVENTS_RETENTION_DAYS) -> int:
-    """刪掉超過retention_days天的舊訊號紀錄，回傳刪除的筆數。"""
-    cur = conn.execute("DELETE FROM signal_events WHERE ts < datetime('now', ?)", (f"-{retention_days} days",))
+    """刪掉超過retention_days天的舊訊號紀錄，回傳刪除的筆數。門檻用Python的datetime.now()
+    (本機時區)算，不能用SQLite的datetime('now', ...)——那是UTC時間，跟寫入ts欄位時用的
+    datetime.now()差了時區的時數，兩個時鐘對不上時，字串比較在特定時間點會失準(這裡踩過
+    一次真的bug：ts用'T'分隔日期時間、SQLite的datetime()輸出用空白分隔，日期部分剛好落在
+    同一天時，比較退化成單純比較分隔字元的ASCII值，'T'>' '導致該刪的沒刪掉)。"""
+    threshold = (datetime.now() - timedelta(days=retention_days)).isoformat()
+    cur = conn.execute("DELETE FROM signal_events WHERE ts < ?", (threshold,))
     return cur.rowcount
 
 

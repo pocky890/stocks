@@ -728,3 +728,24 @@ atr_breakout_entry_ablation.py`拆解，發現筆數變少其實是兩個各自�
 判斷。已重跑`recompute_strategy_selection.py`。`require_weekly_trend`/
 `require_long_regime`/`require_revenue_growth`維持開啟，沒有停用理由(各自邊際
 貢獻都比MA240明顯)。
+
+## 2026-08-17：prune_signal_events()時區不一致bug——本機時間vs SQLite UTC時間對不上
+
+驗證前一批改動時測試意外抓到：`test_prune_signal_events_deletes_only_records_older_
+than_retention`突然失敗(該刪的90天前舊訊號沒被刪掉)，跟這次改動完全無關，是`db.py`
+的`prune_signal_events()`本來就有的潛藏bug，剛好被系統換日期(2026-08-17)踩到。
+
+原因：寫入`signal_events.ts`用Python的`datetime.now()`(本機時區，台灣UTC+8)，但
+`prune_signal_events()`刪除門檻用SQLite的`datetime('now', '-90 days')`——SQLite的
+`'now'`是UTC時間，兩邊時鐘差8小時。多數時候8小時的落差被90天門檻蓋過去沒事，但當
+兩邊算出來的「日期」剛好落在同一天時(這次踩到的狀況)，比較會退化成單純比字串：
+Python寫入的ts用`'T'`分隔日期跟時間(`2026-05-18T00:20:42`)，SQLite算出來的門檻用
+空白分隔(`2026-05-18 16:20:42`)，`'T'`(ASCII 84)比空白(ASCII 32)大，導致該視為
+「比較舊」的ts被誤判成「沒有比較舊」，不會被刪除。實際影響：`signal_events`(訊號
+歷史紀錄)的3個月保留機制在特定時間點執行`daily_update`時可能不會準時清掉超過90天的
+舊紀錄，不影響任何交易邏輯或通知內容，純粹是清資料表機制沒有100%準時生效。
+
+**已修正**：`prune_signal_events()`改成用Python的`datetime.now() - timedelta(days=
+retention_days)`算門檻(跟寫入ts用同一個時鐘、同一種isoformat()字串格式)，不再依賴
+SQLite的`datetime('now', ...)`，兩邊統一用本機時間，不會再有時區或分隔字元不一致的
+問題。
