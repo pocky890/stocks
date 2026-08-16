@@ -5,14 +5,23 @@ from stocks.models import Direction, SignalEvent
 
 
 class ATRBreakoutStrategy:
-    """通用型自適應策略：收盤價創過去N日新高（唐奇安通道上軌）就進場。出場預設用固定15%
-    移動停損(stop_mode="pct")，也支援N倍ATR移動停損(stop_mode="atr"，波動大的股票停損
-    空間自動放寬、波動小的自動收窄)——2026-08-15用scripts/backtest_stop_comparison.py
-    全觀察清單10年回測比較過：這支策略原本只有單純ATR停損、沒有其他出場條件，改成固定
-    15%後平均報酬/加總報酬/獲利因子全面提升(獲利因子2.36→3.45)，才改成15%當預設，
-    ATR版本原本容易在反彈初期被正常波動洗出場，抓不到後面的大波段。停損只進不退：
-    每天先用「前一天算出的停損線」判斷是否出場，沒出場才用當天收盤價把停損線往上拉，
-    避免用當天收盤價同時決定當天的出場與停損位置（look-ahead）。"""
+    """ATR動態通道突破策略。
+
+    進場：收盤價創20日新高(唐奇安通道上軌) + 週線趨勢確認(require_weekly_trend：週MA20
+    斜率向上)
+
+    出場：跌破15%移動停損(stop_mode="pct")。停損只進不退：每天先用前一天算出的停損線
+    判斷是否出場，沒出場才用當天收盤價把停損線往上拉，避免look-ahead。
+
+    也支援N倍ATR移動停損(stop_mode="atr")、分批停損(stop_mode="tiered_pct")、雙重停損
+    (stop_mode="two_stage"：進場時先用較窄的初始停損(進場K棒最低點或1.5倍ATR)，等獲利
+    超過profit_switch_pct(預設10%)後才切換成15%移動停損)。
+
+    斷路器：適用（名義上）——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己
+    當下也跌破月線時，暫停新的BUY。但這支策略的進場前提是收盤價創20日新高，實務上
+    幾乎不可能同時跌破自己的20日均線——查過全觀察清單10年355次BUY訊號，進場當天收盤價
+    低於自己20日均線的次數是0，也就是「自己也跌破月線」這個AND條件對這支策略從未成立過，
+    斷路器對這支策略等於形同虛設，只在SELL/既有部位這端沒有影響（本來就不擋SELL）。"""
 
     name = "atr_breakout"
 
@@ -20,17 +29,26 @@ class ATRBreakoutStrategy:
         donchian_period = params.get("donchian_period", 20)
         atr_period = params.get("atr_period", 14)
         atr_multiplier = params.get("atr_multiplier", 2)
-        stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct" 或 "tiered_pct"
+        stop_mode = params.get("stop_mode", "pct")  # "atr"、"pct"(現行:固定15%移動停損)、
+        # "tiered_pct"(分批停損) 或 "two_stage"(雙重停損：初始窄停損，獲利夠多後切換成
+        # 寬幅移動停損)——用scripts/backtest_atr_breakout_stop_proposal.py驗證過："atr"
+        # 2倍/2.5倍、"two_stage"兩種初始停損寫法，全觀察清單10年報酬/勝率/獲利因子全部
+        # 輸給固定15%(加總報酬6368.7→3724.8~5721.3，勝率52.3%→32~46%)。原因是這個
+        # 觀察清單以中大型成長股為主，2~2.5倍ATR對這些股票反而比15%更緊，導致正常回檔
+        # 就被洗出場、錯過後續大波段——初始窄停損(two_stage)也是同樣道理：假突破雖然
+        # 少賠一點，但真突破也常常還沒撐到獲利10%可以切寬幅停損就先被洗掉，跟這個策略
+        # 靠少數大波段撐報酬的特性衝突，未採用為預設。
         stop_pct = params.get("stop_pct", 0.15)
         stop_pct_half = params.get("stop_pct_half", 0.08)
         stop_pct_full = params.get("stop_pct_full", 0.15)
-        require_weekly_trend = params.get("require_weekly_trend", False)  # 2026-08-16
-        # 使用者建議：日線突破進場太容易遇到假突破，額外要求週線級別的趨勢確認，波段
-        # 延續性理論上會比較好。config.json已經設成true當正式預設(全觀察清單10年回測
-        # 驗證：勝率46.9%→53.6%、獲利因子3.45→4.57、最大回撤-303.7→-125.9，代價是
-        # 筆數變少、加總報酬因此降低)；這裡程式碼本身的fallback仍是False，只有沒被
-        # config.json覆蓋的呼叫才會退回沒有週線濾網的舊行為。
-        weekly_trend_mode = params.get("weekly_trend_mode", "slope")  # "slope"(週MA本身
+        initial_stop_basis = params.get("initial_stop_basis", "atr")  # two_stage專用："atr"
+        # (進場價-initial_stop_atr_multiplier倍ATR) 或 "bar_low"(進場K棒當天最低點)
+        initial_stop_atr_multiplier = params.get("initial_stop_atr_multiplier", 1.5)
+        profit_switch_pct = params.get("profit_switch_pct", 0.10)  # two_stage專用：獲利達到
+        # 這個百分比才從初始窄停損切換成stop_pct(現行15%)寬幅移動停損
+        require_weekly_trend = params.get("require_weekly_trend", False)  # 現行:True，額外
+        # 要求週線級別的趨勢確認，過濾日線假突破。
+        weekly_trend_mode = params.get("weekly_trend_mode", "slope")  # "slope"(現行:週MA本身
         # 斜率向上) 或 "above_ma"(收盤站上週MA)，見indicators.weekly_trend_confirmed。
         weekly_ma_period = params.get("weekly_ma_period", 20)
 
@@ -89,6 +107,51 @@ class ATRBreakoutStrategy:
             return events
 
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
+
+        if stop_mode == "two_stage":
+            events: list[SignalEvent] = []
+            in_position = False
+            entry_price = None
+            stage = None  # "tight" 或 "wide"
+            stop = None
+
+            for t in bars.index:
+                if pd.isna(donchian_upper[t]) or pd.isna(atr_value[t]):
+                    continue
+                c = close[t]
+
+                if in_position:
+                    if stage == "tight" and (c - entry_price) / entry_price >= profit_switch_pct:
+                        stage = "wide"
+                        stop = c * (1 - stop_pct)
+
+                    if c < stop:
+                        label = "初始窄停損" if stage == "tight" else f"{stop_pct * 100:.0f}%寬幅移動停損"
+                        events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{label} {stop:.2f}"))
+                        in_position = False
+                        entry_price = None
+                        stage = None
+                        stop = None
+                    elif stage == "wide":
+                        stop = max(stop, c * (1 - stop_pct))
+                elif c > donchian_upper[t] and entry_gate[t]:
+                    entry_price = c
+                    stop = bars["low"][t] if initial_stop_basis == "bar_low" else c - initial_stop_atr_multiplier * atr_value[t]
+                    stage = "tight"
+                    in_position = True
+                    events.append(
+                        SignalEvent(
+                            symbol,
+                            self.name,
+                            Direction.BUY,
+                            c,
+                            t,
+                            f"創{donchian_period}日新高突破，初始窄停損{stop:.2f}(獲利達{profit_switch_pct * 100:.0f}%後"
+                            f"切換{stop_pct * 100:.0f}%寬幅移動停損)",
+                        )
+                    )
+
+            return events
 
         def next_stop(c: float, t) -> float:
             if stop_mode == "pct":
