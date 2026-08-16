@@ -262,70 +262,78 @@ def _empty_row(symbol: str, name: str) -> dict:
     return row
 
 
-def build_overview_rows(config: Config) -> list[dict]:
+def build_overview_row_for_symbol(config: Config, symbol: str) -> dict:
+    """單一股票的總覽列——2026-08-18拆成per-symbol函式(原本build_overview_rows整個
+    watchlist一起算，dashboard只能整包快取)：▲▼移動排序/移除/新增股票都只需要那一支
+    受影響，跟其他股票的指標數值完全無關，拆成per-symbol後dashboard可以比照
+    _compute_track_record_for_symbol同一套per-symbol快取，移動/刪除不用再強制重算
+    整個觀察清單的RSI/MACD/KD等指標(10年資料量下這曾經是移動/刪除變慢的主因)。
+    name自己查(跟_compute_track_record_for_symbol同一套慣例)，不用呼叫端傳，介面
+    更單純——呼叫端(dashboard)不用另外準備一份code->name對照表當快取鍵的一部分。"""
     rsi_params = config.strategy_params.get("rsi", {})
     macd_params = config.strategy_params.get("macd", {})
     bollinger_params = config.strategy_params.get("bollinger", {})
     volume_params = config.strategy_params.get("volume_anomaly", {})
     kd_params = config.strategy_params.get("kd", {})
 
-    rows = []
     with connect(config.db_path) as conn:
-        for symbol_row in fetch_watchlist(conn):
-            symbol, name = symbol_row["code"], symbol_row["name"]
-            bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
-            if bars.empty:
-                rows.append(_empty_row(symbol, name))
-                continue
+        name_row = conn.execute("SELECT name FROM symbols WHERE code = ?", (symbol,)).fetchone()
+        name = (name_row["name"] if name_row else None) or "—"
+        bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
+        if bars.empty:
+            return _empty_row(symbol, name)
 
-            flows = fetch_institutional_flows(conn, symbol)
-            merged = attach_institutional_flows(bars, flows)
-            today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
-            change, change_pct = compute_change(bars, today_bars)
-            prev_close = _prev_close(bars, _reference_date(bars, today_bars))
+        flows = fetch_institutional_flows(conn, symbol)
+        merged = attach_institutional_flows(bars, flows)
+        today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
 
-            # bars["close"]最後一筆可能是daily_update盤中抓到、之後整天凍結的快照(見
-            # _current_price docstring)，蓋成跟「漲跌」同一套算法算出來的現價，RSI/MACD/
-            # 布林通道/均線比較才會跟「漲跌」對得起來，不會顯示自相矛盾的數字。
-            close = bars["close"].copy()
-            close.iloc[-1] = _current_price(bars, today_bars)
-            latest_close = close.iloc[-1]
-            ma_series = {p: sma(close, p) for p in MA_PERIODS}
+    change, change_pct = compute_change(bars, today_bars)
+    prev_close = _prev_close(bars, _reference_date(bars, today_bars))
 
-            rsi_value = rsi(close, rsi_params.get("period", 14)).iloc[-1]
-            _, _, histogram = macd(close, macd_params.get("fast", 12), macd_params.get("slow", 26), macd_params.get("signal", 9))
-            upper, _, lower = bollinger_bands(close, bollinger_params.get("period", 20), bollinger_params.get("num_std", 2))
-            avg_volume = rolling_avg_volume(bars["volume"], volume_params.get("avg_period", 20)).iloc[-1]
-            volume_ratio = bars["volume"].iloc[-1] / avg_volume if avg_volume else None
-            k, d = stochastic_kd(
-                bars["high"], bars["low"], close,
-                kd_params.get("rsv_period", 9), kd_params.get("k_smooth", 3), kd_params.get("d_smooth", 3),
-            )
+    # bars["close"]最後一筆可能是daily_update盤中抓到、之後整天凍結的快照(見
+    # _current_price docstring)，蓋成跟「漲跌」同一套算法算出來的現價，RSI/MACD/
+    # 布林通道/均線比較才會跟「漲跌」對得起來，不會顯示自相矛盾的數字。
+    close = bars["close"].copy()
+    close.iloc[-1] = _current_price(bars, today_bars)
+    latest_close = close.iloc[-1]
+    ma_series = {p: sma(close, p) for p in MA_PERIODS}
 
-            rows.append(
-                {
-                    "代號": symbol,
-                    "名稱": name or "—",
-                    "漲跌": change_text(change, change_pct),
-                    "目前價位": price_text(latest_close, change_pct),
-                    "昨收": prev_close,
-                    "5日": _ma_price_text(latest_close, ma_series[5]),
-                    "10日": _ma_price_text(latest_close, ma_series[10]),
-                    "月線": _ma_price_text(latest_close, ma_series[20]),
-                    "季線": _ma_price_text(latest_close, ma_series[60]),
-                    "RSI": _rsi_text(rsi_value, rsi_params.get("oversold", 30), rsi_params.get("overbought", 70)),
-                    "MACD": _macd_text(histogram.iloc[-1]),
-                    "布林通道": _bollinger_text(latest_close, upper.iloc[-1], lower.iloc[-1]),
-                    "成交量": _volume_text(volume_ratio, volume_params.get("multiplier", 2)),
-                    "KD": pd.DataFrame({"k": k, "d": d}).tail(KD_CHART_LOOKBACK_DAYS),
-                    "三大法人": institutional_text(
-                        merged["foreign_net"] if "foreign_net" in merged.columns else pd.Series(dtype=float),
-                        merged["trust_net"] if "trust_net" in merged.columns else pd.Series(dtype=float),
-                    ),
-                }
-            )
+    rsi_value = rsi(close, rsi_params.get("period", 14)).iloc[-1]
+    _, _, histogram = macd(close, macd_params.get("fast", 12), macd_params.get("slow", 26), macd_params.get("signal", 9))
+    upper, _, lower = bollinger_bands(close, bollinger_params.get("period", 20), bollinger_params.get("num_std", 2))
+    avg_volume = rolling_avg_volume(bars["volume"], volume_params.get("avg_period", 20)).iloc[-1]
+    volume_ratio = bars["volume"].iloc[-1] / avg_volume if avg_volume else None
+    k, d = stochastic_kd(
+        bars["high"], bars["low"], close,
+        kd_params.get("rsv_period", 9), kd_params.get("k_smooth", 3), kd_params.get("d_smooth", 3),
+    )
 
-    return rows
+    return {
+        "代號": symbol,
+        "名稱": name or "—",
+        "漲跌": change_text(change, change_pct),
+        "目前價位": price_text(latest_close, change_pct),
+        "昨收": prev_close,
+        "5日": _ma_price_text(latest_close, ma_series[5]),
+        "10日": _ma_price_text(latest_close, ma_series[10]),
+        "月線": _ma_price_text(latest_close, ma_series[20]),
+        "季線": _ma_price_text(latest_close, ma_series[60]),
+        "RSI": _rsi_text(rsi_value, rsi_params.get("oversold", 30), rsi_params.get("overbought", 70)),
+        "MACD": _macd_text(histogram.iloc[-1]),
+        "布林通道": _bollinger_text(latest_close, upper.iloc[-1], lower.iloc[-1]),
+        "成交量": _volume_text(volume_ratio, volume_params.get("multiplier", 2)),
+        "KD": pd.DataFrame({"k": k, "d": d}).tail(KD_CHART_LOOKBACK_DAYS),
+        "三大法人": institutional_text(
+            merged["foreign_net"] if "foreign_net" in merged.columns else pd.Series(dtype=float),
+            merged["trust_net"] if "trust_net" in merged.columns else pd.Series(dtype=float),
+        ),
+    }
+
+
+def build_overview_rows(config: Config) -> list[dict]:
+    with connect(config.db_path) as conn:
+        symbol_rows = fetch_watchlist(conn)
+    return [build_overview_row_for_symbol(config, r["code"]) for r in symbol_rows]
 
 
 def build_strategy_recommendations(config: Config) -> list[dict]:
@@ -339,44 +347,59 @@ def build_strategy_recommendations(config: Config) -> list[dict]:
     「現價」是今天的收盤價，兩個分開放才看得出來「當時觸發之後，現在漲跌多少」。
 
     跟build_paper_trades一樣要跳過disabled_strategies——不然會出現「這支股票這個策略
-    已經被排除、不會實際通知了」，畫面上卻還在建議買進的矛盾。"""
+    已經被排除、不會實際通知了」，畫面上卻還在建議買進的矛盾。
+
+    2026-08-18拆成build_strategy_recommendations_for_symbol(單一股票)+這裡的薄迴圈，
+    理由跟build_paper_trades同一套：dashboard可以per-symbol快取，切群組不用重算整個
+    觀察清單。"""
+    with connect(config.db_path) as conn:
+        symbol_rows = fetch_watchlist(conn)
     rows = []
+    for r in symbol_rows:
+        rows.extend(build_strategy_recommendations_for_symbol(config, r["code"]))
+    return rows
+
+
+def build_strategy_recommendations_for_symbol(config: Config, symbol: str) -> list[dict]:
+    """單一股票的買進/賣出策略訊號——見build_strategy_recommendations docstring說明
+    整體邏輯。"""
+    rows: list[dict] = []
     now = datetime.now()
     with connect(config.db_path) as conn:
-        for symbol_row in fetch_watchlist(conn):
-            symbol, name = symbol_row["code"], symbol_row["name"]
-            bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
-            if bars.empty:
-                continue
+        name_row = conn.execute("SELECT name FROM symbols WHERE code = ?", (symbol,)).fetchone()
+        name = (name_row["name"] if name_row else None) or "—"
+        bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
+        if bars.empty:
+            return rows
 
-            flows = fetch_institutional_flows(conn, symbol)
-            merged = attach_institutional_flows(bars, flows)
-            today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
-            current_price = _round_or_none(_current_price(bars, today_bars))
-            disabled = set(get_disabled_strategies(conn, symbol))
+        flows = fetch_institutional_flows(conn, symbol)
+        merged = attach_institutional_flows(bars, flows)
+        today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
+        current_price = _round_or_none(_current_price(bars, today_bars))
+        disabled = set(get_disabled_strategies(conn, symbol))
 
-            for strategy_name in NOTIFIABLE_STRATEGIES:
-                if strategy_name in disabled:
-                    continue
-                strategy = STRATEGY_REGISTRY.get(strategy_name)
-                if strategy is None:
-                    continue
-                events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
-                recent_events = [e for e in events if (now - e.ts).days <= MAX_SIGNAL_AGE_DAYS]
+    for strategy_name in NOTIFIABLE_STRATEGIES:
+        if strategy_name in disabled:
+            continue
+        strategy = STRATEGY_REGISTRY.get(strategy_name)
+        if strategy is None:
+            continue
+        events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
+        recent_events = [e for e in events if (now - e.ts).days <= MAX_SIGNAL_AGE_DAYS]
 
-                for event in recent_events:
-                    is_buy = event.direction == Direction.BUY
-                    rows.append(
-                        {
-                            "代號": symbol,
-                            "名稱": name or "—",
-                            "買進策略": strategy_name if is_buy else "",
-                            "賣出策略": strategy_name if not is_buy else "",
-                            "觸發價格": _round_or_none(event.price),
-                            "現價": current_price,
-                            "觸發日期": event.ts.strftime("%Y-%m-%d"),
-                        }
-                    )
+        for event in recent_events:
+            is_buy = event.direction == Direction.BUY
+            rows.append(
+                {
+                    "代號": symbol,
+                    "名稱": name,
+                    "買進策略": strategy_name if is_buy else "",
+                    "賣出策略": strategy_name if not is_buy else "",
+                    "觸發價格": _round_or_none(event.price),
+                    "現價": current_price,
+                    "觸發日期": event.ts.strftime("%Y-%m-%d"),
+                }
+            )
 
     return rows
 
@@ -412,95 +435,108 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
     同名常數的說明)——bullish_divergence調校後實測2026-07~08的進場訊號被斷路器擋下
     比例是100%，包括後來漲了23%~41%的大贏家，因為「自己也跌破月線」對抄底策略來說
     根本是進場前提、不是警訊，跟run_live.py的即時通知邏輯要一致，不然模擬交易紀錄會
-    比實際通知更悲觀。"""
-    start = pd.Timestamp(start_date)
-    rows = []
-    breadth_state_cache: dict[str, pd.Series] = {}
+    比實際通知更悲觀。
+
+    2026-08-18拆成build_paper_trades_for_symbol(單一股票)+這裡的薄迴圈——原本整個
+    watchlist一起算，dashboard只能整包快取(30秒過期後任何操作都要重算全部股票x全部
+    策略x10年資料，是切群組還是偶爾覺得慢的主因)，拆成per-symbol後dashboard可以
+    比照build_overview_row_for_symbol同一套per-symbol快取，切群組只需要那個群組
+    實際涵蓋的股票，不用管其他股票有沒有過期。"""
     with connect(config.db_path) as conn:
-        industry_codes = fetch_all_industry_codes(conn)
+        symbol_rows = fetch_watchlist(conn)
+    rows = []
+    for r in symbol_rows:
+        rows.extend(build_paper_trades_for_symbol(config, r["code"], start_date))
+    return rows
 
-        def _effective_active_state(industry_code: str) -> pd.Series:
-            if industry_code not in breadth_state_cache:
-                breadth_pct = compute_breadth_series(conn, industry_code, config.circuit_breaker_ma_period)
-                active_state = replay_active_state(
-                    breadth_pct, config.circuit_breaker_enter_threshold, config.circuit_breaker_exit_threshold
-                )
-                breadth_state_cache[industry_code] = active_state.shift(1).fillna(False)
-            return breadth_state_cache[industry_code]
 
-        for symbol_row in fetch_watchlist(conn):
-            symbol, name = symbol_row["code"], symbol_row["name"]
-            bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
-            if bars.empty:
-                continue
+def build_paper_trades_for_symbol(config: Config, symbol: str, start_date: str = "2026-07-01") -> list[dict]:
+    """單一股票的模擬交易紀錄——見build_paper_trades docstring說明整體邏輯。斷路器狀態
+    (compute_breadth_series/replay_active_state)在原本整批版本裡是同產業股票共用一份
+    breadth_state_cache(同一次呼叫內只算一次)，拆成per-symbol後同產業的股票各自獨立
+    算一次；多花的重複計算只發生在每支股票各自「第一次」被dashboard快取記錄時(之後
+    同一支股票的結果都直接命中per-symbol快取，不會重算)，用這個一次性成本換「切群組
+    不用重算整個觀察清單」的好處，划算。"""
+    start = pd.Timestamp(start_date)
+    rows: list[dict] = []
+    with connect(config.db_path) as conn:
+        name_row = conn.execute("SELECT name FROM symbols WHERE code = ?", (symbol,)).fetchone()
+        name = (name_row["name"] if name_row else None) or "—"
+        bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
+        if bars.empty:
+            return rows
 
-            flows = fetch_institutional_flows(conn, symbol)
-            merged = attach_institutional_flows(bars, flows)
-            today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
-            current_price = _current_price(bars, today_bars)
-            disabled = set(get_disabled_strategies(conn, symbol))
+        flows = fetch_institutional_flows(conn, symbol)
+        merged = attach_institutional_flows(bars, flows)
+        today_bars = bars_to_dataframe(fetch_bars_5min_latest_day(conn, symbol), ts_field="ts")
+        current_price = _current_price(bars, today_bars)
+        disabled = set(get_disabled_strategies(conn, symbol))
 
-            industry_code = industry_codes.get(symbol)
-            own_ma = None
-            own_below_ma = None
-            effective_active_state = None
-            if industry_code is not None:
-                own_ma = merged["close"].rolling(config.circuit_breaker_ma_period).mean()
-                own_below_ma = merged["close"] < own_ma
-                effective_active_state = _effective_active_state(industry_code)
+        industry_code = fetch_all_industry_codes(conn).get(symbol)
+        own_ma = None
+        own_below_ma = None
+        effective_active_state = None
+        if industry_code is not None:
+            own_ma = merged["close"].rolling(config.circuit_breaker_ma_period).mean()
+            own_below_ma = merged["close"] < own_ma
+            breadth_pct = compute_breadth_series(conn, industry_code, config.circuit_breaker_ma_period)
+            active_state = replay_active_state(
+                breadth_pct, config.circuit_breaker_enter_threshold, config.circuit_breaker_exit_threshold
+            )
+            effective_active_state = active_state.shift(1).fillna(False)
 
-            def _buy_suppressed(ts) -> bool:
-                if effective_active_state is None:
-                    return False
-                if ts not in effective_active_state.index or not effective_active_state.loc[ts]:
-                    return False
-                if ts not in own_ma.index or pd.isna(own_ma.loc[ts]):
-                    return False
-                return bool(own_below_ma.loc[ts])
+    def _buy_suppressed(ts) -> bool:
+        if effective_active_state is None:
+            return False
+        if ts not in effective_active_state.index or not effective_active_state.loc[ts]:
+            return False
+        if ts not in own_ma.index or pd.isna(own_ma.loc[ts]):
+            return False
+        return bool(own_below_ma.loc[ts])
 
-            for strategy_name in NOTIFIABLE_STRATEGIES:
-                if strategy_name in disabled:
-                    continue
-                strategy = STRATEGY_REGISTRY.get(strategy_name)
-                if strategy is None:
-                    continue
-                events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
-                if strategy_name not in CIRCUIT_BREAKER_EXEMPT_STRATEGIES:
-                    events = [e for e in events if not (e.direction == Direction.BUY and _buy_suppressed(e.ts))]
-                events_since = [e for e in events if e.ts >= start]
-                if not events_since:
-                    continue
+    for strategy_name in NOTIFIABLE_STRATEGIES:
+        if strategy_name in disabled:
+            continue
+        strategy = STRATEGY_REGISTRY.get(strategy_name)
+        if strategy is None:
+            continue
+        events = strategy.evaluate(symbol, merged, config.strategy_params.get(strategy_name, {}))
+        if strategy_name not in CIRCUIT_BREAKER_EXEMPT_STRATEGIES:
+            events = [e for e in events if not (e.direction == Direction.BUY and _buy_suppressed(e.ts))]
+        events_since = [e for e in events if e.ts >= start]
+        if not events_since:
+            continue
 
-                base_row = {"代號": symbol, "名稱": name or "—", "策略": strategy_name}
+        base_row = {"代號": symbol, "名稱": name, "策略": strategy_name}
 
-                trades, open_position = simulate_round_trips(events_since)
-                for t in trades:
-                    rows.append(
-                        {
-                            **base_row,
-                            "買進日期": t.entry_ts.strftime("%Y-%m-%d"),
-                            "買進價位": _round_or_none(t.entry_price),
-                            "賣出日期": t.exit_ts.strftime("%Y-%m-%d"),
-                            "賣出價位": _round_or_none(t.exit_price),
-                            "現價": _round_or_none(current_price),
-                            "報酬率(%)": _round_or_none(t.return_pct),
-                            "狀態": "已平倉",
-                        }
-                    )
-                if open_position:
-                    rows.append(
-                        {
-                            **base_row,
-                            "買進日期": open_position.ts.strftime("%Y-%m-%d"),
-                            "買進價位": _round_or_none(open_position.price),
-                            "賣出日期": None,
-                            "賣出價位": None,
-                            "現價": _round_or_none(current_price),
-                            "報酬率(%)": _round_or_none(
-                                (current_price - open_position.price) / open_position.price * 100
-                            ),
-                            "狀態": "持有中(未實現)",
-                        }
-                    )
+        trades, open_position = simulate_round_trips(events_since)
+        for t in trades:
+            rows.append(
+                {
+                    **base_row,
+                    "買進日期": t.entry_ts.strftime("%Y-%m-%d"),
+                    "買進價位": _round_or_none(t.entry_price),
+                    "賣出日期": t.exit_ts.strftime("%Y-%m-%d"),
+                    "賣出價位": _round_or_none(t.exit_price),
+                    "現價": _round_or_none(current_price),
+                    "報酬率(%)": _round_or_none(t.return_pct),
+                    "狀態": "已平倉",
+                }
+            )
+        if open_position:
+            rows.append(
+                {
+                    **base_row,
+                    "買進日期": open_position.ts.strftime("%Y-%m-%d"),
+                    "買進價位": _round_or_none(open_position.price),
+                    "賣出日期": None,
+                    "賣出價位": None,
+                    "現價": _round_or_none(current_price),
+                    "報酬率(%)": _round_or_none(
+                        (current_price - open_position.price) / open_position.price * 100
+                    ),
+                    "狀態": "持有中(未實現)",
+                }
+            )
 
     return rows
