@@ -75,12 +75,12 @@ class TrendFollowingStrategy:
         else:
             single_day_break = pd.Series(False, index=bars.index)
 
-        def next_stop(c: float, t) -> float:
+        def next_stop(c: float, atr_val: float) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
             if stop_mode == "trailing_atr":
-                return c - trailing_atr_multiplier * atr_value[t]
-            return c - atr_multiplier * atr_value[t]
+                return c - trailing_atr_multiplier * atr_val
+            return c - atr_multiplier * atr_val
 
         if stop_mode == "pct":
             stop_label = f"{stop_pct * 100:.0f}%移動停損"
@@ -89,24 +89,36 @@ class TrendFollowingStrategy:
         else:
             stop_label = "停損"
 
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫好幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        streak_confirmed_arr = streak_confirmed.to_numpy()
+        single_day_break_arr = single_day_break.to_numpy()
+        ma_fast_arr = ma_fast.to_numpy()
+        ma_slow_arr = ma_slow.to_numpy()
+        atr_arr = atr_value.to_numpy()
+        entry_edge_arr = entry_edge.to_numpy()
+
         events: list[SignalEvent] = []
         in_position = False
         stop = None
         peak = None
 
-        for t in bars.index:
-            c = close[t]
+        for i, t in enumerate(index):
+            c = close_arr[i]
             if in_position:
                 reasons = []
                 if c < stop:
                     reasons.append(f"跌破{stop_label}{stop:.2f}")
-                if streak_confirmed[t]:
+                if streak_confirmed_arr[i]:
                     reasons.append(
                         f"連續{ma_break_confirm_days}天跌破{fast}日均線" if ma_break_confirm_days > 1 else f"跌破{fast}日均線"
                     )
-                elif single_day_break[t]:
+                elif single_day_break_arr[i]:
                     reasons.append(f"單日跌破{fast}日均線且跌幅達{abs(ma_break_single_day_drop_pct):.0f}%")
-                if ma_fast[t] < ma_slow[t]:
+                if ma_fast_arr[i] < ma_slow_arr[i]:
                     reasons.append(f"{fast}日均線跌破{slow}日均線")
                 if reasons:
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, "、".join(reasons)))
@@ -114,12 +126,12 @@ class TrendFollowingStrategy:
                     stop = None
                     peak = None
                 elif stop_mode == "pct":
-                    stop = max(stop, next_stop(c, t))
-                elif stop_mode == "trailing_atr" and not pd.isna(atr_value[t]):
+                    stop = max(stop, next_stop(c, atr_arr[i]))
+                elif stop_mode == "trailing_atr" and not pd.isna(atr_arr[i]):
                     peak = max(peak, c)
-                    stop = max(stop, peak - trailing_atr_multiplier * atr_value[t])
-            elif entry_edge[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
-                stop = next_stop(c, t)
+                    stop = max(stop, peak - trailing_atr_multiplier * atr_arr[i])
+            elif entry_edge_arr[i] and (stop_mode == "pct" or not pd.isna(atr_arr[i])):
+                stop = next_stop(c, atr_arr[i])
                 peak = c
                 events.append(
                     SignalEvent(symbol, self.name, Direction.BUY, c, t, f"站上{fast}日均線且{fast}>{slow}日均線+爆量，{stop_label}{stop:.2f}")

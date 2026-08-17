@@ -193,6 +193,10 @@ def main():
     print(f"已訂閱 {len(watchlist)} 檔即時報價")
 
     was_connected = True
+    # 同一個(股票,策略)今天已經推播過的最後一個方向——同方向重複觸發時用來壓下重複通知
+    # (見下面迴圈裡的說明)。跟signal_events本身無關，純粹是這次程式執行(一天一次)期間的
+    # 記憶，程式重啟(例如連線中斷後重跑)就會重新歸零，這是可接受的行為。
+    notified_direction_today: dict[tuple[str, str], Direction] = {}
     for bucket_end in market_hour_boundaries(datetime.now().date()):
         if bucket_end < datetime.now():
             continue  # 程式是盤中才啟動的，跳過已經過去的邊界
@@ -225,9 +229,12 @@ def main():
 
         # 2026-08-14使用者確認：NOTIFIABLE_STRATEGIES(日線尺度)改成每個5分K tick都檢查
         # 全觀察清單一次(不看new_bars，即使某檔這一格沒有成交也照樣檢查)，觸發就立即通知，
-        # 不等13:20——使用者要的是「盤中觸發就先送一次」，不限制同一天同一檔同一策略只能
-        # 通知一次；如果股價來回穿越觸發條件，一天可能收到同一策略好幾次通知，這是使用者
-        # 明確選擇的行為，不是bug。
+        # 不等13:20。**2026-08-17使用者改口**：股價在觸發價附近來回，同一個(股票,策略)同一
+        # 個方向會每5分鐘一直重複通知，太吵——改成同一個(股票,策略)同一天同一個方向最多
+        # 通知一次(用notified_direction_today記住)，之後同方向再觸發只寫signal_events不
+        # 推播，直到13:20的notify_reminder再提醒一次「還沒解除」，等於單一策略一天最多兩次
+        # 通知。但方向真的翻轉(BUY→SELL或反之)代表「該出場/進場了」，是新的動作方向、不是
+        # 重複雜訊，還是要立即通知，不受這個節流影響。
         now = datetime.now()
         for symbol in watchlist:
             with connect(config.db_path) as conn:
@@ -247,20 +254,30 @@ def main():
                 # 完整歷史，被擋掉的BUY一樣算「這個策略真的觸發過」，只是不推播Telegram。
                 # CIRCUIT_BREAKER_EXEMPT_STRATEGIES裡的策略完全跳過斷路器檢查——見
                 # circuit_breaker.py同名常數的說明。
-                notifiable_events = [
+                circuit_allowed_events = [
                     e
                     for e in new_events
                     if e.direction != Direction.BUY
                     or e.strategy in CIRCUIT_BREAKER_EXEMPT_STRATEGIES
                     or not is_buy_suppressed(symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_own_ma_period)
                 ]
-            if notifiable_events:
+                # 同一個(股票,策略)如果今天已經推播過同一個方向，這次先不推播(避免價格在
+                # 觸發線附近來回時每5分鐘轟炸)——但方向真的翻轉(BUY→SELL或反之)代表新的
+                # 動作方向，還是要立即推播，不受這個節流影響。
+                to_notify = [
+                    e for e in circuit_allowed_events if notified_direction_today.get((symbol, e.strategy)) != e.direction
+                ]
+            if to_notify:
                 with connect(config.db_path) as conn:
                     daily_bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
                     ex_dividend_dates = {r["ex_date"] for r in fetch_ex_dividend_schedule(conn, symbol)}
-                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), notifiable_events, daily_bars, ex_dividend_dates)
-                print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(notifiable_events)} 個訊號(日線)")
-            if new_events and not notifiable_events:
+                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), to_notify, daily_bars, ex_dividend_dates)
+                for e in to_notify:
+                    notified_direction_today[(symbol, e.strategy)] = e.direction
+                print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(to_notify)} 個訊號(日線)")
+            if circuit_allowed_events and not to_notify:
+                print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(circuit_allowed_events)} 個訊號(日線)，同方向今天已通知過(只記錄不推播，13:20再提醒)")
+            if new_events and not circuit_allowed_events:
                 print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(new_events)} 個訊號(日線)，全部被產業斷路器擋下(只記錄不推播)")
 
         if bucket_end.strftime("%H:%M") == REMINDER_CHECK_HHMM:

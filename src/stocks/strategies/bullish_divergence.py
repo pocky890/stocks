@@ -207,6 +207,15 @@ class BullishDivergenceStrategy:
                     pending_idx = None
             entry_edge = pd.Series(confirmed_edge, index=bars.index)
 
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫好幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        entry_edge_arr = entry_edge.to_numpy()
+        rolling_low_rsi_arr = rolling_low_rsi.to_numpy()
+        low_arr = bars["low"].to_numpy()
+
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []
             in_position = False
@@ -214,8 +223,8 @@ class BullishDivergenceStrategy:
             stop_half = None
             stop_full = None
 
-            for t in bars.index:
-                c = close[t]
+            for i, t in enumerate(index):
+                c = close_arr[i]
                 if in_position:
                     if not half_sold:
                         stop_half = max(stop_half, c * (1 - stop_pct_half))
@@ -234,7 +243,7 @@ class BullishDivergenceStrategy:
                         half_sold = False
                         stop_half = None
                         stop_full = None
-                elif entry_edge[t] and not pd.isna(rolling_low_rsi[t]):
+                elif entry_edge_arr[i] and not pd.isna(rolling_low_rsi_arr[i]):
                     stop_half = c * (1 - stop_pct_half)
                     stop_full = c * (1 - stop_pct_full)
                     in_position = True
@@ -255,6 +264,7 @@ class BullishDivergenceStrategy:
 
         if stop_mode == "structural" and enable_tiered_profit:
             ma_tiered = sma(close, tiered_ma_period)
+            ma_tiered_arr = ma_tiered.to_numpy()
             events: list[SignalEvent] = []
             in_position = False
             half_sold = False
@@ -262,8 +272,8 @@ class BullishDivergenceStrategy:
             stop = None
             peak = None
 
-            for t in bars.index:
-                c = close[t]
+            for i, t in enumerate(index):
+                c = close_arr[i]
                 if in_position:
                     if not half_sold:
                         if c < stop:
@@ -275,7 +285,7 @@ class BullishDivergenceStrategy:
                             stop = None
                         else:
                             profit_hit = (c - entry_price) / entry_price >= tiered_target_pct
-                            ma_hit = not pd.isna(ma_tiered[t]) and c >= ma_tiered[t]
+                            ma_hit = not pd.isna(ma_tiered_arr[i]) and c >= ma_tiered_arr[i]
                             if profit_hit or ma_hit:
                                 reason = (
                                     f"獲利達{tiered_target_pct * 100:.0f}%" if profit_hit else f"觸及{tiered_ma_period}日均線"
@@ -299,9 +309,9 @@ class BullishDivergenceStrategy:
                         else:
                             peak = max(peak, c)
                             stop = max(stop, peak * (1 - stop_pct))
-                elif entry_edge[t] and not pd.isna(rolling_low_rsi[t]):
+                elif entry_edge_arr[i] and not pd.isna(rolling_low_rsi_arr[i]):
                     entry_price = c
-                    stop = bars["low"][t] * (1 - structural_stop_buffer_pct)
+                    stop = low_arr[i] * (1 - structural_stop_buffer_pct)
                     half_sold = False
                     peak = c
                     events.append(
@@ -320,13 +330,14 @@ class BullishDivergenceStrategy:
             return events
 
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
+        atr_arr = atr_value.to_numpy()
 
-        def next_stop(c: float, t) -> float:
+        def next_stop(c: float, atr_val: float, low_val: float) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
             if stop_mode == "structural":
-                return bars["low"][t] * (1 - structural_stop_buffer_pct)
-            return c - atr_multiplier * atr_value[t]
+                return low_val * (1 - structural_stop_buffer_pct)
+            return c - atr_multiplier * atr_val
 
         if stop_mode == "pct":
             stop_label = f"{stop_pct * 100:.0f}%移動停損"
@@ -341,8 +352,8 @@ class BullishDivergenceStrategy:
         entry_price = None
         trailing_now = False  # structural_trail_after_pct啟用後，獲利切換成移動停損時設True
 
-        for t in bars.index:
-            c = close[t]
+        for i, t in enumerate(index):
+            c = close_arr[i]
             if in_position:
                 if (
                     stop_mode == "structural"
@@ -362,17 +373,17 @@ class BullishDivergenceStrategy:
                     trailing_now = False
                 elif trailing_now:
                     stop = max(stop, c * (1 - stop_pct))
-                elif stop_mode == "pct" or (stop_mode == "atr" and not pd.isna(atr_value[t])):
+                elif stop_mode == "pct" or (stop_mode == "atr" and not pd.isna(atr_arr[i])):
                     # structural停損進場後固定不動(保護的是進場當下的結構是否還成立，不是
                     # 拿來鎖定後續獲利用的移動停損)，所以這裡刻意不幫structural往上移動——
                     # 除非structural_trail_after_pct已觸發(trailing_now，上面已處理)。
-                    stop = max(stop, next_stop(c, t))
+                    stop = max(stop, next_stop(c, atr_arr[i], low_arr[i]))
             elif (
-                entry_edge[t]
-                and not pd.isna(rolling_low_rsi[t])
-                and (stop_mode in ("pct", "structural") or not pd.isna(atr_value[t]))
+                entry_edge_arr[i]
+                and not pd.isna(rolling_low_rsi_arr[i])
+                and (stop_mode in ("pct", "structural") or not pd.isna(atr_arr[i]))
             ):
-                stop = next_stop(c, t)
+                stop = next_stop(c, atr_arr[i], low_arr[i])
                 entry_price = c
                 trailing_now = False
                 events.append(

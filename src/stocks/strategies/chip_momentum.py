@@ -129,18 +129,26 @@ class ChipMomentumStrategy:
         prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
         entry_edge = entry_condition & ~prev_entry
 
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫好幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        entry_edge_arr = entry_edge.to_numpy()
+
         if stop_mode == "volume_alert_scaleout":
             ma_alert = sma(close, alert_ma_period)
             avg_vol_alert = rolling_avg_volume(bars["volume"], alert_volume_avg_period)
             volume_alert_condition = (close < ma_alert) & (bars["volume"] > alert_volume_multiplier * avg_vol_alert)
+            volume_alert_condition_arr = volume_alert_condition.to_numpy()
 
             events: list[SignalEvent] = []
             position = 0  # 0=空手, 2=全倉, 1=剩半倉
             stop = None
 
-            for t in bars.index:
-                c = close[t]
-                if position == 2 and volume_alert_condition[t]:
+            for i, t in enumerate(index):
+                c = close_arr[i]
+                if position == 2 and volume_alert_condition_arr[i]:
                     events.append(
                         SignalEvent(
                             symbol,
@@ -161,7 +169,7 @@ class ChipMomentumStrategy:
                         )
                         position = 0
                         stop = None
-                if position == 0 and entry_edge[t]:
+                if position == 0 and entry_edge_arr[i]:
                     events.append(
                         SignalEvent(symbol, self.name, Direction.BUY, c, t, f"外資連{chip_streak_days}日買超(未超買)")
                     )
@@ -176,8 +184,8 @@ class ChipMomentumStrategy:
             stop_half = None
             stop_full = None
 
-            for t in bars.index:
-                c = close[t]
+            for i, t in enumerate(index):
+                c = close_arr[i]
                 if in_position:
                     if not half_sold:
                         stop_half = max(stop_half, c * (1 - stop_pct_half))
@@ -196,7 +204,7 @@ class ChipMomentumStrategy:
                         half_sold = False
                         stop_half = None
                         stop_full = None
-                elif entry_edge[t]:
+                elif entry_edge_arr[i]:
                     stop_half = c * (1 - stop_pct_half)
                     stop_full = c * (1 - stop_pct_full)
                     in_position = True
@@ -215,11 +223,12 @@ class ChipMomentumStrategy:
             return events
 
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
+        atr_arr = atr_value.to_numpy()
 
-        def next_stop(c: float, t) -> float:
+        def next_stop(c: float, atr_val: float) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
-            return c - atr_multiplier * atr_value[t]
+            return c - atr_multiplier * atr_val
 
         stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "ATR移動停損"
 
@@ -227,17 +236,17 @@ class ChipMomentumStrategy:
         in_position = False
         stop = None
 
-        for t in bars.index:
-            c = close[t]
+        for i, t in enumerate(index):
+            c = close_arr[i]
             if in_position:
                 if c < stop:
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_label} {stop:.2f}"))
                     in_position = False
                     stop = None
-                elif stop_mode == "pct" or not pd.isna(atr_value[t]):
-                    stop = max(stop, next_stop(c, t))
-            elif entry_edge[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
-                stop = next_stop(c, t)
+                elif stop_mode == "pct" or not pd.isna(atr_arr[i]):
+                    stop = max(stop, next_stop(c, atr_arr[i]))
+            elif entry_edge_arr[i] and (stop_mode == "pct" or not pd.isna(atr_arr[i])):
+                stop = next_stop(c, atr_arr[i])
                 events.append(
                     SignalEvent(symbol, self.name, Direction.BUY, c, t, f"外資連{chip_streak_days}日買超(未超買)，{stop_label} {stop:.2f}")
                 )

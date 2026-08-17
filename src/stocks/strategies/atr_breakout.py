@@ -110,6 +110,14 @@ class ATRBreakoutStrategy:
             growth_ok = (revenue_growth >= revenue_growth_min_pct) | revenue_growth.isna()
             entry_gate = entry_gate & growth_ok
 
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫好幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        donchian_upper_arr = donchian_upper.to_numpy()
+        entry_gate_arr = entry_gate.to_numpy()
+
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []
             in_position = False
@@ -117,10 +125,10 @@ class ATRBreakoutStrategy:
             stop_half = None
             stop_full = None
 
-            for t in bars.index:
-                if pd.isna(donchian_upper[t]):
+            for i, t in enumerate(index):
+                if pd.isna(donchian_upper_arr[i]):
                     continue
-                c = close[t]
+                c = close_arr[i]
 
                 if in_position:
                     if not half_sold:
@@ -140,7 +148,7 @@ class ATRBreakoutStrategy:
                         half_sold = False
                         stop_half = None
                         stop_full = None
-                elif c > donchian_upper[t] and entry_gate[t]:
+                elif c > donchian_upper_arr[i] and entry_gate_arr[i]:
                     stop_half = c * (1 - stop_pct_half)
                     stop_full = c * (1 - stop_pct_full)
                     in_position = True
@@ -159,6 +167,8 @@ class ATRBreakoutStrategy:
             return events
 
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
+        atr_arr = atr_value.to_numpy()
+        low_arr = bars["low"].to_numpy()
 
         if stop_mode == "two_stage":
             events: list[SignalEvent] = []
@@ -167,10 +177,10 @@ class ATRBreakoutStrategy:
             stage = None  # "tight" 或 "wide"
             stop = None
 
-            for t in bars.index:
-                if pd.isna(donchian_upper[t]) or pd.isna(atr_value[t]):
+            for i, t in enumerate(index):
+                if pd.isna(donchian_upper_arr[i]) or pd.isna(atr_arr[i]):
                     continue
-                c = close[t]
+                c = close_arr[i]
 
                 if in_position:
                     if stage == "tight" and (c - entry_price) / entry_price >= profit_switch_pct:
@@ -186,9 +196,9 @@ class ATRBreakoutStrategy:
                         stop = None
                     elif stage == "wide":
                         stop = max(stop, c * (1 - stop_pct))
-                elif c > donchian_upper[t] and entry_gate[t]:
+                elif c > donchian_upper_arr[i] and entry_gate_arr[i]:
                     entry_price = c
-                    stop = bars["low"][t] if initial_stop_basis == "bar_low" else c - initial_stop_atr_multiplier * atr_value[t]
+                    stop = low_arr[i] if initial_stop_basis == "bar_low" else c - initial_stop_atr_multiplier * atr_arr[i]
                     stage = "tight"
                     in_position = True
                     events.append(
@@ -205,10 +215,10 @@ class ATRBreakoutStrategy:
 
             return events
 
-        def next_stop(c: float, t) -> float:
+        def next_stop(c: float, atr_val: float) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
-            return c - atr_multiplier * atr_value[t]
+            return c - atr_multiplier * atr_val
 
         stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "ATR移動停損"
 
@@ -216,10 +226,10 @@ class ATRBreakoutStrategy:
         in_position = False
         stop = None
 
-        for t in bars.index:
-            if pd.isna(donchian_upper[t]) or (stop_mode == "atr" and pd.isna(atr_value[t])):
+        for i, t in enumerate(index):
+            if pd.isna(donchian_upper_arr[i]) or (stop_mode == "atr" and pd.isna(atr_arr[i])):
                 continue
-            c = close[t]
+            c = close_arr[i]
 
             if in_position:
                 if c < stop:
@@ -229,9 +239,9 @@ class ATRBreakoutStrategy:
                     in_position = False
                     stop = None
                 else:
-                    stop = max(stop, next_stop(c, t))
-            elif c > donchian_upper[t] and entry_gate[t]:
-                stop = next_stop(c, t)
+                    stop = max(stop, next_stop(c, atr_arr[i]))
+            elif c > donchian_upper_arr[i] and entry_gate_arr[i]:
+                stop = next_stop(c, atr_arr[i])
                 events.append(
                     SignalEvent(symbol, self.name, Direction.BUY, c, t, f"創{donchian_period}日新高突破，{stop_label} {stop:.2f}")
                 )

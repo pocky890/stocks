@@ -749,3 +749,37 @@ Python寫入的ts用`'T'`分隔日期跟時間(`2026-05-18T00:20:42`)，SQLite�
 retention_days)`算門檻(跟寫入ts用同一個時鐘、同一種isoformat()字串格式)，不再依賴
 SQLite的`datetime('now', ...)`，兩邊統一用本機時間，不會再有時區或分隔字元不一致的
 問題。
+
+## 2026-08-17：觀察清單股票數變多後dashboard變慢——9支「策略」的evaluate()迴圈改成
+numpy位置索引，減少4~6倍時間
+
+使用者反應股票數變多後dashboard明顯變慢。cProfile量測`build_strategy_recommendations`
+(49檔)找到根本原因：`chip_momentum`/`trust_momentum`/`golden_cross_scaleout`/
+`atr_breakout`/`breakout`/`trend_following`/`long_swing`/`bullish_divergence`/
+`capitulation_reversal`這9支需要逐bar維護部位狀態(position/stop等)的策略，內部迴圈
+全部寫成`for t in bars.index: ... series[t] ...`——`series[t]`是label-based lookup
+(`DatetimeIndex.get_loc()`)，逐bar呼叫十幾次、乘上2400+個bar、乘上9支策略，profiling
+量到這類lookup占了`evaluate()`總時間將近8成(734743次呼叫、13秒中的絕大部分)。
+
+**已修正**：全部9支策略改成迴圈前用`.to_numpy()`把用得到的Series轉成array，迴圈內
+改用`for i, t in enumerate(bars.index): ... arr[i] ...`位置索引——邏輯完全不變，只是
+indexing方式從label-based改成positional，兩者理論上該給出完全相同的結果。**每一支
+修改後都寫了獨立的old-vs-new比對腳本**(從git HEAD取出修改前的版本、對同一組合成
+K棒資料、跑過該策略所有stop_mode/entry_mode組合，逐筆event—by—event比對tuple完全
+相等)，涵蓋了原本測試覆蓋不到的分支(例如atr_breakout的tiered_pct/two_stage、
+bullish_divergence跟capitulation_reversal的structural+enable_tiered_profit)——不是
+只靠現有單元測試碰運氣，是每個stop_mode組合都對過。全套295個單元測試也全部通過。
+
+實測結果(全觀察清單49檔)：`build_strategy_recommendations`(買進/賣出策略訊號，
+每30秒自動刷新)4.72s→1.12s，`build_paper_trades`(模擬交易紀錄)7.61s→1.20s，
+`recompute_strategy_selection.py`(49檔×9策略全跑)2.9s。重跑`recompute_strategy_
+selection.py`確認排除清單結果**完全沒變**(0個變動、48個維持不變)——不只是自己寫的
+合成測試資料驗證過，連真實資料庫套用完整策略參數也是100%行為不變，不是巧合通過測試
+而已。
+
+其餘10支「指標訊號」類策略(bollinger/ma_crossover/macd_strategy/rsi_strategy/
+kd_strategy/ma_trend/ma_alignment/volume_anomaly/institutional_streak/price_alert/
+rsi_mean_reversion)也是同樣的`series[t]`寫法，但這些不在dashboard最常呼叫的
+`build_strategy_recommendations`/`build_paper_trades`熱路徑上(只在批次/即時指標
+tier才會跑到)，這次沒有一併優化——如果之後這幾支也覺得慢，可以用同一套手法(numpy
+array位置索引+old-vs-new比對驗證)處理。

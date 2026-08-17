@@ -113,13 +113,41 @@ class GoldenCrossScaleOutStrategy:
             growth_ok = (revenue_growth >= revenue_growth_min_pct) | revenue_growth.isna()
             entry_state = entry_state & growth_ok
 
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫好幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        entry_state_arr = entry_state.to_numpy()
+        score_arr = score.to_numpy()
+        ma_cross_up_arr = ma_cross_up.to_numpy()
+        above_slow_arr = above_slow.to_numpy()
+        chip_backed_arr = chip_backed.to_numpy()
+        breakout_high_arr = breakout_high.to_numpy()
+        volume_confirm_arr = volume_confirm.to_numpy()
+        not_overbought_arr = not_overbought.to_numpy()
+
+        def entry_hits(i: int) -> list[str]:
+            return [
+                label
+                for label, arr in [
+                    (f"MA{fast}>MA{slow}", ma_cross_up_arr),
+                    (f"站上MA{slow}", above_slow_arr),
+                    (f"法人近{chip_lookback_days}日買超", chip_backed_arr),
+                    (f"突破{high_lookback_days}日新高", breakout_high_arr),
+                    ("量增", volume_confirm_arr),
+                    (f"RSI未超買(<{rsi_overbought})", not_overbought_arr),
+                ]
+                if arr[i]
+            ]
+
         if stop_mode == "pct":
             events: list[SignalEvent] = []
             in_position = False
             stop = None
 
-            for t in bars.index:
-                c = close[t]
+            for i, t in enumerate(index):
+                c = close_arr[i]
                 if in_position:
                     if c < stop:
                         events.append(
@@ -129,20 +157,9 @@ class GoldenCrossScaleOutStrategy:
                         stop = None
                     else:
                         stop = max(stop, c * (1 - stop_pct))
-                elif entry_state[t]:
+                elif entry_state_arr[i]:
                     stop = c * (1 - stop_pct)
-                    hits = [
-                        label
-                        for label, series in [
-                            (f"MA{fast}>MA{slow}", ma_cross_up),
-                            (f"站上MA{slow}", above_slow),
-                            (f"法人近{chip_lookback_days}日買超", chip_backed),
-                            (f"突破{high_lookback_days}日新高", breakout_high),
-                            ("量增", volume_confirm),
-                            (f"RSI未超買(<{rsi_overbought})", not_overbought),
-                        ]
-                        if series[t]
-                    ]
+                    hits = entry_hits(i)
                     events.append(
                         SignalEvent(
                             symbol,
@@ -150,7 +167,7 @@ class GoldenCrossScaleOutStrategy:
                             Direction.BUY,
                             c,
                             t,
-                            f"打分{score[t]}分達標({'、'.join(hits)})，{stop_pct * 100:.0f}%移動停損 {stop:.2f}",
+                            f"打分{score_arr[i]}分達標({'、'.join(hits)})，{stop_pct * 100:.0f}%移動停損 {stop:.2f}",
                         )
                     )
                     in_position = True
@@ -165,41 +182,36 @@ class GoldenCrossScaleOutStrategy:
         prev_exit_remaining = exit_remaining_condition.shift(1).fillna(False).astype(bool)
         break_remaining_edge = exit_remaining_condition & ~prev_exit_remaining
 
+        ma_mid_arr = ma_mid.to_numpy()
+        ma_fast_arr = ma_fast.to_numpy()
+        ma_slow_arr = ma_slow.to_numpy()
+        break_half_edge_arr = break_half_edge.to_numpy()
+        break_remaining_edge_arr = break_remaining_edge.to_numpy()
+
         events: list[SignalEvent] = []
         position = 0  # 0=空手, 2=全倉, 1=剩一半
 
-        for t in bars.index:
-            c = close[t]
-            if position == 2 and break_half_edge[t]:
+        for i, t in enumerate(index):
+            c = close_arr[i]
+            if position == 2 and break_half_edge_arr[i]:
                 events.append(
                     SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{fast}日均線且量能放大，賣出一半")
                 )
                 position = 1
-            if position == 1 and break_remaining_edge[t]:
+            if position == 1 and break_remaining_edge_arr[i]:
                 reasons = []
-                if close[t] < ma_mid[t]:
+                if close_arr[i] < ma_mid_arr[i]:
                     reasons.append(f"跌破{mid}日均線")
-                if ma_fast[t] < ma_slow[t]:
+                if ma_fast_arr[i] < ma_slow_arr[i]:
                     reasons.append(f"{fast}日均線跌破{slow}日均線")
                 events.append(
                     SignalEvent(symbol, self.name, Direction.SELL, c, t, "、".join(reasons) + "，賣出剩餘一半")
                 )
                 position = 0
-            if position == 0 and entry_state[t]:
-                hits = [
-                    label
-                    for label, series in [
-                        (f"MA{fast}>MA{slow}", ma_cross_up),
-                        (f"站上MA{slow}", above_slow),
-                        (f"法人近{chip_lookback_days}日買超", chip_backed),
-                        (f"突破{high_lookback_days}日新高", breakout_high),
-                        ("量增", volume_confirm),
-                        (f"RSI未超買(<{rsi_overbought})", not_overbought),
-                    ]
-                    if series[t]
-                ]
+            if position == 0 and entry_state_arr[i]:
+                hits = entry_hits(i)
                 events.append(
-                    SignalEvent(symbol, self.name, Direction.BUY, c, t, f"打分{score[t]}分達標({'、'.join(hits)})")
+                    SignalEvent(symbol, self.name, Direction.BUY, c, t, f"打分{score_arr[i]}分達標({'、'.join(hits)})")
                 )
                 position = 2
 

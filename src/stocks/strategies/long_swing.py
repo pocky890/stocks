@@ -98,30 +98,47 @@ class LongSwingStrategy:
         below_streak = below_fast.groupby(group_id).cumcount() + 1
         exit_confirmed = below_fast & (below_streak >= exit_confirm_days)
 
-        def next_stop(c: float, t) -> float:
+        def next_stop(c: float, atr_val: float) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
-            return c - atr_multiplier * atr_value[t]
+            return c - atr_multiplier * atr_val
 
         stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else f"{atr_multiplier}倍ATR停損"
+
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫十幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引(.iloc等價，但更快)，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        ma_slow_arr = ma_slow.to_numpy()
+        atr_arr = atr_value.to_numpy()
+        trend_strong_arr = trend_strong.to_numpy()
+        regime_active_arr = regime_active.to_numpy()
+        exit_confirmed_arr = exit_confirmed.to_numpy()
+        within_drawdown_limit_arr = within_drawdown_limit.to_numpy()
+        price_above_fast_arr = price_above_fast.to_numpy()
+        chip_support_arr = chip_support.to_numpy()
+        not_overbought_arr = not_overbought.to_numpy()
+        price_above_reentry_arr = price_above_reentry.to_numpy()
+        reentry_volume_ok_arr = reentry_volume_ok.to_numpy()
 
         events: list[SignalEvent] = []
         in_position = False
         stop = None
         had_entry_this_regime = False
 
-        for t in bars.index:
-            c = close[t]
-            if pd.isna(ma_slow[t]) or (stop_mode == "atr" and pd.isna(atr_value[t])) or pd.isna(trend_strong[t]):
+        for i, t in enumerate(index):
+            c = close_arr[i]
+            if pd.isna(ma_slow_arr[i]) or (stop_mode == "atr" and pd.isna(atr_arr[i])) or pd.isna(trend_strong_arr[i]):
                 continue
-            if not regime_active[t]:
+            if not regime_active_arr[i]:
                 had_entry_this_regime = False
 
             if in_position:
                 exit_stop = c < stop
-                if exit_confirmed[t] or exit_stop:
+                if exit_confirmed_arr[i] or exit_stop:
                     reasons = []
-                    if exit_confirmed[t]:
+                    if exit_confirmed_arr[i]:
                         reasons.append(f"連續{exit_confirm_days}天跌破{trend_fast}日均線")
                     if exit_stop:
                         reasons.append(f"跌破{stop_label} {stop:.2f}")
@@ -129,11 +146,11 @@ class LongSwingStrategy:
                     in_position = False
                     stop = None
                 else:
-                    stop = max(stop, next_stop(c, t))
-            elif regime_active[t] and price_above_fast[t] and within_drawdown_limit[t]:
+                    stop = max(stop, next_stop(c, atr_arr[i]))
+            elif regime_active_arr[i] and price_above_fast_arr[i] and within_drawdown_limit_arr[i]:
                 if not had_entry_this_regime:
-                    if chip_support[t] and not_overbought[t]:
-                        stop = next_stop(c, t)
+                    if chip_support_arr[i] and not_overbought_arr[i]:
+                        stop = next_stop(c, atr_arr[i])
                         in_position = True
                         had_entry_this_regime = True
                         events.append(
@@ -146,8 +163,8 @@ class LongSwingStrategy:
                                 f"首次進場：{trend_fast}日>{trend_slow}日均線多頭排列，法人近{chip_lookback_days}日買超為正，RSI未超買",
                             )
                         )
-                elif price_above_reentry[t] and trend_strong[t] and reentry_volume_ok[t]:
-                    stop = next_stop(c, t)
+                elif price_above_reentry_arr[i] and trend_strong_arr[i] and reentry_volume_ok_arr[i]:
+                    stop = next_stop(c, atr_arr[i])
                     in_position = True
                     events.append(
                         SignalEvent(
@@ -159,8 +176,8 @@ class LongSwingStrategy:
                             f"同趨勢重新進場：站回{reentry_ma_period}日均線且{trend_fast}日均線仍上揚",
                         )
                     )
-                elif price_above_reentry[t] and chip_support[t] and not_overbought[t] and reentry_volume_ok[t]:
-                    stop = next_stop(c, t)
+                elif price_above_reentry_arr[i] and chip_support_arr[i] and not_overbought_arr[i] and reentry_volume_ok_arr[i]:
+                    stop = next_stop(c, atr_arr[i])
                     in_position = True
                     events.append(
                         SignalEvent(

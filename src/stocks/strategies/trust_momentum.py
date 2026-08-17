@@ -121,19 +121,27 @@ class TrustMomentumStrategy:
             growth_ok = (revenue_growth >= revenue_growth_min_pct) | revenue_growth.isna()
             entry_condition = entry_condition & growth_ok
 
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫好幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        entry_condition_arr = entry_condition.to_numpy()
+
         if stop_mode == "volume_alert_scaleout":
             ma_alert = sma(close, alert_ma_period)
             avg_vol_alert = rolling_avg_volume(bars["volume"], alert_volume_avg_period)
             volume_alert_condition = (close < ma_alert) & (bars["volume"] > alert_volume_multiplier * avg_vol_alert)
+            volume_alert_condition_arr = volume_alert_condition.to_numpy()
 
             events: list[SignalEvent] = []
             position = 0  # 0=空手, 2=全倉, 1=剩半倉
             stop = None
             cooldown_remaining = 0
 
-            for t in bars.index:
-                c = close[t]
-                if position == 2 and volume_alert_condition[t]:
+            for i, t in enumerate(index):
+                c = close_arr[i]
+                if position == 2 and volume_alert_condition_arr[i]:
                     events.append(
                         SignalEvent(
                             symbol,
@@ -157,7 +165,7 @@ class TrustMomentumStrategy:
                         cooldown_remaining = cooldown_days
                 if position == 0 and cooldown_remaining > 0:
                     cooldown_remaining -= 1
-                elif position == 0 and entry_condition[t]:
+                elif position == 0 and entry_condition_arr[i]:
                     events.append(
                         SignalEvent(
                             symbol,
@@ -180,8 +188,8 @@ class TrustMomentumStrategy:
             stop_full = None
             cooldown_remaining = 0
 
-            for t in bars.index:
-                c = close[t]
+            for i, t in enumerate(index):
+                c = close_arr[i]
                 if in_position:
                     if not half_sold:
                         stop_half = max(stop_half, c * (1 - stop_pct_half))
@@ -203,7 +211,7 @@ class TrustMomentumStrategy:
                         cooldown_remaining = cooldown_days
                 elif cooldown_remaining > 0:
                     cooldown_remaining -= 1
-                elif entry_condition[t]:
+                elif entry_condition_arr[i]:
                     stop_half = c * (1 - stop_pct_half)
                     stop_full = c * (1 - stop_pct_full)
                     in_position = True
@@ -223,11 +231,12 @@ class TrustMomentumStrategy:
             return events
 
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
+        atr_arr = atr_value.to_numpy()
 
-        def next_stop(c: float, t) -> float:
+        def next_stop(c: float, atr_val: float) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
-            return c - atr_multiplier * atr_value[t]
+            return c - atr_multiplier * atr_val
 
         stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "ATR移動停損"
 
@@ -236,20 +245,20 @@ class TrustMomentumStrategy:
         stop = None
         cooldown_remaining = 0
 
-        for t in bars.index:
-            c = close[t]
+        for i, t in enumerate(index):
+            c = close_arr[i]
             if in_position:
                 if c < stop:
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_label} {stop:.2f}"))
                     in_position = False
                     stop = None
                     cooldown_remaining = cooldown_days
-                elif stop_mode == "pct" or not pd.isna(atr_value[t]):
-                    stop = max(stop, next_stop(c, t))
+                elif stop_mode == "pct" or not pd.isna(atr_arr[i]):
+                    stop = max(stop, next_stop(c, atr_arr[i]))
             elif cooldown_remaining > 0:
                 cooldown_remaining -= 1
-            elif entry_condition[t] and (stop_mode == "pct" or not pd.isna(atr_value[t])):
-                stop = next_stop(c, t)
+            elif entry_condition_arr[i] and (stop_mode == "pct" or not pd.isna(atr_arr[i])):
+                stop = next_stop(c, atr_arr[i])
                 events.append(
                     SignalEvent(
                         symbol,

@@ -108,6 +108,14 @@ class CapitulationReversalStrategy:
             long_trend_ok = sma(close, long_trend_ma_period).diff(long_trend_slope_lookback) > 0
             confirms_reversal = confirms_reversal & long_trend_ok
 
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫好幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        confirms_reversal_arr = confirms_reversal.to_numpy()
+        prev_low_arr = prev_low.to_numpy()
+
         if stop_mode == "tiered_pct":
             events: list[SignalEvent] = []
             in_position = False
@@ -115,8 +123,8 @@ class CapitulationReversalStrategy:
             stop_half = None
             stop_full = None
 
-            for t in bars.index:
-                c = close[t]
+            for i, t in enumerate(index):
+                c = close_arr[i]
                 if in_position:
                     if not half_sold:
                         stop_half = max(stop_half, c * (1 - stop_pct_half))
@@ -135,7 +143,7 @@ class CapitulationReversalStrategy:
                         half_sold = False
                         stop_half = None
                         stop_full = None
-                elif confirms_reversal[t]:
+                elif confirms_reversal_arr[i]:
                     stop_half = c * (1 - stop_pct_half)
                     stop_full = c * (1 - stop_pct_full)
                     in_position = True
@@ -156,6 +164,7 @@ class CapitulationReversalStrategy:
 
         if stop_mode == "structural" and enable_tiered_profit:
             ma_tiered = sma(close, tiered_ma_period)
+            ma_tiered_arr = ma_tiered.to_numpy()
             events: list[SignalEvent] = []
             in_position = False
             half_sold = False
@@ -164,8 +173,8 @@ class CapitulationReversalStrategy:
             peak = None
             cooldown_remaining = 0
 
-            for t in bars.index:
-                c = close[t]
+            for i, t in enumerate(index):
+                c = close_arr[i]
                 if in_position:
                     if not half_sold:
                         if c < stop:
@@ -176,7 +185,7 @@ class CapitulationReversalStrategy:
                             entry_price = None
                             stop = None
                             cooldown_remaining = loss_cooldown_days
-                        elif not pd.isna(ma_tiered[t]) and c >= ma_tiered[t]:
+                        elif not pd.isna(ma_tiered_arr[i]) and c >= ma_tiered_arr[i]:
                             events.append(
                                 SignalEvent(symbol, self.name, Direction.SELL, c, t, f"觸及{tiered_ma_period}日均線，賣出一半")
                             )
@@ -200,9 +209,9 @@ class CapitulationReversalStrategy:
                             stop = max(stop, peak * (1 - stop_pct))
                 elif cooldown_remaining > 0:
                     cooldown_remaining -= 1
-                elif confirms_reversal[t]:
+                elif confirms_reversal_arr[i]:
                     entry_price = c
-                    stop = prev_low[t] * (1 - structural_stop_buffer_pct)
+                    stop = prev_low_arr[i] * (1 - structural_stop_buffer_pct)
                     half_sold = False
                     peak = c
                     events.append(
@@ -221,13 +230,14 @@ class CapitulationReversalStrategy:
             return events
 
         atr_value = atr(bars["high"], bars["low"], close, atr_period)
+        atr_arr = atr_value.to_numpy()
 
-        def next_stop(c: float, t) -> float:
+        def next_stop(c: float, atr_val: float, prev_low_val: float) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
             if stop_mode == "structural":
-                return prev_low[t] * (1 - structural_stop_buffer_pct)
-            return c - atr_multiplier * atr_value[t]
+                return prev_low_val * (1 - structural_stop_buffer_pct)
+            return c - atr_multiplier * atr_val
 
         if stop_mode == "pct":
             stop_label = f"{stop_pct * 100:.0f}%移動停損"
@@ -240,19 +250,19 @@ class CapitulationReversalStrategy:
         in_position = False
         stop = None
 
-        for t in bars.index:
-            c = close[t]
+        for i, t in enumerate(index):
+            c = close_arr[i]
             if in_position:
                 if c < stop:
                     events.append(SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{stop_label} {stop:.2f}"))
                     in_position = False
                     stop = None
-                elif stop_mode == "pct" or (stop_mode == "atr" and not pd.isna(atr_value[t])):
+                elif stop_mode == "pct" or (stop_mode == "atr" and not pd.isna(atr_arr[i])):
                     # structural停損進場後固定不動(保護的是恐慌是否真的止穩，不是拿來
                     # 鎖定後續獲利用的移動停損)，所以這裡刻意不幫structural往上移動。
-                    stop = max(stop, next_stop(c, t))
-            elif confirms_reversal[t] and (stop_mode in ("pct", "structural") or not pd.isna(atr_value[t])):
-                stop = next_stop(c, t)
+                    stop = max(stop, next_stop(c, atr_arr[i], prev_low_arr[i]))
+            elif confirms_reversal_arr[i] and (stop_mode in ("pct", "structural") or not pd.isna(atr_arr[i])):
+                stop = next_stop(c, atr_arr[i], prev_low_arr[i])
                 events.append(
                     SignalEvent(
                         symbol,

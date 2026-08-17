@@ -90,23 +90,33 @@ class BreakoutStrategy:
             prev_entry = entry_condition.shift(1).fillna(False).astype(bool)
             entry_edge = entry_condition & ~prev_entry
 
-        def next_stop(c: float, t) -> float:
+        def next_stop(c: float, atr_val: float) -> float:
             if stop_mode == "pct":
                 return c * (1 - stop_pct)
-            return c - atr_multiplier * atr_value[t]
+            return c - atr_multiplier * atr_val
 
         stop_label = f"{stop_pct * 100:.0f}%移動停損" if stop_mode == "pct" else "停損"
+
+        # 2026-08-17效能優化：series[t]是label-based lookup(DatetimeIndex.get_loc)，逐bar
+        # 呼叫好幾次、乘上上千個bar，profiling量到佔了evaluate()總時間近8成——先轉成numpy
+        # array用位置索引，邏輯完全不變，只是indexing方式改變。
+        index = bars.index
+        close_arr = close.to_numpy()
+        donchian_upper_arr = donchian_upper.to_numpy()
+        donchian_lower_arr = donchian_lower.to_numpy()
+        atr_arr = atr_value.to_numpy()
+        entry_edge_arr = entry_edge.to_numpy()
 
         events: list[SignalEvent] = []
         in_position = False
         stop = None
 
-        for t in bars.index:
-            c = close[t]
+        for i, t in enumerate(index):
+            c = close_arr[i]
             if in_position:
                 reasons = []
-                if not pd.isna(donchian_lower[t]) and c < donchian_lower[t]:
-                    reasons.append(f"跌破前{low_lookback_days}日最低{donchian_lower[t]:.2f}")
+                if not pd.isna(donchian_lower_arr[i]) and c < donchian_lower_arr[i]:
+                    reasons.append(f"跌破前{low_lookback_days}日最低{donchian_lower_arr[i]:.2f}")
                 if c < stop:
                     reasons.append(f"跌破{stop_label}{stop:.2f}")
                 if reasons:
@@ -114,9 +124,9 @@ class BreakoutStrategy:
                     in_position = False
                     stop = None
                 elif stop_mode == "pct":
-                    stop = max(stop, next_stop(c, t))
-            elif entry_edge[t] and not pd.isna(donchian_upper[t]) and (stop_mode == "pct" or not pd.isna(atr_value[t])):
-                stop = next_stop(c, t)
+                    stop = max(stop, next_stop(c, atr_arr[i]))
+            elif entry_edge_arr[i] and not pd.isna(donchian_upper_arr[i]) and (stop_mode == "pct" or not pd.isna(atr_arr[i])):
+                stop = next_stop(c, atr_arr[i])
                 events.append(
                     SignalEvent(
                         symbol,
