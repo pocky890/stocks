@@ -255,5 +255,14 @@
     "groups": [
       "隊長"
     ]
+  },
+  {
+    "code": "6696",
+    "name": "仁新",
+    "market": "TPEx",
+    "sort_order": 56,
+    "groups": [
+      "隊長"
+    ]
   }
 ]
