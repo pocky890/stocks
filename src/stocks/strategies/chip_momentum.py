@@ -18,7 +18,9 @@ class ChipMomentumStrategy:
     (現行:10)日均線且成交量>alert_volume_multiplier(現行:1.5)倍均量時，先賣出一半
     ("爆量出貨警示")，剩餘半倉改用stop_pct(15%)移動停損出場；一買配兩賣，要用
     simulate_scaleout_trades配對。也支援單一15%移動停損(stop_mode="pct")、2.5倍ATR
-    移動停損("atr")、分批停損("tiered_pct")。
+    移動停損("atr")、分批停損("tiered_pct")。2026-08-17修正：出清完畢的當天不會立刻
+    重新進場(即使進場條件依然成立)，要等到隔天才能重新觸發BUY——避免同一天同一支股票
+    同時出現BUY和SELL訊號，讓通知看起來自相矛盾。
 
     斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
     2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
@@ -148,6 +150,15 @@ class ChipMomentumStrategy:
 
             for i, t in enumerate(index):
                 c = close_arr[i]
+                # 2026-08-17使用者發現：原本這裡是三個獨立的if，如果「今天才把剩餘半倉出清
+                # 完畢」同一天又剛好重新達到進場門檻，會在同一天既賣又買，訊息看起來自相
+                # 矛盾——這是寫法疏漏，不是刻意設計(bullish_divergence/capitulation_reversal
+                # 同樣是兩階段出場，但用的是elif，本來就不會有這個問題)。position_before記住
+                # 這根bar開盤前的部位狀態，只有「今天開盤前就已經空手」才允許進場——今天才
+                # 出清完的部位要等明天才能重新進場，不是同一天立刻回補。跟其他策略(trust_
+                # momentum的atr模式/long_swing/breakout等)用elif達到的效果一致：停損出場後
+                # 最快隔天條件還成立就能重新進場，不會卡死。
+                position_before = position
                 if position == 2 and volume_alert_condition_arr[i]:
                     events.append(
                         SignalEvent(
@@ -169,7 +180,7 @@ class ChipMomentumStrategy:
                         )
                         position = 0
                         stop = None
-                if position == 0 and entry_edge_arr[i]:
+                if position_before == 0 and entry_edge_arr[i]:
                     events.append(
                         SignalEvent(symbol, self.name, Direction.BUY, c, t, f"外資連{chip_streak_days}日買超(未超買)")
                     )

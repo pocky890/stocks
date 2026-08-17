@@ -650,16 +650,21 @@ def test_golden_cross_scaleout_sells_both_halves_same_day_on_gap_down():
     assert "賣出剩餘一半" in sells[1].detail
 
 
-def test_golden_cross_scaleout_reenters_immediately_after_full_exit_while_score_still_qualifies():
+def test_golden_cross_scaleout_reenters_next_bar_after_full_exit_while_score_still_qualifies():
     # 2026-08-17程式碼review發現的bug，跟trust_momentum/long_swing踩過的同一種問題：改成
     # level-triggered之前，進場條件是edge-triggered(entry_state從False變True的第一天才
     # 觸發)。這裡用score_threshold=3把門檻降低，讓「MA3>MA7(+2)+RSI未超買(+1)」這兩項
     # 從第一次進場(idx7)之後就一路維持>=3分沒有掉下來過，即使idx12出現一次量能確認的
     # 真跌破觸發分批出場全部賣光——entry_state在idx7~idx13全程都是True(見下方數值
     # 驗證)，代表舊版edge-triggered邏輯的entry_edge會在這整段期間全部是False(因為
-    # prev_entry_state也一直是True)，出場後永遠不會重新進場，卡死在旁邊。改成
-    # level-triggered後只要position==0時entry_state[t]是True就立刻進場，這裡驗證確實
-    # 在idx12(跌破出場同一天)就重新觸發了第二次BUY。
+    # prev_entry_state也一直是True)，出場後永遠不會重新進場，卡死在旁邊。
+    #
+    # 2026-08-17使用者後來又發現：一開始的修法是用position==0(而不是position_before==0)
+    # 判斷能不能進場，導致idx12「今天才把剩餘半倉出清完畢」同一天又重新達標，會在同一天
+    # 既賣又買，訊息看起來自相矛盾——使用者認為這不合理，不應該有同一天同一策略又買又賣
+    # 的情況。改成用position_before(這根bar開盤前的部位狀態)判斷後，重新進場延後到隔天
+    # (idx13)，跟trust_momentum的atr模式/long_swing等策略用elif達到的效果一致：出場後
+    # 最快隔天條件還成立就能重新進場，不會卡死，但也不會同一天又賣又買。
     closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 16, 19, 21]
     volumes = [1000] * 7 + [3000, 1000, 1000, 1000, 1000, 3000, 1000, 1000]
     bars = make_bars(closes, volumes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
@@ -670,9 +675,10 @@ def test_golden_cross_scaleout_reenters_immediately_after_full_exit_while_score_
     buys = [e for e in events if e.direction == Direction.BUY]
     sells = [e for e in events if e.direction == Direction.SELL]
     assert len(sells) == 2, "idx12量能確認跌破3日線+同時跌破5日線，分批出場兩階段應該同一天出清"
-    assert len(buys) == 2, "出場後score從未跌破門檻，應該立刻重新進場，不用等條件重新False→True轉一輪"
+    assert len(buys) == 2, "出場後score從未跌破門檻，應該最快隔天就重新進場，不用等條件重新False→True轉一輪"
     assert buys[0].ts == bars.index[7]
-    assert buys[1].ts == sells[-1].ts, "第二次進場應該就在完全出清的同一天，不是隔了好幾天才等到edge重新觸發"
+    assert sells[-1].ts == bars.index[12], "兩階段出場應該同一天(idx12)出清完畢"
+    assert buys[1].ts == bars.index[13], "第二次進場應該是完全出清的隔天，不是同一天——同一天又賣又買會讓通知看起來自相矛盾"
 
 
 def test_golden_cross_scaleout_returns_nothing_without_institutional_columns():

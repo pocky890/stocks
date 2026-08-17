@@ -24,8 +24,10 @@ class TrustMomentumStrategy:
     警示更晚觸發，10年/YTD一致變差，未採用。也支援單一移動停損(stop_mode="pct")、ATR
     移動停損("atr")、分批停損("tiered_pct")。
 
-    進場是level-triggered(條件當天成立就觸發，不要求剛從False轉True)，停損出場後只要
-    條件仍成立就能立刻重新進場(除非設定cooldown_days>0，研究參數，見下方)。
+    進場是level-triggered(條件當天成立就觸發，不要求剛從False轉True)，停損出場後最快
+    隔天條件仍成立就能重新進場(除非設定cooldown_days>0，研究參數，見下方)。2026-08-17
+    修正：出清完畢的當天不會立刻重新進場，要等到隔天才能重新觸發BUY——避免同一天同一
+    支股票同時出現BUY和SELL訊號，讓通知看起來自相矛盾。
 
     斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
     2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
@@ -141,6 +143,13 @@ class TrustMomentumStrategy:
 
             for i, t in enumerate(index):
                 c = close_arr[i]
+                # 2026-08-17使用者發現：原本這裡是三個獨立的if，如果「今天才把剩餘半倉出清
+                # 完畢」同一天又剛好重新達到進場門檻，會在同一天既賣又買，訊息看起來自相
+                # 矛盾——這是寫法疏漏，不是刻意設計。position_before記住這根bar開盤前的部位
+                # 狀態，只有「今天開盤前就已經空手」才允許進場(或開始計算冷卻期)——今天才
+                # 出清完的部位要等明天才能重新進場，跟其他策略(atr模式/long_swing等)用elif
+                # 達到的效果一致：停損出場後最快隔天條件還成立就能重新進場，不會卡死。
+                position_before = position
                 if position == 2 and volume_alert_condition_arr[i]:
                     events.append(
                         SignalEvent(
@@ -163,9 +172,9 @@ class TrustMomentumStrategy:
                         position = 0
                         stop = None
                         cooldown_remaining = cooldown_days
-                if position == 0 and cooldown_remaining > 0:
+                if position_before == 0 and cooldown_remaining > 0:
                     cooldown_remaining -= 1
-                elif position == 0 and entry_condition_arr[i]:
+                elif position_before == 0 and entry_condition_arr[i]:
                     events.append(
                         SignalEvent(
                             symbol,

@@ -30,6 +30,8 @@ class GoldenCrossScaleOutStrategy:
       階段1(賣一半)：收盤跌破5日均線，且當天成交量>20日均量
       階段2(賣剩餘一半)：收盤跌破10日均線，或5日均線跌破20日均線(死亡交叉)
     這個模式一買配兩賣，要用simulate_scaleout_trades配對，不能套simulate_round_trips。
+    2026-08-17修正：出清完畢的當天不會立刻重新進場(即使打分依然達標)，要等到隔天才能
+    重新觸發BUY——避免同一天同一支股票同時出現BUY和SELL訊號，讓通知看起來自相矛盾。
 
     斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
     2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
@@ -193,6 +195,12 @@ class GoldenCrossScaleOutStrategy:
 
         for i, t in enumerate(index):
             c = close_arr[i]
+            # 2026-08-17使用者發現：原本這裡是三個獨立的if，如果「今天才把剩餘半倉出清
+            # 完畢」同一天又剛好重新打分達標，會在同一天既賣又買，訊息看起來自相矛盾——這是
+            # 寫法疏漏，不是刻意設計。position_before記住這根bar開盤前的部位狀態，只有「今天
+            # 開盤前就已經空手」才允許進場——今天才出清完的部位要等明天才能重新進場，跟其他
+            # 策略用elif達到的效果一致：出場後最快隔天分數還達標就能重新進場，不會卡死。
+            position_before = position
             if position == 2 and break_half_edge_arr[i]:
                 events.append(
                     SignalEvent(symbol, self.name, Direction.SELL, c, t, f"跌破{fast}日均線且量能放大，賣出一半")
@@ -208,7 +216,7 @@ class GoldenCrossScaleOutStrategy:
                     SignalEvent(symbol, self.name, Direction.SELL, c, t, "、".join(reasons) + "，賣出剩餘一半")
                 )
                 position = 0
-            if position == 0 and entry_state_arr[i]:
+            if position_before == 0 and entry_state_arr[i]:
                 hits = entry_hits(i)
                 events.append(
                     SignalEvent(symbol, self.name, Direction.BUY, c, t, f"打分{score_arr[i]}分達標({'、'.join(hits)})")
