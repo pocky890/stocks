@@ -32,6 +32,7 @@ from stocks.db import (
     get_symbol_groups,
     import_watchlist_snapshot,
     init_db,
+    insert_bars_5min,
     move_watchlist_symbol,
     remove_from_watchlist,
     set_setting,
@@ -215,13 +216,29 @@ def _fetch_today_intraday(_config, symbols: tuple):
     跟目前價位同一個節奏更新；▲▼/移除按鈕點擊時如果快取還沒過期也會直接沿用，不用
     每次都重新登入Shioaji。呼叫端一定要傳「整個觀察清單」的symbols，不是群組篩選後的
     子集合——2026-08-17發現：如果傳群組篩選後的symbols，切換群組會換一個新的tuple，
-    每次都要重新連線Shioaji(現場連線有真實網路延遲)，這是切換群組明顯變慢的主因之一。"""
+    每次都要重新連線Shioaji(現場連線有真實網路延遲)，這是切換群組明顯變慢的主因之一。
+
+    2026-08-17再發現：抓到的分K同時寫回bars_5min——「目前價位」/「漲跌」/RSI/MACD/
+    布林通道(build_overview_row_for_symbol)讀的是bars_5min，本來完全依賴run_live.py
+    整天掛著背景累積；run_live.py一旦停住(例如踩到Shioaji SDK卡死的bug)，這些欄位會
+    凍結在run_live.py最後一次成功寫入的時間點，但這裡的即時走勢小圖是現場另外直連
+    Shioaji抓的、不受影響，兩邊各自新鮮度不一致，會出現「走勢圖已經在漲、現價卻顯示跌」
+    這種自相矛盾的畫面(2026-08-17使用者實際看到過)。寫回bars_5min後，_current_price()
+    既有的新鮮度判斷(INTRADAY_FRESH_WITHIN)會直接吃到這裡寫入的資料，不用等
+    run_live.py——即使run_live.py整個沒在跑，dashboard自己開著也能維持現價/指標新鮮，
+    也讓兩個欄位真正共用同一份資料來源，不會再互相矛盾。"""
     client = ShioajiClient(_config)
     client.connect()
     try:
-        return client.fetch_today_kbars(list(symbols))
+        bars = client.fetch_today_kbars(list(symbols))
     finally:
         client.disconnect()
+
+    all_bars = [b for symbol_bars in bars.values() for b in symbol_bars]
+    if all_bars:
+        with connect(_config.db_path) as conn:
+            insert_bars_5min(conn, all_bars)
+    return bars
 
 
 def _render_watchlist_table_body(config, all_symbols: tuple, symbols: tuple):
@@ -242,8 +259,12 @@ def _render_watchlist_table_body(config, all_symbols: tuple, symbols: tuple):
     table_static不要「自動」輪詢(拿掉run_every)，但沒擋掉「被動」觸發時仍然會真的
     連線Shioaji這件事——這才是切群組/訊號紀錄頁籤偶爾還是覺得慢的殘留原因(30秒快取
     一過期，下一次任何操作觸發的整頁rerun就要重新登入Shioaji，跟使用者在看哪個頁籤
-    無關)。收盤時段直接跳過這次連線，不只是不自動排程。"""
-    overview_rows = _cached_overview_rows_for(config, symbols)
+    無關)。收盤時段直接跳過這次連線，不只是不自動排程。
+
+    2026-08-17改成先抓intraday_bars再算overview_rows(順序對調)：_fetch_today_intraday
+    現在會把抓到的分K寫回bars_5min(見該函式docstring)，overview_rows(透過
+    build_overview_row_for_symbol讀bars_5min算現價/漲跌/RSI等)排在寫入之後，同一次
+    render就能吃到最新資料，不用等下一個30秒週期才生效。"""
     if all_symbols and is_market_open_now(config, datetime.now()):
         try:
             intraday_bars = _fetch_today_intraday(config, all_symbols)
@@ -252,6 +273,7 @@ def _render_watchlist_table_body(config, all_symbols: tuple, symbols: tuple):
             st.warning(f"⚠️ 抓即時盤中資料失敗，今日走勢欄位暫時顯示「尚無盤中資料」：{exc}")
     else:
         intraday_bars = {}
+    overview_rows = _cached_overview_rows_for(config, symbols)
 
     headers = ["", "", "代號", "名稱", "今日走勢", "漲跌", "目前價位", "5日", "10日", "月線", "季線", "RSI", "MACD", "布林通道", "成交量", "KD", "三大法人", ""]
     widths = [0.35, 0.35, 0.8, 0.9, 1.3, 1.2, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 1.3, 1.6, 0.9]
