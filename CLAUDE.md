@@ -850,3 +850,41 @@ call_hangs_past_timeout`測試(用`login()`那個測試同一套手法：monkeyp
 `subscribe_ticks`只在`run_live.py`啟動時呼叫一次(不在每30秒的熱路徑上，衝擊範圍小)，
 `disconnect()`調用頻率也低，兩者風險都遠低於`fetch_kbars`(dashboard每30秒對50+檔跑一次)，
 這次沒有動，但如果之後又遇到類似的無聲卡死，先檢查這兩個是不是下一個未上鎖的缺口。
+
+## 2026-08-17：觀察清單移除23支未分組股票+發現本機月營收資料是0筆
+
+順手把觀察清單裡從沒被分進任何自訂群組的23支股票移除(2026-08-16那批基本面濾網研究樣本
+8444/2929/4426/8437/4174/8044/1340/2239/3552/4529/8429/2726/1338/1565/4552/4416/8450+
+00664R反向ETF+更早加的6806/2314/4763/5904/6763)，軟刪除(is_watchlist=0，歷史資料保留)，
+只留原本已分組的28支核心持股，`data/watchlist_shared.json`已重新匯出同步。
+
+順便查了這28支在這台電腦上的`monthly_revenue`/`industry_code`覆蓋率，**發現一個這次才
+浮出來的資料缺口**：這28支股票的`monthly_revenue`表**是0筆，一支都沒有**。原因跟三大法人
+歷史回補當初踩過的坑類似——**`import_watchlist_snapshot()`(跨機器透過`watchlist_shared.
+json`同步觀察清單)只同步代號/名稱/市場/排序/群組，完全不會觸發任何歷史資料回補**(價格/
+籌碼/估值/月營收/產業代號)。這28支股票會出現在這台電腦的觀察清單裡，是透過git同步
+`watchlist_shared.json`進來的，不是在這台電腦上用`add_symbol_to_watchlist()`親自新增
+的——後者(`daily_update.add_symbol_to_watchlist()`)才會自動觸發三大法人/估值/月營收/
+產業代號的完整回補，前者不會。而月營收這個管線是2026-08-16才加的(比這28支股票加入觀察
+清單的時間晚)，所以就算某支股票當初真的是在這台電腦上用`add_symbol_to_watchlist()`加的，
+也不會回溯補上月營收——只有「加入當下管線已經存在」的資料才會自動回補。
+
+`config.json`現在`chip_momentum`/`trust_momentum`/`golden_cross_scaleout`/
+`atr_breakout`/`breakout`這5支策略都設了`require_revenue_growth: true`，但程式碼是
+「缺資料時NaN一律未知不擋」——**代表這台電腦上這道濾網這段時間等於完全沒在生效**，
+不是策略邏輯錯，是本機資料沒補齊，跟程式碼行為不一致的地方在資料層，不在邏輯層。
+
+**已修正**：跑`scripts/fetch_market_data.py`幫這28支補齊月營收(0→28支全有)，
+`scripts/populate_industry_codes.py`補產業代號(27/28→仍27/28——**3595山太士這1支
+查證是`populate_industry_codes.py`本身的設計限制**：同產業公司數<10家時該腳本會
+刻意跳過不指定，避免產業寬度斷路器統計樣本太小不可靠，不是抓取失敗，沒辦法用重跑
+解決)，並重跑`scripts/recompute_strategy_selection.py`同步月營收濾網真的生效後的
+排除清單結果。
+
+**這是一個一般性的規則，不是只有這28支的個案**：**之後只要有新股票是透過
+`watchlist_shared.json`跨機器同步(git pull)方式出現在觀察清單裡的(而不是在這台電腦上
+親自用dashboard「新增股票」功能加的)，都要記得手動跑`scripts/fetch_market_data.py`+
+`scripts/populate_industry_codes.py`幫它補齊三大法人/估值/月營收/產業代號歷史，不能
+假設同步進來的股票資料是完整的。**跟本檔案最上面「每台電腦拉新commit後要做的事」
+是同一類「git本身看不出來、容易漏掉」的坑，只是這次的觸發條件是「觀察清單股票」而不是
+「策略參數」。
