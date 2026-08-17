@@ -16,6 +16,9 @@ DIRECTION_LABEL = {Direction.BUY: "買", Direction.SELL: "賣"}
 # bug)——2026-08-17使用者實際踩到run_live.py被中止3小時多都沒人發現的案例後新增。
 RUN_LIVE_HEARTBEAT_KEY = "run_live_last_heartbeat"
 RUN_LIVE_STALL_ALERTED_KEY = "run_live_stall_alerted"
+# check_run_live_heartbeat.py用的緩衝期狀態：第一次發現心跳不新鮮的時間點，等下一輪還是
+# 不新鮮才真的警告，避免開機延遲時run_live.py還在啟動中的空窗被誤判成「已經停止」。
+RUN_LIVE_STALE_SINCE_KEY = "run_live_stale_since"
 MAX_BATCH_SYMBOLS_LISTED = 30
 # 只有這幾個「進場/出場邏輯完整、可以直接照著做」的策略會推播——單一指標(RSI/MACD/KD/
 # 均線交叉...)本身誤判率較高，不再各自觸發通知，但照樣會寫進signal_events(訊號紀錄頁籤

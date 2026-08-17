@@ -990,3 +990,37 @@ dashboard/Streamlit完全無關。
 
 **這支腳本解決的是「新增」股票的資料缺口，不處理「移除」**——移除是軟刪除
 (`is_watchlist=0`)，歷史資料留著沒事，不需要清理，兩者不是對稱的問題。
+
+## 2026-08-17：五個排程任務改成S4U登入方式+StartWhenAvailable，並幫心跳檢查加緩衝期
+
+使用者問「我只要有開機不用登入對吧」——查證後發現不對：`TWStocks-RunLive`/
+`TWStocks-RunBatch`/`TWStocks-CheckRunLiveHeartbeat`/`TWStocks-BackfillMissingWatchlist
+Data`/`TWStocks-RecomputeStrategySelection`全部五個排程任務的`Principal.LogonType`都是
+`Interactive`——這代表只開機、卡在登入畫面不算，一定要實際登入(輸入密碼/PIN/Windows
+Hello)才會觸發，不只是這次新增的兩個任務，連原本就有的run_live.py/run_batch.py排程
+也是。**已改成`LogonType=S4U`**(不需要存密碼，帳號登入過一次即可在未登入狀態下執行)，
+需要系統管理員權限才能改(這個環境本身沒有admin權限，是使用者自己在系統管理員PowerShell
+視窗跑指令改的)。
+
+順便查到另一個落差：這次新增的兩個任務(`TWStocks-CheckRunLiveHeartbeat`/`TWStocks-
+BackfillMissingWatchlistData`)的`StartWhenAvailable`是`False`，跟原本就有的`RunLive`/
+`RunBatch`(`True`)不一致——`StartWhenAvailable=False`代表如果排程觸發時間電腦剛好是
+關著的，這次觸發會直接跳過、不會等開機後補跑，要等到明天同一個時間才會再觸發。**已改成
+`True`**(同樣需要admin權限，使用者手動執行)，跟另外三個任務一致，開機比平常晚也不會平白
+跳過一整天。
+
+**改完之後意外浮出的新問題**：`RunLive`/`CheckRunLiveHeartbeat`都設`StartWhenAvailable=
+True`後，開機比平常晚(例如10點才開機)時兩個任務幾乎同時被觸發補跑——但`run_live.py`
+啟動需要一點時間(載入設定/連線Shioaji/訂閱報價)，這幾分鐘的空窗如果剛好被心跳檢查
+碰到，會誤判成「已經停止」馬上發一次「心跳中斷」警告，等`run_live.py`真正寫下第一筆
+心跳、下一輪檢查又馬上發「心跳恢復」——兩則訊息都是誤報，不是真的出問題。
+
+**已修正**(`scripts/check_run_live_heartbeat.py`)：`evaluate_heartbeat()`加一段緩衝期
+(`GRACE_PERIOD_MINUTES=10`)——第一次發現心跳不新鮮時只記錄「從現在開始不新鮮」
+(新增`app_settings`的`run_live_stale_since`這個key，`stocks.notifier.
+RUN_LIVE_STALE_SINCE_KEY`)，不馬上警告；只有再過一輪檢查(約10分鐘後)還是不新鮮，才真的
+發`alert_stalled`警告。開機延遲的空窗通常一兩分鐘就會被`run_live.py`自己補上，撐不過
+一輪緩衝期就會恢復新鮮，直接判定正常(不會先alert再alert_recovered，是完全不觸發任何
+訊息)；真正停止的話會連續兩輪都不新鮮，一樣能在10~20分鐘內抓到，跟沒有緩衝期比只是多等
+一輪，跟今天3小時多才發現比起來差距很小。8個單元測試涵蓋新行為(含「開機延遲但心跳準時
+恢復，完全不觸發任何警告」這個關鍵情境)，311個單元測試全過。
