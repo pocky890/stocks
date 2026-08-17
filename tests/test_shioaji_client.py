@@ -1,6 +1,8 @@
+import time
 import types
 from datetime import date, datetime
 
+from stocks import shioaji_client as shioaji_client_module
 from stocks.config import Config
 from stocks.shioaji_client import ShioajiClient
 
@@ -80,6 +82,53 @@ def test_on_session_down_flips_connected_flag():
     assert client._connected is False
 
 
+class FakeShioajiApi:
+    def __init__(self, login_delay: float = 0.0):
+        self._login_delay = login_delay
+        self.login_called_with = None
+        self.session_down_callback = None
+
+    def login(self, api_key, secret_key):
+        self.login_called_with = (api_key, secret_key)
+        if self._login_delay:
+            time.sleep(self._login_delay)
+
+    def on_session_down(self, callback):
+        self.session_down_callback = callback
+
+
+def test_connect_succeeds_and_sets_connected_flag_when_login_returns_quickly(monkeypatch):
+    # 2026-08-17新增：connect()本來完全沒有直接測試過(其他測試都monkeypatch整個connect
+    # 方法繞過它)，現在改成背景執行緒+逾時包裝，要驗證正常情況下行為不變。
+    fake_api = FakeShioajiApi()
+    monkeypatch.setattr(shioaji_client_module.sj, "Shioaji", lambda simulation: fake_api)
+    client = ShioajiClient(make_config())
+
+    client.connect()
+
+    assert client._connected is True
+    assert fake_api.login_called_with == ("key", "secret")
+    assert fake_api.session_down_callback == client._on_session_down
+
+
+def test_connect_raises_connection_error_when_login_hangs_past_timeout(monkeypatch):
+    # 2026-08-17發現的bug：sj.Shioaji.login()網路異常時可能無限期卡住不回傳也不拋例外，
+    # 這裡用一個「login會睡超過逾時時間」的假api模擬，驗證connect()改成拋
+    # ConnectionError而不是讓呼叫端整個卡死——逾時時間設得很短，測試不用真的等15秒。
+    fake_api = FakeShioajiApi(login_delay=1.0)
+    monkeypatch.setattr(shioaji_client_module.sj, "Shioaji", lambda simulation: fake_api)
+    monkeypatch.setattr(shioaji_client_module, "CONNECT_TIMEOUT_SECONDS", 0.05)
+    client = ShioajiClient(make_config())
+
+    try:
+        client.connect()
+        assert False, "應該要拋出ConnectionError，不是正常回傳"
+    except ConnectionError as exc:
+        assert "逾時" in str(exc)
+
+    assert client._connected is False
+
+
 def test_fetch_daily_quotes_parses_whole_market_into_bars():
     client = ShioajiClient(make_config())
     fake_quotes = {
@@ -146,6 +195,29 @@ def test_fetch_today_kbars_skips_symbols_that_fail_but_keeps_others():
     result = client.fetch_today_kbars(["2330", "9999", "2317"])
 
     assert list(result.keys()) == ["2330"], "the failing symbol and the empty-bars symbol are both dropped"
+
+
+def test_fetch_kbars_raises_connection_error_when_kbars_call_hangs_past_timeout(monkeypatch):
+    # 2026-08-17發現的第二個卡死點：修完login()逾時後dashboard仍然完全卡死，查證是
+    # fetch_today_kbars()逐檔呼叫kbars()這裡沒有任何逾時保護——同一種SDK缺陷，這裡驗證
+    # fetch_kbars()改成拋ConnectionError而不是讓呼叫端卡死。
+    client = ShioajiClient(make_config())
+
+    def hanging_kbars(contract, start, end):
+        time.sleep(1.0)
+        return {}
+
+    client.api = types.SimpleNamespace(
+        Contracts=types.SimpleNamespace(Stocks={"2330": "fake-contract"}),
+        kbars=hanging_kbars,
+    )
+    monkeypatch.setattr(shioaji_client_module, "KBARS_TIMEOUT_SECONDS", 0.05)
+
+    try:
+        client.fetch_kbars("2330", start="2026-08-01", end="2026-08-05")
+        assert False, "應該要拋出ConnectionError，不是正常回傳"
+    except ConnectionError as exc:
+        assert "逾時" in str(exc)
 
 
 def test_fetch_kbars_parses_per_symbol_history_into_bars():

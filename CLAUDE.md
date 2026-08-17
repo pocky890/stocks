@@ -783,3 +783,70 @@ rsi_mean_reversion)也是同樣的`series[t]`寫法，但這些不在dashboard�
 `build_strategy_recommendations`/`build_paper_trades`熱路徑上(只在批次/即時指標
 tier才會跑到)，這次沒有一併優化——如果之後這幾支也覺得慢，可以用同一套手法(numpy
 array位置索引+old-vs-new比對驗證)處理。
+
+## 2026-08-17：dashboard整個卡死不動——sj.Shioaji.login()網路異常時會無限期卡住，無timeout
+
+使用者反映dashboard很多頁面show不出來，一開始以為是前端渲染問題(切頁籤/點群組後畫面
+變空白)，但使用者確認「重新整理也沒用，感覺被什麼卡住了」——這代表整個process真的卡死，
+不是單一session的前端狀態問題(新的session/瀏覽器分頁會撞到同一個卡住的呼叫，一樣沒用)。
+使用者去看實際跑dashboard的terminal，發現完全停住不再輸出任何東西(不是報錯，是真的沒有
+新的log行)。
+
+**根因**：查`shioaji`套件`sj.Shioaji.login()`的簽名，**完全沒有timeout參數**(`kbars()`
+倒是有內建`timeout=30000`ms)。`ShioajiClient.connect()`裡直接同步呼叫這個`login()`——
+如果網路/Shioaji伺服器端有任何異常，這個呼叫可能無限期卡住不回傳也不拋例外。這個呼叫
+在dashboard的`_fetch_today_intraday()`(「今日走勢」小圖，每次cache miss都會現場連線)
+跟`run_live.py`的`ensure_connected()`重試迴圈裡都是**同步呼叫、卡在主執行緒**——一旦
+卡住，整個dashboard/整個即時監控程式就會完全停住，沒有任何錯誤訊息或log，因為Python
+根本還在等待那個從未回傳的函式呼叫，連例外都還沒發生。重新整理網頁沒用，是因為新的
+session一樣會呼叫到同一個(可能仍然異常的)Shioaji連線，重新卡住一次。
+
+**已修正**：`ShioajiClient.connect()`改成用`concurrent.futures.ThreadPoolExecutor`把
+`self.api.login(...)`包進背景執行緒，`future.result(timeout=CONNECT_TIMEOUT_SECONDS)`
+(現行:15秒)逾時就拋`ConnectionError`，不再無限期等待——`executor.shutdown(wait=False)`
+確保就算背景那個執行緒真的卡住不回來，這裡也不會跟著等它，卡住的執行緒變成一個
+不影響任何人的孤兒執行緒，換到的是「呼叫端最多等15秒就能拿到明確的失敗」而不是「整個
+process永遠卡死」。這個修正是在`ShioajiClient`這一層做，不是個別呼叫端各自加timeout，
+所以三個呼叫點都自動受益：`run_live.py`的`ensure_connected()`本來就有`except Exception:
+continue`重試迴圈(現在才真的能被觸發，不然卡住的話連exception都等不到)、dashboard的
+`_fetch_today_intraday`呼叫端本來就有`except Exception`降級成「今日走勢欄位暫時顯示
+尚無盤中資料」的警告(同樣是有這層防護、但卡住的話一樣永遠等不到例外觸發)、
+`run_batch.py`本來完全沒有try/except，改完後頂多是清楚的崩潰+traceback，不是無聲卡死。
+
+新增`tests/test_shioaji_client.py`兩個測試：`connect()`在login正常快速回傳時行為不變
+(這是第一個真正測試`connect()`本體邏輯的測試，之前的測試都是monkeypatch整個`connect`
+方法繞過它)，以及login卡住超過逾時時間會正確拋出`ConnectionError`(用極短的逾時時間
+0.05秒測試，不用真的等15秒)。297個單元測試全過。
+
+**這個bug只有在網路/Shioaji伺服器端真的出現異常時才會觸發**，不是每次都會卡——這個
+修正是為了「以後再遇到同樣的網路異常時，不會整個卡死，而是逾時後優雅降級」，不是保證
+網路異常本身不會再發生。
+
+**後續：只修login()還是卡，第二個卡死點是`fetch_kbars()`**——上面的修正上線後，使用者
+重啟process，dashboard**仍然**完全卡死(process CPU時間趨近於0且不再增加，代表卡在某個
+系統呼叫在等，不是在算東西；`Get-CimInstance`確認process command line正常、port也還在
+監聽，只是這個session的執行緒卡住)。查證卡住當下是盤中(09:00-13:30內)，dashboard的
+`_render_watchlist_table_live`每30秒會呼叫`_fetch_today_intraday()`→
+`client.fetch_today_kbars(list(symbols))`([shioaji_client.py](src/stocks/shioaji_client.py))，
+這個函式**逐檔**對觀察清單(50+檔)呼叫`self.api.kbars(...)`，只有`except Exception:
+continue`——**跟`login()`同一種SDK缺陷**：文件上`kbars()`宣稱有`timeout=30000`ms內建
+逾時，但這次證實網路異常時這個逾時不保證被遵守，只要其中一檔卡住不回應，整個迴圈(進而
+整個session、讓看到同一個process的所有使用者)就會無限期卡死，不會如文件宣稱的最多等
+30秒。
+
+**已修正**：`fetch_kbars()`本身也包上同一套`ThreadPoolExecutor` + `future.result(timeout=
+KBARS_TIMEOUT_SECONDS)`(現行:20秒)逾時保護，逾時拋`ConnectionError`，讓`fetch_today_
+kbars()`既有的`except Exception: continue`能正常跳過這一檔、繼續下一檔，不會卡死整個
+迴圈。修在`fetch_kbars()`這個底層方法上(不是只包`fetch_today_kbars`外層)，之後如果有
+其他呼叫端用到`fetch_kbars`也會自動受益，跟`connect()`當初的修法同一個設計原則。新增
+`tests/test_shioaji_client.py`的`test_fetch_kbars_raises_connection_error_when_kbars_
+call_hangs_past_timeout`測試(用`login()`那個測試同一套手法：monkeypatch極短逾時時間，
+不用真的等20秒)。298個單元測試全過。
+
+**這次的教訓**：Shioaji SDK文件宣稱的`timeout`參數(不管是`login()`沒有、還是`kbars()`
+宣稱有)在網路異常的情況下都不能單方面信任——`ShioajiClient`裡任何一個會實際打網路的
+方法，只要還沒包過`ThreadPoolExecutor`逾時保護，都可能是下一個卡死點。目前
+`subscribe_ticks()`(訂閱tick)、`disconnect()`(`api.logout()`)還沒有包這層保護——
+`subscribe_ticks`只在`run_live.py`啟動時呼叫一次(不在每30秒的熱路徑上，衝擊範圍小)，
+`disconnect()`調用頻率也低，兩者風險都遠低於`fetch_kbars`(dashboard每30秒對50+檔跑一次)，
+這次沒有動，但如果之後又遇到類似的無聲卡死，先檢查這兩個是不是下一個未上鎖的缺口。
