@@ -10,6 +10,12 @@ from stocks.strategies import strategy_label
 from stocks.telegram_client import send_message
 
 DIRECTION_LABEL = {Direction.BUY: "買", Direction.SELL: "賣"}
+# run_live.py主迴圈每個5分K bucket都會寫入這個app_settings key(現在時間的isoformat())，
+# scripts/check_run_live_heartbeat.py(獨立排程，跟run_live.py生命週期無關)定期讀取，
+# 太久沒更新就代表run_live.py已經停止/卡住(不管是被中止還是踩到未來還沒修過的網路卡死
+# bug)——2026-08-17使用者實際踩到run_live.py被中止3小時多都沒人發現的案例後新增。
+RUN_LIVE_HEARTBEAT_KEY = "run_live_last_heartbeat"
+RUN_LIVE_STALL_ALERTED_KEY = "run_live_stall_alerted"
 MAX_BATCH_SYMBOLS_LISTED = 30
 # 只有這幾個「進場/出場邏輯完整、可以直接照著做」的策略會推播——單一指標(RSI/MACD/KD/
 # 均線交叉...)本身誤判率較高，不再各自觸發通知，但照樣會寫進signal_events(訊號紀錄頁籤
@@ -208,7 +214,12 @@ def notify_ex_dividend_today(config: Config, rows: list[dict]) -> bool:
 
 
 def notify_connectivity(config: Config, event_type: str, detail: str = "") -> bool:
-    label = {"lost": "連線中斷", "restored": "連線已恢復"}.get(event_type, event_type)
+    label = {
+        "lost": "連線中斷",
+        "restored": "連線已恢復",
+        "run_live_stalled": "run_live.py心跳中斷",
+        "run_live_recovered": "run_live.py心跳恢復",
+    }.get(event_type, event_type)
     text = f"[系統] {label}"
     if detail:
         text += f" — {detail}"

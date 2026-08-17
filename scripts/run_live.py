@@ -33,10 +33,12 @@ from stocks.db import (
     init_db,
     insert_bars_5min,
     insert_signal_events,
+    set_setting,
 )
 from stocks.models import Direction, Tier
 from stocks.notifier import (
     NOTIFIABLE_STRATEGIES,
+    RUN_LIVE_HEARTBEAT_KEY,
     notify_connectivity,
     notify_ex_dividend_today,
     notify_reminder,
@@ -201,6 +203,13 @@ def main():
         if bucket_end < datetime.now():
             continue  # 程式是盤中才啟動的，跳過已經過去的邊界
         sleep_until(bucket_end)
+
+        # 2026-08-17新增：不管這次iteration連線正不正常都先寫心跳——只要主迴圈還在跑就
+        # 代表process本身沒有被中止/卡死(跟下面Shioaji連線狀態是兩件獨立的事，連線斷線
+        # 已經有notify_connectivity處理)，scripts/check_run_live_heartbeat.py靠這個判斷
+        # process整支是不是已經停止。
+        with connect(config.db_path) as conn:
+            set_setting(conn, RUN_LIVE_HEARTBEAT_KEY, datetime.now().isoformat())
 
         connected = client.ensure_connected()
         if not connected:

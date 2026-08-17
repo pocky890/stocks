@@ -888,3 +888,68 @@ json`同步觀察清單)只同步代號/名稱/市場/排序/群組，完全不�
 假設同步進來的股票資料是完整的。**跟本檔案最上面「每台電腦拉新commit後要做的事」
 是同一類「git本身看不出來、容易漏掉」的坑，只是這次的觸發條件是「觀察清單股票」而不是
 「策略參數」。
+
+**同一批發現：12支股票在這台電腦上`bars_daily`只有5~7筆(2026-08-05才開始累積)**——
+3141/6491/2337/3443/3680/6187/6239/6531/6903/7769/3595/6640，正常應該是10年
+~2433筆。根因是同一件事的另一面：這12支是透過`watchlist_shared.json`同步進來、
+`is_watchlist`已經是1，沒辦法再呼叫`add_symbol_to_watchlist()`補(會被「已經在觀察
+清單裡了」擋掉)，需要另外用`detect_market_and_fetch_bars(code, period="10y")` +
+`insert_bars_daily()`手動回補。已補完(這12支現在都有完整多年歷史，6903/7769因為
+上市較晚分別只有982/433筆，這是正常現象不是回補失敗)，重跑過`recompute_strategy_
+selection.py`。**這12支同時暴露了一個顯示層的連帶問題**：總覽表格「10日/月線/季線」
+需要對應天數的資料才算得出來，資料不夠時顯示"—"是正確行為(不是bug)，只是使用者一開始
+以為是顯示邏輯壞了，實際上是資料層缺口。
+
+## 2026-08-17：「今日走勢」小圖跟「目前價位/漲跌」資料來源不一致，會顯示自相矛盾的畫面
+
+使用者發現2383台光電的「今日走勢」小圖看起來在漲，但「漲跌」欄位卻顯示是跌的(綠色)。
+查證：小圖(`intraday_line_chart`)是`_fetch_today_intraday()`現場直連Shioaji抓的即時
+分K；但「漲跌」/「目前價位」/RSI/MACD/布林通道(`build_overview_row_for_symbol`)讀的
+是`bars_5min`表——這張表原本完全依賴`run_live.py`整天掛著背景累積。查`bars_5min`發現
+2383今天最後一筆停在10:00，之後就沒有新資料，代表`run_live.py`當時已經停止運作(見下一則)，
+兩個欄位各自新鮮度不一致，才會出現視覺矛盾。
+
+**已修正**(`dashboard/app.py`)：`_fetch_today_intraday()`抓到即時分K後，現在會**同時
+寫回`bars_5min`**，並把`_render_watchlist_table_body()`裡「先算overview_rows、再抓
+intraday_bars」的順序對調成「先抓intraday_bars(順便寫入bars_5min)、再算overview_rows」，
+同一次render就能吃到最新資料。這樣兩個欄位真正共用同一份資料來源，不會再互相矛盾；
+額外的好處是就算`run_live.py`沒在跑，只要dashboard開著、盤中每30秒自己就會維持
+`bars_5min`新鮮，不再完全依賴`run_live.py`這個背景程序。
+
+## 2026-08-17：run_live.py被中止3小時多沒人發現——新增心跳監控機制
+
+上一則發現`run_live.py`在今天10點左右停止運作，一路到使用者13:20自己發現「怎麼沒收到
+通知」才注意到。查`logs/run_live.log`：09:29有一次全新連線+訂閱記錄，`bars_5min`最後
+寫入10:00，之後log完全沒有輸出。原本懷疑是又踩到Shioaji SDK卡死的bug(跟login()/
+kbars()同一類)，但查Windows排程任務`TWStocks-RunLive`的執行結果，**`LastTaskResult`
+是`0xC000013A`(STATUS_CONTROL_C_EXIT)**——這個結束碼專指process收到Ctrl+C(或等同的
+中止訊號)而終止，不是crash也不是逾時卡死，代表是被手動停掉的，不是bug造成的(使用者
+沒有印象自己按過，確切原因不明，但排除了是bug)。
+
+**問題本質**：不管是被中止、crash、還是踩到未來還沒修過的網路卡死bug，`run_live.py`
+一旦停止運作，沒有任何機制會主動告知使用者——收不到通知這件事，只能靠使用者自己發現
+「今天怎麼這麼安靜」，這次足足晚了3個多小時才發現。
+
+**已新增心跳監控**：
+- `run_live.py`主迴圈每個5分K bucket(不管Shioaji連線正不正常，只要迴圈還在跑)都會把
+  現在時間寫進`app_settings`表的`run_live_last_heartbeat`這個key(`stocks.notifier.
+  RUN_LIVE_HEARTBEAT_KEY`)。跟Shioaji連線狀態(`notify_connectivity("lost"/"restored")`)
+  是兩件獨立的事——連線斷線已經有自己的通知，這裡要抓的是「process整支還在不在跑」。
+- 新增`scripts/check_run_live_heartbeat.py`：獨立的輕量腳本，跟`run_live.py`生命週期
+  完全無關，才能在`run_live.py`真的停止/卡死時還能正常運作去偵測它。只在盤中
+  (`is_market_open_now`)才檢查；心跳超過10分鐘沒更新(`STALE_AFTER_MINUTES`，留1個
+  bucket的緩衝空間避免單次延遲誤報)就發`notify_connectivity(config,
+  "run_live_stalled", ...)`警告，用`run_live_stall_alerted`旗標避免同一次停止期間
+  每10分鐘重複轟炸；心跳恢復新鮮時發一次`"run_live_recovered"`並解除旗標，下次真的
+  又停止才會再警告。純函式`evaluate_heartbeat()`(不碰DB/Telegram)獨立測試過7種情境
+  (從沒收到心跳/已警告過不重複/新鮮心跳/超過門檻/門檻邊界值/恢復通知)。
+- 新增Windows排程任務`TWStocks-CheckRunLiveHeartbeat`：每天09:10開始，每10分鐘跑一次
+  `check_run_live_heartbeat.bat`，重複4.5小時(涵蓋到13:40，比收盤13:30多留緩衝)。
+  09:10(不是09:00)才開始是刻意的：`TWStocks-RunLive`08:55啟動、09:00才會寫下第一筆
+  心跳，如果檢查任務比這更早跑，會誤把「昨天的舊心跳」當成「今天停止了」而誤報。
+  收盤後(`is_market_open_now`為False)呼叫直接return，不會誤報。
+- 305個單元測試全過。
+
+這個機制只能偵測「process整支不在跑」，偵測不到「process還在跑但邏輯錯誤/漏抓某支
+股票」這類問題——如果之後想加更細緻的健康檢查(例如「這一輪有沒有實際處理到所有觀察
+清單股票」)，這是下一步可以擴充的方向，這次沒有做。
