@@ -953,3 +953,40 @@ kbars()同一類)，但查Windows排程任務`TWStocks-RunLive`的執行結果�
 這個機制只能偵測「process整支不在跑」，偵測不到「process還在跑但邏輯錯誤/漏抓某支
 股票」這類問題——如果之後想加更細緻的健康檢查(例如「這一輪有沒有實際處理到所有觀察
 清單股票」)，這是下一步可以擴充的方向，這次沒有做。
+
+## 2026-08-17：新增scripts/backfill_missing_watchlist_data.py，自動補齊跨機器同步進來
+但資料不完整的股票，背景執行不卡dashboard UI
+
+前面幾則(月營收0筆、12支股票bars_daily只有5~7筆)發現的坑，一直是靠人類記得手動跑
+`fetch_market_data.py`+`populate_industry_codes.py`——使用者問「兩台電腦增減股票，
+另一邊會自動補完嗎」，答案是不會，這次把它自動化。
+
+**設計取捨**：使用者明確要求不要卡UI("在後面慢慢補")——回補歷史資料要花真實網路時間，
+接在dashboard載入流程(`daily_update.check_and_update()`)裡的話，剛同步進新股票那一次
+打開dashboard會卡住等它補完，等於重蹈今天一整天在修的「卡死」問題。改成完全獨立的排程
+腳本(跟`run_live.py`/`run_batch.py`/`check_run_live_heartbeat.py`同一套模式)，跟
+dashboard/Streamlit完全無關。
+
+**已新增**：
+- `scripts/backfill_missing_watchlist_data.py`：掃描觀察清單每一支股票，`bars_daily`
+  筆數<200(`MIN_BARS_DAILY`，正常10年該有~2400筆)才觸發`detect_market_and_fetch_bars(
+  period="10y")`回補；三大法人/估值/月營收三項各自獨立檢查是不是0筆，只有真的0筆的
+  項目才呼叫對應的FinMind函式(跟`add_symbol_to_watchlist()`同一套容錯慣例，任一個
+  失敗不影響其他兩個)。**已經完整的股票不會重新打任何API**，所以排程頻繁執行也不會
+  造成額外負擔或觸發FinMind rate limit——大多數時候每一支都已經補過，這次執行幾乎是
+  no-op，這是刻意的設計(不是每次全部重抓)。
+- 產業代碼部分直接重跑`populate_industry_codes.py`的`main()`(import後呼叫，不是另外
+  複製一份邏輯)——這支腳本本身已經是idempotent，成本是2次公司名錄抓取(不是逐檔API
+  呼叫)，天天背景跑可以接受，也讓「新同步進來的股票剛好是觀察清單裡第一支這個產業的」
+  這種情境自動補上全市場同業覆蓋(供斷路器算產業寬度用)，不用再手動重跑。
+- 新增Windows排程任務`TWStocks-BackfillMissingWatchlistData`：每天07:30跑一次(在
+  `TWStocks-RunLive`08:55啟動之前)，`backfill_missing_watchlist_data.bat`。
+- 實測對這台電腦現有觀察清單跑過一次：正確判斷「價格/三大法人/估值/月營收資料完整，
+  沒有需要回補的股票」(因為今天稍早已經手動補過)，產業代碼部分正常重新整理785檔同業
+  覆蓋——不是只在測試資料上驗證過，真實DB也跑過確認行為正確。
+- 新增`tests/test_backfill_missing_watchlist_data.py`5個測試，鎖住「只補真的缺資料的
+  股票、已經完整的不會重新呼叫API」這個核心行為(用`monkeypatch`裝一個一被呼叫就
+  `AssertionError`的假函式，證明真的沒有被呼叫，不是只驗證回傳值)。310個單元測試全過。
+
+**這支腳本解決的是「新增」股票的資料缺口，不處理「移除」**——移除是軟刪除
+(`is_watchlist=0`)，歷史資料留著沒事，不需要清理，兩者不是對稱的問題。
