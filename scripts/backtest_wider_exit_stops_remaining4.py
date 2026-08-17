@@ -1,5 +1,5 @@
 """backtest_wider_exit_stops.py只測了NOTIFIABLE_STRATEGIES裡今天有新增regime/MA240/
-營收濾網的5支(chip_momentum/trust_momentum/golden_cross_scaleout/atr_breakout/
+營收濾網的5支(chip_momentum/trust_momentum/golden_cross/atr_breakout/
 breakout)，遺漏了另外4支(trend_following/long_swing/bullish_divergence/
 capitulation_reversal)——使用者質疑「不是有九個策略，怎麼沒有全測」，這裡補上剩下4支，
 不預設「進場沒加嚴就不用測」，直接用同一套「放寬出場」邏輯實測看看：

@@ -1,6 +1,6 @@
 """研究用一次性腳本：驗證斷路器「自己是否也跌破均線」這個AND條件，用比breadth_ma_period
 (現行:20，用來算全市場同產業寬度)更長的own_ma_period(例如60日/季線)取代，能不能真正
-提高對golden_cross_scaleout/trend_following/long_swing/atr_breakout/breakout這5支
+提高對golden_cross/trend_following/long_swing/atr_breakout/breakout這5支
 「進場前提本身要求站上短均線」的策略的擋下率——起因是使用者發現「隊長」群組(15檔同產業
 半導體設備/封測/基板股)2026年6-7月經歷產業性重挫時，斷路器對這5支策略實測擋下率是0%
 (見scripts/circuit_breaker_impact.py即時分析，非本檔案)，懷疑是own_ma跟這些策略的進場
@@ -29,7 +29,7 @@ from stocks.strategy_stats import is_scaleout_strategy, simulate_round_trips, si
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 from stocks.models import Direction
 
-TARGET_STRATEGIES = ["golden_cross_scaleout", "trend_following", "long_swing", "atr_breakout", "breakout"]
+TARGET_STRATEGIES = ["golden_cross", "trend_following", "long_swing", "atr_breakout", "breakout"]
 OWN_MA_CANDIDATES = [20, 40, 60, 120, None]  # None = 純看產業寬度，拿掉own MA的AND條件
 
 

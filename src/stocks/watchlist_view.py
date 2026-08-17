@@ -415,7 +415,7 @@ def build_paper_trades(config: Config, start_date: str = "2026-07-01") -> list[d
     再配對)。還沒配到出場的部位標記「持有中」，「賣出價位」留空(還沒真的賣)，另外用
     「現價」欄位算未實現報酬率——兩者分開列，不能讓「持有中」那列的賣出價位看起來
     像已經賣掉了。大多數NOTIFIABLE_STRATEGIES是一買配一賣的形狀，用simulate_round_trips
-    配對；分批出場的策略(is_scaleout_strategy()判斷為True，目前是golden_cross_scaleout
+    配對；分批出場的策略(is_scaleout_strategy()判斷為True，目前是golden_cross
     的ma_scaleout模式、bullish_divergence的enable_tiered_profit)改用
     simulate_scaleout_trades，一筆ScaleoutTrade拆成「半倉」「剩餘半倉」兩列顯示(見
     build_paper_trades_for_symbol)，讓使用者看得到兩次分批出場各自的價位，不是合併成

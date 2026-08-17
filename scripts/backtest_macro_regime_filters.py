@@ -3,7 +3,7 @@
 上，區分「長線仍多頭、只是短線跌深」vs「結構性空頭裡的死貓反彈」；(2)52週高點回撤>40%
 擋新BUY，套用在上一輪基本面濾網測起來效果不好的chip_momentum/long_swing上；(3)收盤價
 >240日均線(年線)的絕對位階濾網，跟現有require_long_regime(60/120日均線交叉)比較，套用在
-chip_momentum/trust_momentum/golden_cross_scaleout/atr_breakout/breakout這5支已有
+chip_momentum/trust_momentum/golden_cross/atr_breakout/breakout這5支已有
 regime濾網的策略上。全觀察清單10年+「20支已知近年跌很兇的股票」(2314/4763+2026-08-16
 新加的18支，00664R反向ETF排除)兩個範圍比較。不動STRATEGY_REGISTRY的預設params，也不
 修改任何策略檔案的預設值(全部是新增的研究參數，預設False)。"""
@@ -98,7 +98,7 @@ def main():
         run_strategy(strategy_name, configs, config, bars_by_symbol, symbols)
 
     print("\n\n########## (3) MA240年線濾網 vs 現有60/120日regime濾網 ##########")
-    for strategy_name in ["chip_momentum", "trust_momentum", "golden_cross_scaleout", "atr_breakout", "breakout"]:
+    for strategy_name in ["chip_momentum", "trust_momentum", "golden_cross", "atr_breakout", "breakout"]:
         base_params = config.strategy_params[strategy_name]
         no_regime_params = {**base_params, "require_long_regime": False}
         configs = [

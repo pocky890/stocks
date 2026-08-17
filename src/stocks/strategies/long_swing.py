@@ -7,26 +7,26 @@ from stocks.models import Direction, SignalEvent
 class LongSwingStrategy:
     """中長波段策略。
 
-    進場：
-    - Regime：60日均線>120日均線（多頭排列）才考慮進場
-    - 首次進場：站上60日均線 + 外資與投信合計近20日買超為正 + RSI(14)未超買(<75)
-    - 同一段regime裡的重新進場（regime沒斷過，即MA60未跌破MA120之前）：
-      - 站回20日均線，且60日均線近5天仍上揚(斜率>0) → 不用重新確認法人/RSI即可進場
-      - 60日均線走平/下彎時 → 退回要求完整條件(法人買超+RSI未超買)才能重進
+    進場條件：
+    1. 60日均線>120日均線(regime)才考慮進場
+    2. 首次進場：站上60日均線 + 法人(外資+投信)近20日合計買超為正 + RSI(14)<75未超買
+    3. 同一段regime裡重新進場：
+       - 站回20日均線，且60日均線近5日上揚 → 免確認法人/RSI
+       - 60日均線走平/下彎 → 需重新符合法人買超+RSI未超買
 
-    出場：
-    - 收盤連續3天跌破60日均線，或
-    - 跌破4.5倍20日ATR移動停損(stop_mode="atr"，現行:atr_multiplier=4.5，2026-08-16從
-      3.5倍拉寬)，也支援固定百分比移動停損("pct")。拉寬理由：使用者質疑「進場濾網加嚴後
-      出場能不能放寬換報酬」，實測(scripts/backtest_wider_exit_stops_remaining4.py)
-      全觀察清單10年3.5→4→4.5倍加總報酬9173→9610→10807、獲利因子3.19→3.46→3.99同步
-      變好，YTD也同向(獲利因子4.33→5.04→5.59、回撤還收斂)，沒有拉鋸，採用4.5倍。
+    出場條件：
+    1. 收盤連續3天跌破60日均線，或
+    2. 跌破4.5倍20日ATR移動停損(atr_multiplier)
+    兩者先到者為準。
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
-    2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
-    circuit_breaker_own_ma_period=None)，理由見circuit_breaker.py開頭說明。
+    支援模式(回測用)：
+    - stop_mode="pct"：固定百分比移動停損
+    - require_reentry_volume：重新進場加量能確認(現行OFF)
+    - require_within_drawdown_limit：距高點回撤上限濾網(現行OFF)
 
-    沒有foreign_net/trust_net任一欄位(bars沒join到institutional_flows)就直接跳過。"""
+    斷路器：ON — 全市場同產業≥60%跌破月線時暫停BUY(純看產業寬度)
+
+    沒有foreign_net/trust_net任一欄位就跳過。"""
 
     name = "long_swing"
 

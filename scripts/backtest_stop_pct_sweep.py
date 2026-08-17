@@ -1,6 +1,6 @@
 """固定百分比移動停損%數的敏感度分析：15%/20%/25%/30%，套在目前用stop_mode="pct"
 的策略上(bullish_divergence/capitulation_reversal/atr_breakout/chip_momentum/
-trust_momentum/golden_cross_scaleout)，回答「是不是停損放越寬越好」。
+trust_momentum/golden_cross)，回答「是不是停損放越寬越好」。
 研究用一次性腳本。
 """
 import sys
@@ -23,7 +23,7 @@ from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
 from stocks.strategies.capitulation_reversal import CapitulationReversalStrategy
 from stocks.strategies.chip_momentum import ChipMomentumStrategy
-from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
+from stocks.strategies.golden_cross import GoldenCrossStrategy
 from stocks.strategies.trust_momentum import TrustMomentumStrategy
 from stocks.strategy_stats import simulate_round_trips, summarize_trades
 
@@ -33,7 +33,7 @@ CANDIDATES = [
     ATRBreakoutStrategy(),
     ChipMomentumStrategy(),
     TrustMomentumStrategy(),
-    GoldenCrossScaleOutStrategy(),
+    GoldenCrossStrategy(),
 ]
 
 STOP_PCTS = [0.15, 0.20, 0.25, 0.30]

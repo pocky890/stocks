@@ -1,7 +1,7 @@
 """收盤後批次掃描。手動啟動（收盤後跑一次）。2026-08-15使用者要求後，只處理觀察清單
 股票，不再對全市場~2000檔評估/通知——太雜訊。跑除institutional_streak以外的所有策略
 （那個還是只服務觀察清單自己），但NOTIFIABLE_STRATEGIES(atr_breakout/chip_momentum/
-trust_momentum/trend_following/breakout/golden_cross_scaleout/long_swing/
+trust_momentum/trend_following/breakout/golden_cross/long_swing/
 bullish_divergence/capitulation_reversal)另外跳過——這幾個策略對觀察清單股票只在
 run_live.py的13:20檢查發通知，這裡再評估一次會重複通知同一天同一檔股票的同一個訊號。
 單一指標類策略(RSI/MACD/KD/均線交叉...)照樣評估、寫進signal_events(訊號紀錄頁籤看得到)，

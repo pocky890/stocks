@@ -7,37 +7,27 @@ from stocks.models import Direction, SignalEvent
 class BullishDivergenceStrategy:
     """背離抄底策略。
 
-    初步訊號：收盤價創20日新低，但RSI(14)未跟著創新低(背離，代表下跌動能減弱)，
-    且RSI<35(還在偏弱區間，避免已強勢反彈完才進場)
-
-    確認進場(require_reversal_confirm)：初步訊號出現後不會立刻進場，最多等待10個交易日
-    (reversal_confirm_max_wait_days)，直到以下確認訊號中至少1項成立
-    (reversal_confirm_min_signals)才進場：
-      - 收盤站上5日均線，或站上前一日高點
-      - MACD柱狀圖比前一天回升(require_reversal_macd)
+    進場條件：
+    1. 初步訊號：收盤創20日新低，但RSI(14)未創新低(背離)，且RSI<35
+    2. 確認訊號(10個交易日內至少1項成立)：收盤站上5日均線或前一日高點，或MACD柱狀圖
+       比前一天回升
     等待期間若出現更低的新低+背離，用新訊號重新起算等待。
 
-    出場(現行:stop_mode="structural"+enable_tiered_profit，一買配兩賣，跟golden_cross_
-    scaleout的ma_scaleout模式同樣要用simulate_scaleout_trades配對，不能套simulate_
-    round_trips)，三階段：
-      ①初始結構停損防接刀：進場K棒最低點再往下5%緩衝(structural_stop_buffer_pct)
-      ②獲利達12%(tiered_target_pct)或觸及60日均線(tiered_ma_period)先賣一半，剩餘部位
-        停損上移至成本價保本(move_stop_to_breakeven_after_tier)
-      ③剩餘部位改用25%(stop_pct，現行:0.25，2026-08-16從0.15拉寬)寬幅移動停損，讓真正
-        的大反轉抱好抱滿。拉寬理由：使用者質疑「進場濾網加嚴後出場能不能放寬換報酬」，
-        實測(scripts/backtest_wider_exit_stops_remaining4.py)全觀察清單10年15%→20%→
-        25%加總報酬3394.6→4175.5→5331.8、獲利因子1.71→1.94→2.34同步變好；更關鍵的是
-        現行15%在2026YTD其實是虧損中(加總報酬-81.0%、PF0.78)，拉寬到25%讓YTD轉正
-        (+40.6%、PF1.13)，兩個時間窗口方向一致，採用25%。
+    出場條件：
+    1. 初始結構停損：進場K棒最低點-5%緩衝(structural_stop_buffer_pct)
+    2. 獲利達12%(tiered_target_pct)或觸及60日均線(tiered_ma_period)：賣出一半，剩餘
+       部位停損上移至成本價保本
+    3. 剩餘部位改25%(stop_pct)寬幅移動停損
 
-    也支援單一停損：固定移動停損("pct")、ATR停損("atr")、分批停損("tiered_pct")、
-    或不搭配tiered_profit的純結構停損("structural"，注意：固定不動又沒有其他出場條件，
-    獲利部位會一直持有到觸及停損為止，見structural_trail_after_pct/enable_tiered_profit
-    參數註解的實測說明)。
+    支援模式(回測用)：
+    - stop_mode="pct"/"atr"/"tiered_pct"：單一或分批停損
+    - stop_mode="structural"不搭配enable_tiered_profit：純結構停損，固定不動
+    - confirm_next_day/require_macd_turn/require_kd_bullish：確認訊號加嚴變體(現行皆OFF)
+    - require_capitulation_volume：初步訊號加量能確認(現行OFF)
+    - require_long_uptrend_intact：長期均線斜率濾網(現行OFF)
 
-    斷路器：豁免（在CIRCUIT_BREAKER_EXEMPT_STRATEGIES清單內）。斷路器本身的條件是「全市場
-    同產業≥60%股票跌破月線、且這支股票自己當下也跌破月線」才擋新BUY——但這支策略的進場
-    前提就是「自己正跌破月線」，兩者天生衝突，故完全跳過檢查(見circuit_breaker.py)。"""
+    斷路器：OFF — 豁免(CIRCUIT_BREAKER_EXEMPT_STRATEGIES)，進場前提本身是「自己正跌破
+    月線」，跟斷路器條件天生衝突"""
 
     name = "bullish_divergence"
 

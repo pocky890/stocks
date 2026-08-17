@@ -7,33 +7,25 @@ from stocks.models import Direction, SignalEvent
 class TrustMomentumStrategy:
     """投信買超動能策略，跟chip_momentum同一套邏輯，主訊號換成投信(trust_net)買超。
 
-    進場：近15日(cum_window_days)累積買超為正 + 近3日內至少2日買超(entry_mode="window10_3")
-    + RSI(14)未超買(<70) + 60日均線>120日均線(require_long_regime，現行:True，
-    2026-08-16加的長期regime濾網) + 月營收年增率>=0%(require_revenue_growth，現行:
-    True，2026-08-16加的基本面濾網，見db.attach_monthly_revenue_growth())。240日年線
-    濾網(require_above_long_ma)測過對這支策略沒有明顯增量(疊加regime後獲利因子打平)，
-    未採用。
+    進場條件：
+    1. 近15日(cum_window_days)累積買超為正，且近3日內至少2日買超
+    2. RSI(14)<70未超買
+    3. 60日均線>120日均線
+    4. 月營收年增率≥0%或無資料
 
-    出場：現行(config.json):stop_mode="volume_alert_scaleout"——高檔跌破alert_ma_period
-    (現行:10)日均線且成交量>alert_volume_multiplier(現行:1.5)倍均量時，先賣出一半
-    ("爆量出貨警示")，剩餘半倉改用stop_pct(現行:0.20，2026-08-16從0.15拉寬)移動停損
-    出場；一買配兩賣，要用simulate_scaleout_trades配對。拉寬理由：使用者提議進場濾網
-    已經加嚴、出場能否放寬換報酬，實測(scripts/backtest_wider_exit_stops.py)剩餘半倉
-    停損15%→20%是溫和的贏(10年獲利因子5.63→6.73、YTD 1.50→2.09都變好)，但25%就過頭
-    (YTD轉虧、樣本剩7筆)，故只採用20%這一檔；同批也測過拉高alert_volume_multiplier讓
-    警示更晚觸發，10年/YTD一致變差，未採用。也支援單一移動停損(stop_mode="pct")、ATR
-    移動停損("atr")、分批停損("tiered_pct")。
+    出場條件：
+    1. 高檔跌破10日均線(alert_ma_period)且量>1.5倍均量：賣出一半("爆量出貨警示")
+    2. 剩餘半倉跌破20%移動停損(stop_pct)
 
-    進場是level-triggered(條件當天成立就觸發，不要求剛從False轉True)，停損出場後最快
-    隔天條件仍成立就能重新進場(除非設定cooldown_days>0，研究參數，見下方)。2026-08-17
-    修正：出清完畢的當天不會立刻重新進場，要等到隔天才能重新觸發BUY——避免同一天同一
-    支股票同時出現BUY和SELL訊號，讓通知看起來自相矛盾。
+    支援模式(回測用)：
+    - entry_mode="default"：單一視窗買超天數門檻
+    - stop_mode="pct"/"atr"/"tiered_pct"：單一或分批停損
+    - cooldown_days：停損出場後冷卻期(現行0)
+    - require_uptrend/require_entry_volume/require_above_long_ma：進場加嚴濾網(現行皆OFF)
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
-    2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
-    circuit_breaker_own_ma_period=None)，理由見circuit_breaker.py開頭說明。
+    斷路器：ON — 全市場同產業≥60%跌破月線時暫停BUY(純看產業寬度)
 
-    沒有trust_net欄位就直接跳過。"""
+    沒有trust_net欄位就跳過。"""
 
     name = "trust_momentum"
 

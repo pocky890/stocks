@@ -39,7 +39,7 @@ BEFORE_PARAMS = {
         "stop_mode": "pct", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2.5,
         "entry_mode": "window10_3", "cum_window_days": 15,
     },
-    "golden_cross_scaleout": {
+    "golden_cross": {
         "fast": 5, "mid": 10, "slow": 20, "chip_lookback_days": 5, "high_lookback_days": 20,
         "volume_avg_period": 20, "score_ma_cross": 2, "score_above_slow": 1, "score_chip": 2,
         "score_breakout": 2, "score_volume": 1, "score_rsi": 1, "rsi_period": 14,

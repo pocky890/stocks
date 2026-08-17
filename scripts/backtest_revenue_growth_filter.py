@@ -4,7 +4,7 @@ revenue_yoy_growth接到bars上，對既有策略訊號做「事後過濾」(不
 只是drop掉不符合條件的BUY事件，跟build_paper_trades_for_symbol過濾斷路器BUY同一種
 做法)，全觀察清單10年+「已知近年下跌很兇的20支股票」(2314/4763+2026-08-16新加的18支)
 兩個範圍比較。測試對象是6支跟長期趨勢/動能相關的策略(chip_momentum/trust_momentum/
-golden_cross_scaleout/atr_breakout/breakout/long_swing)——這6支已經(或本來就)有
+golden_cross/atr_breakout/breakout/long_swing)——這6支已經(或本來就)有
 60/120日長期regime濾網，這裡驗證基本面年增率能不能在regime濾網之上再提供增量的保護。
 不動STRATEGY_REGISTRY的預設params，也不修改任何策略檔案。"""
 import sys
@@ -32,7 +32,7 @@ from stocks.strategy_stats import is_scaleout_strategy, simulate_round_trips, si
 STRATEGY_NAMES = [
     "chip_momentum",
     "trust_momentum",
-    "golden_cross_scaleout",
+    "golden_cross",
     "atr_breakout",
     "breakout",
     "long_swing",

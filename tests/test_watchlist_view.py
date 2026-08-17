@@ -338,7 +338,7 @@ def test_build_strategy_recommendations_lists_one_row_per_open_buy_signal(tmp_pa
     """NOTIFIABLE_STRATEGIES進場/出場都是edge-triggered，觸發後策略自己追蹤部位直到
     下一個相反方向事件——這裡看的是「每個策略最後一次動作是叫你買還是叫你賣」，不是
     像舊版buy_formula那種「條件現在還持續成立」的狀態。20天持平後單日創新高：
-    atr_breakout(唐奇安突破)跟golden_cross_scaleout(打分制剛好5分：MA5>MA20+站上MA20+
+    atr_breakout(唐奇安突破)跟golden_cross(打分制剛好5分：MA5>MA20+站上MA20+
     突破20日新高)都會進場，且之後沒有再出現賣出訊號——一列對應一個策略，兩列的「買進
     策略」各自填自己的策略名稱，「賣出策略」都留白。"""
     db_path = str(tmp_path / "test.db")
@@ -360,7 +360,7 @@ def test_build_strategy_recommendations_lists_one_row_per_open_buy_signal(tmp_pa
 
     assert len(rows) == 2
     buy_strategies = {r["買進策略"] for r in rows}
-    assert buy_strategies == {"atr_breakout", "golden_cross_scaleout"}
+    assert buy_strategies == {"atr_breakout", "golden_cross"}
     for row in rows:
         assert row["代號"] == "2454"
         assert row["名稱"] == "聯發科"
@@ -434,7 +434,7 @@ def test_build_strategy_recommendations_keeps_both_buy_and_sell_rows_for_a_close
 def test_build_strategy_recommendations_omits_signals_older_than_max_age(tmp_path):
     # 跟test_build_strategy_recommendations_lists_open_buy_signals_for_a_symbol同一組資料，
     # 只是把整段K棒往前搬到150天前(超過MAX_SIGNAL_AGE_DAYS=100天)——atr_breakout/
-    # golden_cross_scaleout一樣會在最後一天觸發BUY，但因為太久沒動作了，不該再列出來，
+    # golden_cross一樣會在最後一天觸發BUY，但因為太久沒動作了，不該再列出來，
     # 不管是買進還是賣出欄位都不行(這支股票整列都該被拿掉，因為沒有其他訊號)。
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
@@ -495,7 +495,7 @@ def test_build_strategy_recommendations_skips_strategies_disabled_for_that_symbo
     rows = build_strategy_recommendations(config)
 
     assert not any(r["買進策略"] == "atr_breakout" or r["賣出策略"] == "atr_breakout" for r in rows)
-    assert any(r["買進策略"] == "golden_cross_scaleout" for r in rows), "沒被排除的策略應該照樣出現"
+    assert any(r["買進策略"] == "golden_cross" for r in rows), "沒被排除的策略應該照樣出現"
 
 
 def test_build_paper_trades_lists_closed_round_trip_with_return_pct(tmp_path):
@@ -628,7 +628,7 @@ def test_build_paper_trades_skips_strategies_disabled_for_that_symbol(tmp_path):
     rows = build_paper_trades(config, start_date=dates[0].strftime("%Y-%m-%d"))
 
     assert not any(r["策略"] == "atr_breakout" for r in rows)
-    assert any(r["策略"] == "golden_cross_scaleout" for r in rows), "沒被排除的策略應該照樣出現"
+    assert any(r["策略"] == "golden_cross" for r in rows), "沒被排除的策略應該照樣出現"
 
 
 def test_build_paper_trades_suppresses_buy_blocked_by_industry_circuit_breaker(tmp_path):

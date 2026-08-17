@@ -29,7 +29,7 @@
     "bullish_divergence": { "lookback_days": 20, "rsi_period": 14, "rsi_ceiling": 35, "stop_mode": "structural", "stop_pct": 0.25, "atr_period": 14, "atr_multiplier": 2.5, "require_reversal_confirm": true, "require_reversal_macd": true, "structural_stop_buffer_pct": 0.05, "enable_tiered_profit": true, "tiered_target_pct": 0.12, "tiered_ma_period": 60, "move_stop_to_breakeven_after_tier": true },
     "capitulation_reversal": { "drop_threshold_pct": -5.0, "volume_multiplier": 2.0, "avg_volume_period": 20, "stop_mode": "structural", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2.5, "structural_stop_buffer_pct": 0.05, "enable_tiered_profit": true, "tiered_ma_period": 20, "move_stop_to_breakeven_after_tier": true, "loss_cooldown_days": 180 },
     "trend_following": { "fast": 20, "slow": 60, "volume_avg_period": 20, "atr_period": 14, "atr_multiplier": 2 },
-    "golden_cross_scaleout": {
+    "golden_cross": {
       "fast": 5,
       "mid": 10,
       "slow": 20,

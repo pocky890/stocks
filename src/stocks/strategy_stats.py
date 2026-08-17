@@ -9,13 +9,13 @@ from stocks.models import Direction, SignalEvent
 
 def is_scaleout_strategy(strategy_name: str, params: dict) -> bool:
     """判斷這個策略在目前這組params下是不是「一買配兩賣」的分批出場形狀(要用
-    simulate_scaleout_trades配對，不能套simulate_round_trips)——golden_cross_scaleout
+    simulate_scaleout_trades配對，不能套simulate_round_trips)——golden_cross
     的stop_mode="ma_scaleout"、bullish_divergence跟capitulation_reversal的
     enable_tiered_profit=True都是這個形狀。呼叫端(strategy_selection.py/
     watchlist_view.py)算歷史表現/模擬交易紀錄時都要先查這個函式決定配對方式，不能對
     所有NOTIFIABLE_STRATEGIES一律用simulate_round_trips，不然分批出場的第二次SELL
     會被誤判成沒有對應BUY的孤兒事件直接丟掉，統計出來的勝率/報酬會嚴重失真。"""
-    if strategy_name == "golden_cross_scaleout":
+    if strategy_name == "golden_cross":
         return params.get("stop_mode", "pct") == "ma_scaleout"
     if strategy_name in ("bullish_divergence", "capitulation_reversal"):
         return bool(params.get("enable_tiered_profit", False))
@@ -123,7 +123,7 @@ def summarize_trades(trades: list[Trade]) -> dict:
 
 @dataclass(frozen=True)
 class ScaleoutTrade:
-    """golden_cross_scaleout一次進場配兩次出場(先賣一半、再賣剩餘一半)，跟Trade
+    """golden_cross一次進場配兩次出場(先賣一半、再賣剩餘一半)，跟Trade
     「一買配一賣」的形狀不一樣，報酬率用兩次出場價的均價(各半)計算。return_pct跟
     Trade同名同義，所以summarize_trades()可以直接吃ScaleoutTrade的list，不用另外
     寫一份summarize邏輯。"""
@@ -146,7 +146,7 @@ class ScaleoutTrade:
 
 def simulate_scaleout_trades(events: list[SignalEvent]) -> tuple[list[ScaleoutTrade], dict | None]:
     """跟simulate_round_trips配對邏輯不一樣：一次BUY要收集到兩次SELL才算平倉(對應
-    golden_cross_scaleout「賣一半、再賣剩餘一半」的兩階段出場)，直接套simulate_round_trips
+    golden_cross「賣一半、再賣剩餘一半」的兩階段出場)，直接套simulate_round_trips
     會把第一次半倉出場當成整筆平倉、丟掉第二次出場價格，報酬率會算錯。回傳
     (trades, still_open)，still_open是資料結束時還沒配滿兩次出場的部位(可能兩次都
     沒賣、或只賣了一半)：{"entry": SignalEvent, "exits": list[SignalEvent]}。"""

@@ -25,7 +25,7 @@ class Config:
     circuit_breaker_exit_threshold: float = 0.40
     circuit_breaker_own_ma_period: int | None = None  # 2026-08-16研究：「這支股票自己
     # 是否也跌破均線」這道AND條件，原本跟breadth_ma_period共用同一條均線(20日/月線)——
-    # 但這條均線也剛好是golden_cross_scaleout/trend_following/long_swing/atr_breakout/
+    # 但這條均線也剛好是golden_cross/trend_following/long_swing/atr_breakout/
     # breakout這幾支策略進場條件本身要求的均線(要求「站上」才會觸發BUY)，兩者幾乎互斥，
     # 導致斷路器對這幾支策略實測擋下率是0%(見scripts/backtest_circuit_breaker_own_ma.py，
     # 也測過拉長成40/60/120日，擋下率頂多3.5%，一樣沒用)。改成None(拿掉這道AND條件，

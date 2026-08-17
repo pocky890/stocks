@@ -1,7 +1,7 @@
 """比較「單階15%移動停損」vs「分批停損(8%賣一半/15%賣剩餘一半)」在幾支目前用固定
 百分比停損的策略上的表現(bullish_divergence/capitulation_reversal/atr_breakout/
 chip_momentum/trust_momentum)。分批出場的訊號要用simulate_scaleout_trades
-配對(一次BUY配兩次SELL)，不是simulate_round_trips，跟golden_cross_scaleout用同一套。
+配對(一次BUY配兩次SELL)，不是simulate_round_trips，跟golden_cross用同一套。
 研究用一次性腳本，不動STRATEGY_REGISTRY的預設params。
 """
 import sys

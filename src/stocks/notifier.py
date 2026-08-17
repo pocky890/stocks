@@ -33,7 +33,7 @@ NOTIFIABLE_STRATEGIES = {
     "trust_momentum",
     "trend_following",
     "breakout",
-    "golden_cross_scaleout",
+    "golden_cross",
     "long_swing",
     "bullish_divergence",
     "capitulation_reversal",

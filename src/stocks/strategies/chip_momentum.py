@@ -7,26 +7,26 @@ from stocks.models import Direction, SignalEvent
 class ChipMomentumStrategy:
     """外資買超動能策略。
 
-    進場：近5天(ratio_window_days)外資淨買超加總為正，且加總/近同窗口總成交量加總>10%
-    (ratio_threshold，entry_mode="ratio")+ RSI(14)未超買(<70) + 60日均線>120日均線
-    (require_long_regime，現行:True，2026-08-16加的長期regime濾網) + 月營收年增率
-    >=0%(require_revenue_growth，現行:True，2026-08-16加的基本面濾網，見
-    db.attach_monthly_revenue_growth())。也支援entry_mode="streak"(連續剛好
-    chip_streak_days天買超，原本的預設)、"window"(累積為正+近期頻率門檻)。
+    進場條件：
+    1. 近5日(ratio_window_days)外資淨買超加總為正，且加總/總成交量加總>10%(ratio_threshold)
+    2. RSI(14)<70未超買
+    3. 60日均線>120日均線
+    4. 月營收年增率≥0%或無資料
 
-    出場：現行(config.json):stop_mode="volume_alert_scaleout"——高檔跌破alert_ma_period
-    (現行:10)日均線且成交量>alert_volume_multiplier(現行:1.5)倍均量時，先賣出一半
-    ("爆量出貨警示")，剩餘半倉改用stop_pct(15%)移動停損出場；一買配兩賣，要用
-    simulate_scaleout_trades配對。也支援單一15%移動停損(stop_mode="pct")、2.5倍ATR
-    移動停損("atr")、分批停損("tiered_pct")。2026-08-17修正：出清完畢的當天不會立刻
-    重新進場(即使進場條件依然成立)，要等到隔天才能重新觸發BUY——避免同一天同一支股票
-    同時出現BUY和SELL訊號，讓通知看起來自相矛盾。
+    出場條件：
+    1. 高檔跌破10日均線(alert_ma_period)且量>1.5倍均量：賣出一半("爆量出貨警示")
+    2. 剩餘半倉跌破15%移動停損(stop_pct)
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
-    2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
-    circuit_breaker_own_ma_period=None)，理由見circuit_breaker.py開頭說明。
+    支援模式(回測用)：
+    - entry_mode="streak"：連續N天買超
+    - entry_mode="window"：近N日累積買超為正+近期頻率門檻
+    - stop_mode="pct"/"atr"/"tiered_pct"：單一或分批停損
+    - require_entry_volume/require_within_drawdown_limit/require_above_long_ma：
+      進場加嚴濾網(現行皆OFF)
 
-    沒有foreign_net欄位(bars沒join到institutional_flows)就直接跳過。"""
+    斷路器：ON — 全市場同產業≥60%跌破月線時暫停BUY(純看產業寬度)
+
+    沒有foreign_net欄位就跳過。"""
 
     name = "chip_momentum"
 

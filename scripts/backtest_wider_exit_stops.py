@@ -3,7 +3,7 @@
 雜訊，停損不用像以前那麼緊，也許能少幾次被正常回檔洗出場)，但沒測過，這裡實測。
 
 固定現行的進場濾網跟參數不動，只調寬各策略的出場停損寬度，全觀察清單10年+2026YTD比較：
-  - atr_breakout/golden_cross_scaleout: stop_pct(現行0.15) 拉寬到0.20/0.25
+  - atr_breakout/golden_cross: stop_pct(現行0.15) 拉寬到0.20/0.25
   - breakout: stop_mode="atr"，拉寬atr_multiplier(現行2)到2.5/3
   - chip_momentum/trust_momentum: stop_mode="volume_alert_scaleout"，剩餘半倉的stop_pct
     (現行0.15)拉寬到0.20/0.25；另外也測alert_volume_multiplier(現行1.5，爆量出貨警示的
@@ -82,7 +82,7 @@ def main():
             ("拉寬到20%", {"stop_pct": 0.20}),
             ("拉寬到25%", {"stop_pct": 0.25}),
         ],
-        "golden_cross_scaleout": [
+        "golden_cross": [
             ("現行(15%)", {}),
             ("拉寬到20%", {"stop_pct": 0.20}),
             ("拉寬到25%", {"stop_pct": 0.25}),

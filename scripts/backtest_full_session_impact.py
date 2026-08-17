@@ -1,5 +1,5 @@
 """研究用一次性腳本：使用者看完這一整輪(volume_alert_scaleout+60/120regime+240年線+
-月營收年增率，共5支策略chip_momentum/trust_momentum/golden_cross_scaleout/atr_breakout/
+月營收年增率，共5支策略chip_momentum/trust_momentum/golden_cross/atr_breakout/
 breakout疊加起來)後說「我覺得整體報酬掉很多」——之前只驗證過原始28支股票、或20支已知
 下跌股這兩個子集合的個別策略數字，從來沒有算過「全觀察清單51檔、5支策略加總」這個
 使用者實際會在dashboard感受到的整體數字對比。這裡把BEFORE_PARAMS(這次session開始前
@@ -46,7 +46,7 @@ BEFORE_PARAMS = {
         "stop_mode": "pct", "stop_pct": 0.15, "atr_period": 14, "atr_multiplier": 2.5,
         "entry_mode": "window10_3", "cum_window_days": 15,
     },
-    "golden_cross_scaleout": {
+    "golden_cross": {
         "fast": 5, "mid": 10, "slow": 20, "chip_lookback_days": 5, "high_lookback_days": 20,
         "volume_avg_period": 20, "score_ma_cross": 2, "score_above_slow": 1, "score_chip": 2,
         "score_breakout": 2, "score_volume": 1, "score_rsi": 1, "rsi_period": 14,

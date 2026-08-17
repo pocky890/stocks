@@ -4,40 +4,26 @@ from stocks.indicators import rolling_avg_volume, rsi, sma
 from stocks.models import Direction, SignalEvent
 
 
-class GoldenCrossScaleOutStrategy:
+class GoldenCrossStrategy:
     """均線黃金交叉打分制策略。
 
-    進場：以下6項各自加分，總分達到5分(score_threshold)才進場，level-triggered(當天
-    分數達標就進場，不要求前一天未達標)：
-      MA5 > MA20                 +2
-      收盤站上MA20                +1
-      三大法人(外資+投信)近5日合計買超    +2
-      收盤突破20日新高(不含當天)        +2
-      當天成交量 > 20日均量            +1
-      RSI(14)未超買(<70)             +1
+    進場條件：
+    1. 打分制達5分(score_threshold)：MA5>MA20(+2)、站上MA20(+1)、法人(外資+投信)近5日
+       合計買超(+2)、突破20日新高(+2)、當天量>20日均量(+1)、RSI(14)<70未超買(+1)
+    2. 60日均線>120日均線
+    3. 收盤>240日均線
+    4. 月營收年增率≥0%或無資料
 
-    達標分數之外，另外要求60日均線>120日均線(require_long_regime，現行:True) + 收盤價
-    >240日均線/年線(require_above_long_ma，現行:True，跟regime疊加、不是取代) + 月營收
-    年增率>=0%(require_revenue_growth，現行:True，2026-08-16加的基本面濾網，見
-    db.attach_monthly_revenue_growth())才能進場。這三道濾網都是2026-08-16加的，
-    全觀察清單10年獲利因子2.54→2.81(疊加regime+MA240+營收後)、20支已知近年下跌很兇
-    的股票上獲利因子0.79→0.92~0.96，細節見scripts/backtest_long_regime_filter.py/
-    backtest_macro_regime_filters.py/backtest_revenue_growth_filter.py。
+    出場條件：
+    1. 跌破15%移動停損(stop_pct)，全數出清
 
-    出場：跌破15%移動停損(stop_mode="pct")，一買配一賣。
+    支援模式(回測用)：
+    - stop_mode="ma_scaleout"：兩階段出場(跌破5日均線且放量先賣一半，再跌破10日均線
+      或5日均線死亡交叉賣剩餘一半)
 
-    也支援stop_mode="ma_scaleout"：分兩階段出場，不是一次全出：
-      階段1(賣一半)：收盤跌破5日均線，且當天成交量>20日均量
-      階段2(賣剩餘一半)：收盤跌破10日均線，或5日均線跌破20日均線(死亡交叉)
-    這個模式一買配兩賣，要用simulate_scaleout_trades配對，不能套simulate_round_trips。
-    2026-08-17修正：出清完畢的當天不會立刻重新進場(即使打分依然達標)，要等到隔天才能
-    重新觸發BUY——避免同一天同一支股票同時出現BUY和SELL訊號，讓通知看起來自相矛盾。
+    斷路器：ON — 全市場同產業≥60%跌破月線時暫停BUY(純看產業寬度)"""
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
-    2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
-    circuit_breaker_own_ma_period=None)，理由見circuit_breaker.py開頭說明。"""
-
-    name = "golden_cross_scaleout"
+    name = "golden_cross"
 
     def evaluate(self, symbol: str, bars: pd.DataFrame, params: dict) -> list[SignalEvent]:
         fast = params.get("fast", 5)

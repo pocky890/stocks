@@ -1032,3 +1032,29 @@ RUN_LIVE_STALE_SINCE_KEY`)，不馬上警告；只有再過一輪檢查(約10分
 訊息)；真正停止的話會連續兩輪都不新鮮，一樣能在10~20分鐘內抓到，跟沒有緩衝期比只是多等
 一輪，跟今天3小時多才發現比起來差距很小。8個單元測試涵蓋新行為(含「開機延遲但心跳準時
 恢復，完全不觸發任何警告」這個關鍵情境)，311個單元測試全過。
+
+## 2026-08-17：golden_cross_scaleout改名為golden_cross，這台電腦已跑過DB migration
+
+使用者發現這支策略雖然叫`golden_cross_scaleout`，但`config.json`現行`stop_mode`是
+`"pct"`(單一15%移動停損全出)，根本沒有在分批(scaleout)出場，名字誤導。確認後改名：
+**內部識別名`golden_cross_scaleout`→`golden_cross`**(類別`GoldenCrossScaleOutStrategy`
+→`GoldenCrossStrategy`，檔案`src/stocks/strategies/golden_cross_scaleout.py`→
+`golden_cross.py`)，程式碼裡引用的地方(`STRATEGY_REGISTRY`/`STRATEGY_LABELS`/
+`NOTIFIABLE_STRATEGIES`/`is_scaleout_strategy()`/`config.json`的`strategy_params`
+key/所有backtest腳本/測試)全部同步改名，311個單元測試全過。`stop_mode="ma_scaleout"`
+這個分批出場模式本身沒有拿掉，只是現在沒有啟用，這是策略內部的一個參數選項，跟策略
+自己的名字是兩件事。
+
+**這支策略歷史已經累積的資料庫紀錄要手動migration，git pull不會自動處理**——
+`signal_events.strategy`欄位跟`symbols.disabled_strategies`(JSON陣列文字)裡舊字串
+`golden_cross_scaleout`不會自動變成`golden_cross`，這台電腦已經手動跑過：
+```sql
+UPDATE signal_events SET strategy = 'golden_cross' WHERE strategy = 'golden_cross_scaleout';
+UPDATE symbols SET disabled_strategies = REPLACE(disabled_strategies, 'golden_cross_scaleout', 'golden_cross') WHERE disabled_strategies LIKE '%golden_cross_scaleout%';
+```
+**如果另一台電腦的`data/*.db`也有這支策略的歷史紀錄，pull到這個commit後要在那台電腦上
+執行同樣的兩行SQL**——不跑的話，那台電腦上：舊的`signal_events`紀錄的策略欄位還是
+`golden_cross_scaleout`(不會跟`STRATEGY_LABELS`等新程式碼對得起來，顯示會出問題)，
+`disabled_strategies`裡如果有殘留舊字串，也不會被新程式碼的排除邏輯正確識別(等於
+"golden_cross"這個新名字的排除狀態會被當成從沒排除過，下次跑`recompute_strategy_
+selection.py`才會覆蓋掉重新算對)。

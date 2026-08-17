@@ -48,7 +48,7 @@ from stocks.shioaji_client import ShioajiClient
 from stocks.signal_engine import evaluate_all
 from stocks.strategies import STRATEGY_REGISTRY
 
-# atr_breakout/trend_following/breakout/golden_cross_scaleout是用「N日」概念設計、只拿
+# atr_breakout/trend_following/breakout/golden_cross是用「N日」概念設計、只拿
 # 日線資料驗證過──直接餵5分K的話「10日均線」其實變成10根5分K(~50分鐘)算出來的均線，
 # 跟真正的10日均線是兩個不同的數字(曾經導致通知內容自相矛盾：訊號說「跌破10日均線」，
 # 趨勢那行卻說「站上10日線」)。chip_momentum/trust_momentum/long_swing則是需要

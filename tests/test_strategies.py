@@ -9,7 +9,7 @@ from stocks.strategies.bollinger import BollingerStrategy
 from stocks.strategies.breakout import BreakoutStrategy
 from stocks.strategies.bullish_divergence import BullishDivergenceStrategy
 from stocks.strategies.chip_momentum import ChipMomentumStrategy
-from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
+from stocks.strategies.golden_cross import GoldenCrossStrategy
 from stocks.strategies.institutional_streak import InstitutionalStreakStrategy
 from stocks.strategies.kd_strategy import KDStrategy
 from stocks.strategies.long_swing import LongSwingStrategy
@@ -574,7 +574,7 @@ SCALEOUT_PARAMS = {
 }
 
 
-def test_golden_cross_scaleout_enters_on_full_score_then_exits_in_two_stages_on_separate_days():
+def test_golden_cross_enters_on_full_score_then_exits_in_two_stages_on_separate_days():
     # 前7天持平建立均線/唐奇安通道基準，第8天5個打分條件全部到齊(MA3>MA7、站上MA7、
     # 近5日籌碼淨買超、突破前5日新高、量能放大)，滿分8分遠超過門檻5分觸發進場；之後
     # 價格衝高反轉緩跌：先放量跌破3日均線賣一半，隔一天才跌破5日均線賣掉剩餘一半。
@@ -584,7 +584,7 @@ def test_golden_cross_scaleout_enters_on_full_score_then_exits_in_two_stages_on_
     bars["foreign_net"] = [0, 0, 0, 0, 50, 50, 50] + [0] * 11
     bars["trust_net"] = [0] * len(closes)
 
-    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+    events = GoldenCrossStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
 
     assert len(events) == 3
     buy, sell_half, sell_rest = events
@@ -602,7 +602,7 @@ def test_golden_cross_scaleout_enters_on_full_score_then_exits_in_two_stages_on_
     assert buy.ts < sell_half.ts < sell_rest.ts
 
 
-def test_golden_cross_scaleout_enters_on_partial_score_reaching_threshold():
+def test_golden_cross_enters_on_partial_score_reaching_threshold():
     # 沒有爆量、也沒有創新高(highs設得很高讓突破永遠不成立)，但MA3>MA7(+2)+站上MA7(+1)+
     # 籌碼買超(+2)=5分剛好達標，證明打分制不需要5個條件同時到齊，跟舊版4條件AND邏輯不同。
     closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 18, 16, 14, 12, 10, 8]
@@ -611,7 +611,7 @@ def test_golden_cross_scaleout_enters_on_partial_score_reaching_threshold():
     bars["foreign_net"] = [0, 0, 0, 0, 50, 50, 50] + [0] * 11
     bars["trust_net"] = [0] * len(closes)
 
-    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+    events = GoldenCrossStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
 
     buys = [e for e in events if e.direction == Direction.BUY]
     assert len(buys) == 1
@@ -621,18 +621,18 @@ def test_golden_cross_scaleout_enters_on_partial_score_reaching_threshold():
     assert "突破" not in buys[0].detail
 
 
-def test_golden_cross_scaleout_blocked_when_score_below_threshold():
+def test_golden_cross_blocked_when_score_below_threshold():
     # 同上但完全沒有籌碼支撐，只剩MA3>MA7(+2)+站上MA7(+1)=3分，沒到5分門檻，不該進場。
     closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 18, 16, 14, 12, 10, 8]
     bars = make_bars(closes, [1000] * len(closes), highs=[50] * len(closes))
     bars["foreign_net"] = [0] * len(closes)
     bars["trust_net"] = [0] * len(closes)
 
-    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+    events = GoldenCrossStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
     assert events == []
 
 
-def test_golden_cross_scaleout_sells_both_halves_same_day_on_gap_down():
+def test_golden_cross_sells_both_halves_same_day_on_gap_down():
     # 進場後價格直接跳空崩跌，同一天就跌破3日線跟5日線兩條均線，兩次出場事件應該同一天觸發。
     closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 2]
     volumes = [1000] * 7 + [3000, 1000, 1000, 1000, 1000, 3000]
@@ -640,7 +640,7 @@ def test_golden_cross_scaleout_sells_both_halves_same_day_on_gap_down():
     bars["foreign_net"] = [0, 0, 0, 0, 50, 50, 50] + [0] * 6
     bars["trust_net"] = [0] * len(closes)
 
-    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+    events = GoldenCrossStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
 
     assert len(events) == 3
     sells = [e for e in events if e.direction == Direction.SELL]
@@ -650,7 +650,7 @@ def test_golden_cross_scaleout_sells_both_halves_same_day_on_gap_down():
     assert "賣出剩餘一半" in sells[1].detail
 
 
-def test_golden_cross_scaleout_reenters_next_bar_after_full_exit_while_score_still_qualifies():
+def test_golden_cross_reenters_next_bar_after_full_exit_while_score_still_qualifies():
     # 2026-08-17程式碼review發現的bug，跟trust_momentum/long_swing踩過的同一種問題：改成
     # level-triggered之前，進場條件是edge-triggered(entry_state從False變True的第一天才
     # 觸發)。這裡用score_threshold=3把門檻降低，讓「MA3>MA7(+2)+RSI未超買(+1)」這兩項
@@ -670,7 +670,7 @@ def test_golden_cross_scaleout_reenters_next_bar_after_full_exit_while_score_sti
     bars = make_bars(closes, volumes, highs=[c + 1 for c in closes], lows=[c - 1 for c in closes])
     params = {**SCALEOUT_PARAMS, "score_threshold": 3}
 
-    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, params)
+    events = GoldenCrossStrategy().evaluate("2330", bars, params)
 
     buys = [e for e in events if e.direction == Direction.BUY]
     sells = [e for e in events if e.direction == Direction.SELL]
@@ -681,17 +681,17 @@ def test_golden_cross_scaleout_reenters_next_bar_after_full_exit_while_score_sti
     assert buys[1].ts == bars.index[13], "第二次進場應該是完全出清的隔天，不是同一天——同一天又賣又買會讓通知看起來自相矛盾"
 
 
-def test_golden_cross_scaleout_returns_nothing_without_institutional_columns():
+def test_golden_cross_returns_nothing_without_institutional_columns():
     # 沒有籌碼欄位時chip_backed整段是False，缺了+2分；把突破也擋掉(highs設高)的話剩下
     # MA3>MA7(+2)+站上MA7(+1)+量增(+1)=4分不到5分門檻，不該進場。
     closes = [10, 10, 10, 10, 10, 10, 10, 12, 14, 16, 18, 20, 18, 16, 14, 12, 10, 8]
     volumes = [1000] * 7 + [3000, 1000, 1000, 1000, 1000, 3000, 1000, 1000, 1000, 1000, 1000]
     bars = make_bars(closes, volumes, highs=[50] * len(closes))
-    events = GoldenCrossScaleOutStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
+    events = GoldenCrossStrategy().evaluate("2330", bars, SCALEOUT_PARAMS)
     assert events == []
 
 
-def test_golden_cross_scaleout_rsi_filter_blocks_entry_when_overbought():
+def test_golden_cross_rsi_filter_blocks_entry_when_overbought():
     # 20天持平後單邊上漲，量能在黃金交叉當天放大：MA3>MA7(+2)+站上MA7(+1)+量增(+1)=4分，
     # 沒有籌碼、也沒有突破(highs設高擋掉)，剛好卡在門檻前一分——這一分要靠RSI濾網補。
     # 這段單邊漲勢的RSI(14)算出來是100(超買)，用預設rsi_overbought=70會被擋住，但如果
@@ -702,10 +702,10 @@ def test_golden_cross_scaleout_rsi_filter_blocks_entry_when_overbought():
     bars = make_bars(closes, volumes, highs=[50] * len(closes))
     params = dict(SCALEOUT_PARAMS)
 
-    blocked = GoldenCrossScaleOutStrategy().evaluate("2330", bars, {**params, "rsi_overbought": 70})
+    blocked = GoldenCrossStrategy().evaluate("2330", bars, {**params, "rsi_overbought": 70})
     assert blocked == [], "RSI(14)在這段單邊漲勢算出來是100，超買濾網該擋住這筆進場"
 
-    allowed = GoldenCrossScaleOutStrategy().evaluate("2330", bars, {**params, "rsi_overbought": 200})
+    allowed = GoldenCrossStrategy().evaluate("2330", bars, {**params, "rsi_overbought": 200})
     buys = [e for e in allowed if e.direction == Direction.BUY]
     assert len(buys) == 1, "把超買門檻拉高到RSI永遠過關，同一筆資料應該能補上第5分進場"
     assert buys[0].price == 10.5

@@ -7,38 +7,23 @@ from stocks.models import Direction, SignalEvent
 class ATRBreakoutStrategy:
     """ATR動態通道突破策略。
 
-    進場：收盤價創20日新高(唐奇安通道上軌) + 週線趨勢確認(require_weekly_trend：週MA20
-    斜率向上) + 60日均線>120日均線(require_long_regime，現行:True) + 月營收年增率>=0%
-    (require_revenue_growth，現行:True，2026-08-16加的基本面濾網，見db.attach_
-    monthly_revenue_growth())。這幾道濾網都是2026-08-16加的：見scripts/backtest_
-    long_regime_filter.py/backtest_macro_regime_filters.py/backtest_revenue_growth_
-    filter.py，全觀察清單10年獲利因子3.10→4.06(疊加後)、最大回撤收斂約15%，20支已知
-    近年下跌很兇的股票上獲利因子0.89→1.01(轉正)。
+    進場條件：
+    1. 收盤創20日新高(唐奇安通道上軌)
+    2. 週線MA20斜率向上
+    3. 60日均線>120日均線
+    4. 月營收年增率≥0%或無資料
 
-    也支援收盤價>240日均線/年線(require_above_long_ma，現行:False，2026-08-16停用)：
-    使用者質疑10年只剩204筆「筆數少的不合理」，用scripts/backtest_atr_breakout_entry_
-    ablation.py逐道濾網ablation後發現，MA240是四道進場濾網裡邊際貢獻最薄弱的一道
-    (疊加時只多貢獻8%的筆數縮減換取獲利因子4.86→5.01這一點提升；單獨開啟時總報酬
-    11604.9還輸給單獨開regime的11550.4，PF卻明顯較差3.94 vs 4.49，本質上是跟
-    require_long_regime高度重疊的同一種「長期多頭位階」判斷)，故停用，只留週線趨勢+
-    regime+營收三道。
+    出場條件：
+    1. 跌破25%移動停損(stop_pct)
 
-    出場：跌破25%移動停損(stop_mode="pct"，現行:0.25，2026-08-16從15%拉寬)。停損只進
-    不退：每天先用前一天算出的停損線判斷是否出場，沒出場才用當天收盤價把停損線往上拉，
-    避免look-ahead。拉寬理由：使用者提議「進場濾網加這麼多(regime/MA240/營收)了，訊號
-    應該更精準，出場能不能放寬換更高報酬」，實測(scripts/backtest_wider_exit_stops.py)
-    全觀察清單10年15%→20%→25%是乾淨的贏(加總報酬4242→5578→8057、獲利因子3.82→4.23→
-    5.40同步變好，不是單純放大波動)，YTD樣本太小(僅8~4筆)看不出穩定方向，採用25%。
+    支援模式(回測用)：
+    - stop_mode="atr"：N倍ATR移動停損
+    - stop_mode="tiered_pct"：分批停損
+    - stop_mode="two_stage"：初始窄停損，獲利達門檻(profit_switch_pct)後切換寬幅移動停損
+    - require_above_long_ma：收盤>240日均線(現行OFF)
+    - require_entry_volume：突破當天量>均量倍數(現行OFF)
 
-    也支援N倍ATR移動停損(stop_mode="atr")、分批停損(stop_mode="tiered_pct")、雙重停損
-    (stop_mode="two_stage"：進場時先用較窄的初始停損(進場K棒最低點或1.5倍ATR)，等獲利
-    超過profit_switch_pct(預設10%)後才切換成stop_pct寬幅移動停損)。
-
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY。2026-08-16
-    之前還要求「這支股票自己當下也跌破月線」才擋(AND條件)，但這支策略的進場前提是
-    創20日新高，實務上幾乎不可能同時跌破自己的月線，AND條件對這支策略形同虛設
-    (10年355次BUY訊號、擋下率0%)。使用者確認拿掉AND條件、改成純看產業寬度(config.
-    circuit_breaker_own_ma_period=None)，見circuit_breaker.py開頭說明。"""
+    斷路器：ON — 全市場同產業≥60%跌破月線時暫停BUY(純看產業寬度)"""
 
     name = "atr_breakout"
 

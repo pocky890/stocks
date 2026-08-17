@@ -7,24 +7,24 @@ from stocks.models import Direction, SignalEvent
 class BreakoutStrategy:
     """突破策略。
 
-    進場：收盤價創前20日新高(唐奇安通道上軌) + 成交量>1.5倍均量 + 週線趨勢確認
-    (require_weekly_trend：週MA20斜率向上) + 60日均線>120日均線(require_long_regime，
-    現行:True) + 收盤價>240日均線/年線(require_above_long_ma，現行:True，跟regime疊加、
-    不是取代) + 月營收年增率>=0%(require_revenue_growth，現行:True，2026-08-16加的
-    基本面濾網，見db.attach_monthly_revenue_growth())。這三道濾網都是2026-08-16加的，
-    全觀察清單10年獲利因子2.84→3.69(疊加後)，20支已知近年下跌很兇的股票上加總報酬
-    62.2→233.5，細節見atr_breakout.py同批說明+scripts/backtest_revenue_growth_
-    filter.py。
+    進場條件：
+    1. 收盤創前20日新高(唐奇安通道上軌，邊緣觸發)
+    2. 成交量>1.5倍20日均量
+    3. 週線MA20斜率向上
+    4. 60日均線>120日均線
+    5. 收盤>240日均線
+    6. 月營收年增率≥0%或無資料
 
-    出場：收盤價跌破前10日最低，或跌破「進場價-3倍14日ATR」停損(stop_mode="atr"，進場後
-    固定不動，現行:atr_multiplier=3，2026-08-16從2倍拉寬)，兩者先發生的為準。也支援
-    stop_mode="pct"(移動停損)。拉寬理由跟atr_breakout同一批研究(scripts/backtest_
-    wider_exit_stops.py)：全觀察清單10年2→2.5→3倍總報酬3555→3618→3709、獲利因子
-    3.60→3.66→3.79同步小幅變好，回撤幾乎沒惡化，YTD也沒有變差，方向一致。
+    出場條件：
+    1. 收盤跌破前10日最低，或
+    2. 跌破「進場價-3倍14日ATR」固定停損(不移動)
+    兩者先到者為準。
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)時暫停新的BUY(SELL不受影響)。
-    2026-08-16拿掉了「自己當下也跌破月線」這道AND條件(改成純看產業寬度，config.
-    circuit_breaker_own_ma_period=None)，理由見circuit_breaker.py開頭說明。"""
+    支援模式(回測用)：
+    - stop_mode="pct"：移動停損
+    - entry_trigger="level"：條件當天成立即觸發(非邊緣，已驗證等效)
+
+    斷路器：ON — 全市場同產業≥60%跌破月線時暫停BUY(純看產業寬度)"""
 
     name = "breakout"
 

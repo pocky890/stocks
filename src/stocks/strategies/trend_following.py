@@ -7,16 +7,23 @@ from stocks.models import Direction, SignalEvent
 class TrendFollowingStrategy:
     """趨勢追蹤策略。
 
-    進場：20日均線>60日均線 + 收盤站上20日均線 + 成交量>20日均量(volume_multiplier，現行1倍)
+    進場條件：
+    1. 20日均線>60日均線
+    2. 收盤站上20日均線
+    3. 成交量>20日均量(volume_multiplier，現行1倍)
 
-    出場：收盤跌破20日均線，或20日均線本身跌破60日均線(多頭排列瓦解)，兩者任一發生就
-    出場——20日均線跌破可用ma_break_confirm_days/ma_break_single_day_drop_pct加緩衝
-    (現行即時觸發，不緩衝)。停損為進場當天收盤價-2倍14日ATR，固定不動(stop_mode="atr")，
-    也支援stop_mode="pct"(移動停損)、"trailing_atr"(移動停利：股價自進場後最高點回落
-    N倍ATR即出場)。
+    出場條件：
+    1. 收盤跌破20日均線，或
+    2. 20日均線跌破60日均線(多頭排列瓦解)
+    停損為進場當天收盤價-2倍14日ATR，固定不動。
 
-    斷路器：適用——全市場同產業≥60%股票跌破月線(20日均線)、且這支股票自己當下也跌破
-    月線時，暫停新的BUY(SELL不受影響)。"""
+    支援模式(回測用)：
+    - stop_mode="pct"：移動停損
+    - stop_mode="trailing_atr"：移動停利(自進場後最高點回落N倍ATR出場)
+    - ma_break_confirm_days/ma_break_single_day_drop_pct：跌破20日均線加緩衝確認
+    - entry_trigger="level"：條件當天成立即觸發(非邊緣，已驗證等效)
+
+    斷路器：ON — 全市場同產業≥60%跌破月線時暫停BUY(純看產業寬度)"""
 
     name = "trend_following"
 

@@ -7,38 +7,23 @@ from stocks.models import Direction, SignalEvent
 class CapitulationReversalStrategy:
     """爆量急殺止穩策略。
 
-    進場：單日重挫≥5% + 成交量>2倍均量(恐慌性賣壓)，隔天不再破前一天低點、且收盤收在
-    前一天收盤之上(止穩確認)才進場。
+    進場條件：
+    1. 單日重挫≥5% + 成交量>2倍均量(恐慌性賣壓)
+    2. 隔天不再破前一天低點，且收盤收在前一天收盤之上(止穩確認)
 
-    出場(現行:stop_mode="structural"+enable_tiered_profit，一買配兩賣，跟bullish_
-    divergence同一套機制，要用simulate_scaleout_trades配對，不能套simulate_
-    round_trips)，兩階段：
-      ①初始結構停損防接刀：爆量急殺當天(不是進場當天)的最低點再往下5%緩衝
-        (structural_stop_buffer_pct)
-      ②反彈觸及20日均線(tiered_ma_period)先賣一半，剩餘部位停損上移至成本價保本
-        (move_stop_to_breakeven_after_tier)，之後改用15%(stop_pct)寬幅移動停損
+    出場條件：
+    1. 初始結構停損：爆量急殺當天(不是進場當天)最低點-5%緩衝(structural_stop_buffer_pct)
+    2. 反彈觸及20日均線(tiered_ma_period)：賣出一半，剩餘部位停損上移至成本價保本
+    3. 剩餘部位改15%(stop_pct)寬幅移動停損
+    4. loss_cooldown_days=180：上次進場若觸發「跌破結構停損、恐慌未止穩、全部出場」，
+       暫停180天再重新進場；正常止穩獲利出場不受影響
 
-    也支援單一停損：固定15%移動停損("pct")、2.5倍ATR移動停損("atr")、分批停損
-    ("tiered_pct")、或不搭配tiered_profit的純結構停損("structural"，注意：固定不動
-    又沒有其他出場條件，獲利部位會一直持有到觸及停損為止，見enable_tiered_profit
-    參數註解的實測說明)。
+    支援模式(回測用)：
+    - stop_mode="pct"/"atr"/"tiered_pct"：單一或分批停損
+    - stop_mode="structural"不搭配enable_tiered_profit：純結構停損，固定不動
+    - require_long_uptrend_intact：長期均線斜率濾網(現行OFF)
 
-    現行(config.json):loss_cooldown_days=180——上一次進場如果真的觸發「跌破結構停損、
-    恐慌未止穩、全部出場」(代表這支股票的恐慌沒有真的止穩)，對這支股票暫停180天再重新
-    進場；正常止穩獲利出場則完全不受影響。這是2026-08-16取代原本考慮過的120MA斜率
-    濾網(require_long_uptrend_intact，全面性擋掉「120MA沒有上揚」的股票，全觀察清單
-    總報酬會砍71%)的精準版方案：只針對「這支股票自己」反覆抄底失敗才冷卻，20支已知
-    近年下跌很兇的股票上獲利因子從0.65拉到0.94(接近打平)，但全觀察清單10年總報酬只
-    犧牲7%(獲利因子甚至微幅變好)，見scripts/backtest_capitulation_loss_cooldown.py。
-
-    斷路器：豁免（在CIRCUIT_BREAKER_EXEMPT_STRATEGIES清單內）。查過全觀察清單10年138次
-    BUY訊號：進場當天自己收盤價<20日均線的比例高達75.4%(單一股票急殺後本來就常常還在
-    自己月線下方)，但「全市場同產業≥60%也跌破月線」這個AND條件只在3.6%的進場天成立
-    (單一股票恐慌性急殺不代表整個產業同時系統性重挫)，兩者同時成立、真正會被斷路器
-    擋下的比例只有2.2%——跟bullish_divergence那種「進場前提本身就跟斷路器條件結構
-    互斥」不同，這2.2%不是結構性衝突。使用者2026-08-16仍選擇排除：這2.2%剛好是
-    「單一股票恐慌急殺+整個產業同時系統性重挫」同時發生的情況，可能正是最劇烈、最
-    值得抓的恐慌轉折點，寧可不設這道防線也不要錯過。"""
+    斷路器：OFF — 豁免(CIRCUIT_BREAKER_EXEMPT_STRATEGIES)"""
 
     name = "capitulation_reversal"
 

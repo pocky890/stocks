@@ -83,7 +83,7 @@ def test_should_disable_false_even_when_positive_average_relies_entirely_on_the_
 
 def test_should_disable_uses_single_uniform_trade_threshold_for_every_strategy():
     # 2026-08-16使用者確認：拿掉per-strategy override(long_swing/capitulation_reversal/
-    # atr_breakout/chip_momentum/trust_momentum/golden_cross_scaleout/breakout各自
+    # atr_breakout/chip_momentum/trust_momentum/golden_cross/breakout各自
     # 不同門檻)，統一改用MIN_TRADES_FOR_RANKING(現行:5)——2026-08-16那批regime/MA240/
     # 月營收濾網疊加後交易頻率大減，個別override的邏輯已經追不上，使用者要求簡化成
     # 一個數字，不分策略。should_disable()不再接受strategy_name參數。

@@ -6,7 +6,7 @@ scaleout/atr_breakout/breakout這5支，各自產生4個版本(其餘參數都�
 這3個布林開關，乾淨地做regime vs 營收的對照)：
 
   - 都不開(基準)
-  - 只開regime家族(require_long_regime，golden_cross_scaleout/atr_breakout/breakout
+  - 只開regime家族(require_long_regime，golden_cross/atr_breakout/breakout
     另外也含require_above_long_ma，MA240本來就是跟regime同一組「長期位階」濾網疊加使用，
     現行config從來沒有單獨只開MA240不開regime的版本)
   - 只開營收年增率(require_revenue_growth)
@@ -42,7 +42,7 @@ KNOWN_DECLINERS = {
     "3552", "4529", "8429", "2726", "1338", "1565", "4552", "4416", "8450",
 }
 
-STRATEGY_NAMES = ["chip_momentum", "trust_momentum", "golden_cross_scaleout", "atr_breakout", "breakout"]
+STRATEGY_NAMES = ["chip_momentum", "trust_momentum", "golden_cross", "atr_breakout", "breakout"]
 
 
 def make_variant(base_params: dict, use_regime: bool, use_revenue: bool) -> dict:

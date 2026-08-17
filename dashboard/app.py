@@ -97,7 +97,7 @@ with connect(config.db_path) as conn:
     import_watchlist_snapshot(conn, watchlist_sync_path(config.db_path))
 
 
-# 「策略歷史勝率」表格要列的策略——2026-08-15前golden_cross_scaleout是一買配兩賣的
+# 「策略歷史勝率」表格要列的策略——2026-08-15前golden_cross是一買配兩賣的
 # 分批出場，要用simulate_scaleout_trades另外配對，特別排除在外處理；換成單一停損全出
 # 當預設後，所有NOTIFIABLE_STRATEGIES都是一買配一賣，直接用同一份清單、同一套
 # simulate_round_trips迴圈處理即可，不用再特殊分流。

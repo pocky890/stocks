@@ -15,7 +15,7 @@ partial K)——兩者新鮮度不同，是2026-08-16使用者確認接受的設
 月線，純產業寬度斷路器會誤殺它8筆好進場，加上這個AND條件後幾乎完全救回)。
 
 2026-08-16後續發現並修正：使用者檢討「隊長」群組(15檔同產業半導體設備/封測股)2026年
-6-7月經歷產業性重挫時，這個AND條件對golden_cross_scaleout/trend_following/long_swing/
+6-7月經歷產業性重挫時，這個AND條件對golden_cross/trend_following/long_swing/
 atr_breakout/breakout這5支策略實測擋下率是0%——這幾支策略的進場條件本身就要求「站上」
 某條均線(創新高/均線交叉)，跟AND條件要求的「自己也跌破均線」幾乎互斥，等於這道防線對
 這5支策略形同虛設(拉長own_ma_period到120日一樣沒用，見scripts/backtest_circuit_
@@ -153,7 +153,7 @@ def is_buy_suppressed(
 
     own_ma_period是None(2026-08-16後的現行預設)時，只看產業寬度是否觸發，不再額外
     要求「自己也跌破均線」——這道AND條件原本是為了避免同業平均拖累而錯殺逆勢股(3711
-    日月光投控2~4月的案例)，但實測對golden_cross_scaleout/trend_following/long_swing/
+    日月光投控2~4月的案例)，但實測對golden_cross/trend_following/long_swing/
     atr_breakout/breakout這5支策略幾乎形同虛設(擋下率0%，這幾支的進場條件本身就要求
     「站上」某條均線，跟「自己也跌破均線」幾乎互斥，拉長own_ma_period到120日一樣沒用，
     見scripts/backtest_circuit_breaker_own_ma.py)。使用者2026-08-16在看過「拿掉AND

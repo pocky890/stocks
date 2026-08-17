@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from stocks.config import load_config
 from stocks.db import attach_institutional_flows, bars_to_dataframe, connect, fetch_bars_daily, fetch_institutional_flows, fetch_watchlist
 from stocks.strategies import STRATEGY_REGISTRY
-from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
+from stocks.strategies.golden_cross import GoldenCrossStrategy
 from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 
 STRATEGY_GROUPS = {
@@ -85,13 +85,13 @@ def main():
         "左右——這只適合看「訊號抓到的方向對不對」的粗略比較，不是精確的策略評分。"
     )
 
-    print("\n=== 均線黃金交叉+籌碼、分批出場(golden_cross_scaleout)：另外報告，不放進上面的排名 ===")
+    print("\n=== 均線黃金交叉+籌碼、分批出場(golden_cross)：另外報告，不放進上面的排名 ===")
     print("(進出場形狀跟上面幾個不一樣：一次進場配兩次出場，報酬率用兩次出場價的均價計算)\n")
-    scaleout_params = config.strategy_params.get("golden_cross_scaleout", {})
+    scaleout_params = config.strategy_params.get("golden_cross", {})
     pooled_scaleout_trades = []
     still_open_notes = []
     for (symbol, name), bars in bars_by_symbol.items():
-        events = GoldenCrossScaleOutStrategy().evaluate(symbol, bars, scaleout_params)
+        events = GoldenCrossStrategy().evaluate(symbol, bars, scaleout_params)
         trades, still_open = simulate_scaleout_trades(events)
         if trades:
             summary = summarize_trades(trades)

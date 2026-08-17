@@ -1,4 +1,4 @@
-"""比較golden_cross_scaleout原本的均線分批出場(ma_scaleout) vs 單一15%移動停損全出
+"""比較golden_cross原本的均線分批出場(ma_scaleout) vs 單一15%移動停損全出
 (pct)——兩種事件形狀不同，原本是一買配兩賣(simulate_scaleout_trades)，pct版是
 一買配一賣(simulate_round_trips)。研究用一次性腳本。
 """
@@ -18,7 +18,7 @@ from stocks.db import (
     fetch_institutional_flows,
     fetch_watchlist,
 )
-from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
+from stocks.strategies.golden_cross import GoldenCrossStrategy
 from stocks.strategy_stats import simulate_round_trips, simulate_scaleout_trades, summarize_trades
 
 CONFIGS = [
@@ -29,7 +29,7 @@ CONFIGS = [
 
 def main():
     config = load_config()
-    strategy = GoldenCrossScaleOutStrategy()
+    strategy = GoldenCrossStrategy()
 
     with connect(config.db_path) as conn:
         symbols = [(row["code"], row["name"]) for row in fetch_watchlist(conn)]
@@ -71,7 +71,7 @@ def main():
             }
         )
 
-    print("=== golden_cross_scaleout：ma_scaleout(現行) vs pct15%全出 ===")
+    print("=== golden_cross：ma_scaleout(現行) vs pct15%全出 ===")
     print(pd.DataFrame(overall_rows).to_string(index=False))
 
 

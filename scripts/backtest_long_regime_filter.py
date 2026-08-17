@@ -1,9 +1,9 @@
 """研究用一次性腳本：測試使用者提議的長期regime濾網(require_long_regime：額外要求
 regime_fast_period(60)日均線>regime_slow_period(120)日均線才能進場，跟long_swing同一套
-判斷)，套用在chip_momentum/trust_momentum/golden_cross_scaleout/atr_breakout/breakout
+判斷)，套用在chip_momentum/trust_momentum/golden_cross/atr_breakout/breakout
 這5支目前缺長期趨勢確認的策略上。起因是使用者質疑這些策略在股票見頂反轉後會「一路撿一路
 停損」——2314(台揚，2021-08見頂)、4763(材料*-KY，2023-08見頂)這兩支新加入觀察清單的
-long-term下跌股就是實例，見頂後這5支策略的獲利因子都掉到1以下(golden_cross_scaleout在
+long-term下跌股就是實例，見頂後這5支策略的獲利因子都掉到1以下(golden_cross在
 2314上-130.9%、chip_momentum-107.8%)，只有長期regime濾網(60/120日均線)的long_swing
 撐得住。全觀察清單10年+2314/4763見頂後窗口回測比較。不動STRATEGY_REGISTRY的預設params。"""
 import sys
@@ -25,18 +25,18 @@ from stocks.db import (
 from stocks.strategies.atr_breakout import ATRBreakoutStrategy
 from stocks.strategies.breakout import BreakoutStrategy
 from stocks.strategies.chip_momentum import ChipMomentumStrategy
-from stocks.strategies.golden_cross_scaleout import GoldenCrossScaleOutStrategy
+from stocks.strategies.golden_cross import GoldenCrossStrategy
 from stocks.strategies.trust_momentum import TrustMomentumStrategy
 from stocks.strategy_stats import is_scaleout_strategy, simulate_round_trips, simulate_scaleout_trades, summarize_trades
 
 STRATEGIES = {
     "chip_momentum": ChipMomentumStrategy(),
     "trust_momentum": TrustMomentumStrategy(),
-    "golden_cross_scaleout": GoldenCrossScaleOutStrategy(),
+    "golden_cross": GoldenCrossStrategy(),
     "atr_breakout": ATRBreakoutStrategy(),
     "breakout": BreakoutStrategy(),
 }
-NEEDS_FLOWS = {"chip_momentum": "foreign_net", "trust_momentum": "trust_net", "golden_cross_scaleout": None}
+NEEDS_FLOWS = {"chip_momentum": "foreign_net", "trust_momentum": "trust_net", "golden_cross": None}
 PEAK_WINDOWS = {"2314": pd.Timestamp("2021-08-01"), "4763": pd.Timestamp("2023-08-01")}
 
 

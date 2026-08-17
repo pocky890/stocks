@@ -427,7 +427,7 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
             insert_monthly_revenue(conn, revenue_history)
 
     # 新增當下立刻跑一次排除評估，不用等到下個月的排程——兩個市場這時三大法人都已經有
-    # 10年歷史(FinMind)，chip_momentum/golden_cross_scaleout這種靠籌碼判斷的策略可以馬上
+    # 10年歷史(FinMind)，chip_momentum/golden_cross這種靠籌碼判斷的策略可以馬上
     # 判斷；如果FinMind剛好失敗(見上面的try/except)，flows還是只有最新一天，樣本不足就
     # 先排除(見strategy_selection.should_disable)，等之後每月排程重跑、資料累積夠了才會
     # 真正開始判斷，不是預設先開著。

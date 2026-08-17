@@ -1,6 +1,6 @@
 """比較既有6個「策略」(atr_breakout/chip_momentum/trust_momentum/breakout/
 trend_following/long_swing)在原本出場邏輯 vs 固定15%移動停損下的表現——
-golden_cross_scaleout用均線分批出場、跟ATR/固定%停損結構不同，不在這次比較範圍。
+golden_cross用均線分批出場、跟ATR/固定%停損結構不同，不在這次比較範圍。
 研究用一次性腳本，不動STRATEGY_REGISTRY的預設params，只在這裡臨時override。
 """
 import sys

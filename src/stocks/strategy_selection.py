@@ -74,7 +74,7 @@ MIN_PROFIT_FACTOR = 1.5  # 2026-08-17使用者拿10年真實回測數字比較�
 
 def summarize_strategy(symbol: str, bars: pd.DataFrame, strategy_name: str, params: dict) -> dict | None:
     """大多數NOTIFIABLE_STRATEGIES是一買配一賣的形狀，用simulate_round_trips配對；少數
-    分批出場的策略(golden_cross_scaleout的stop_mode="ma_scaleout"、bullish_divergence
+    分批出場的策略(golden_cross的stop_mode="ma_scaleout"、bullish_divergence
     的enable_tiered_profit=True)是一買配兩賣，要用simulate_scaleout_trades配對——
     is_scaleout_strategy()統一判斷，不用每個呼叫端各自記得特殊處理。"""
     strategy = STRATEGY_REGISTRY.get(strategy_name)
@@ -111,7 +111,7 @@ def should_disable(summary: dict | None) -> bool:
 
 def compute_disabled_strategies(symbol: str, bars: pd.DataFrame, strategy_params: dict) -> list[str]:
     """回傳這支股票應該排除的策略清單(NOTIFIABLE_STRATEGIES的子集)。bars要先接上
-    attach_institutional_flows(chip_momentum/golden_cross_scaleout需要foreign_net/
+    attach_institutional_flows(chip_momentum/golden_cross需要foreign_net/
     trust_net欄位才能算出真正的表現)——沒接上這些欄位、或還沒累積到MIN_TRADES_FOR_
     RANKING筆完整交易的策略，一樣會被排除(見should_disable)，新股票/新啟用的策略會
     整組先排除，等資料累積夠了下次重跑才會開始判斷。"""

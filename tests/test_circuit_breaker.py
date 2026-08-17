@@ -125,7 +125,7 @@ def test_is_buy_suppressed_never_blocks_unclassified_symbol():
 
 def test_is_buy_suppressed_with_own_ma_period_none_ignores_own_trend():
     # 2026-08-16使用者確認：own_ma_period=None(現行預設)拿掉「自己也跌破均線」這道AND
-    # 條件，純看產業寬度是否觸發——golden_cross_scaleout/trend_following/long_swing/
+    # 條件，純看產業寬度是否觸發——golden_cross/trend_following/long_swing/
     # atr_breakout/breakout這幾支策略的進場條件本身就要求「站上」某條均線，跟這道AND
     # 條件幾乎互斥，導致實測擋下率是0%(見scripts/backtest_circuit_breaker_own_ma.py)。
     industry_codes = {"3711": "24"}
