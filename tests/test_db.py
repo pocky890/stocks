@@ -40,6 +40,26 @@ def test_insert_signal_events_dedups_identical_events(tmp_path):
     assert len(second_pass) == 0, "re-inserting the identical event must not be treated as new"
 
 
+def test_insert_signal_events_suppresses_consecutive_same_direction_repeats(tmp_path):
+    # 2026-08-18使用者反映：同一支股票同一支策略同一個方向的訊號每5分鐘重複出現一整個
+    # 下午——起因是run_live.py對NOTIFIABLE_STRATEGIES的日線再評估把ts換成當下時間，盤中
+    # 分數在門檻附近反覆達標時，同一個還沒解除的方向會被當成「新」事件一直插入。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    first_buy = make_event(ts=datetime(2026, 1, 5, 12, 0))
+    repeat_buy = make_event(ts=datetime(2026, 1, 5, 12, 5))
+    reversal_sell = make_event(direction=Direction.SELL, ts=datetime(2026, 1, 5, 12, 10))
+
+    with db.connect(db_path) as conn:
+        inserted = db.insert_signal_events(conn, [first_buy, repeat_buy, reversal_sell])
+        rows = db.fetch_signal_events(conn)
+
+    assert [e.ts for e in inserted] == [first_buy.ts, reversal_sell.ts], (
+        "只有第一次buy跟真正翻轉方向的sell該被視為新事件，中間重複的buy要被壓下"
+    )
+    assert len(rows) == 2
+
+
 def test_insert_signal_events_allows_different_strategy_same_symbol_ts(tmp_path):
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
@@ -55,8 +75,10 @@ def test_insert_signal_events_allows_different_strategy_same_symbol_ts(tmp_path)
 def test_fetch_signal_events_returns_newest_first(tmp_path):
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
-    older = make_event(ts=datetime(2026, 1, 5, 9, 5))
-    newer = make_event(ts=datetime(2026, 1, 5, 9, 10))
+    # 不同strategy，避免跟insert_signal_events的「同(symbol,strategy)連續同方向不重複插入」
+    # 邏輯打架——這裡只是要驗證ORDER BY ts DESC，跟兩筆事件是不是同一策略無關
+    older = make_event(strategy="ma_crossover", ts=datetime(2026, 1, 5, 9, 5))
+    newer = make_event(strategy="rsi", ts=datetime(2026, 1, 5, 9, 10))
 
     with db.connect(db_path) as conn:
         db.insert_signal_events(conn, [older, newer])
@@ -101,8 +123,10 @@ def test_prune_signal_events_deletes_only_records_older_than_retention(tmp_path)
     # 固定日期，不然測試跑的時間點不同，90天前的判斷就會失準
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
-    old_event = make_event(ts=datetime.now() - timedelta(days=91))
-    recent_event = make_event(ts=datetime.now() - timedelta(days=89))
+    # 不同strategy，避免跟insert_signal_events的「同(symbol,strategy)連續同方向不重複插入」
+    # 邏輯打架——這裡只是要驗證retention的時間門檻，跟兩筆事件是不是同一策略無關
+    old_event = make_event(strategy="ma_crossover", ts=datetime.now() - timedelta(days=91))
+    recent_event = make_event(strategy="rsi", ts=datetime.now() - timedelta(days=89))
 
     with db.connect(db_path) as conn:
         db.insert_signal_events(conn, [old_event, recent_event])

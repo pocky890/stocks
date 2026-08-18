@@ -216,10 +216,26 @@ def fetch_bars_5min_latest_day(conn: sqlite3.Connection, symbol: str):
 
 
 def insert_signal_events(conn: sqlite3.Connection, events: list[SignalEvent]) -> list[SignalEvent]:
-    """Insert events, ignoring duplicates (same symbol/strategy/direction/ts).
+    """Insert events, ignoring duplicates (same symbol/strategy/direction/ts) and consecutive
+    same-direction repeats for the same (symbol, strategy)——2026-08-18使用者反映「訊號紀錄」
+    裡同一支股票同一支策略的同一個方向(例如golden_cross的buy)會每5分鐘重複出現一整個下午：
+    run_live.py對NOTIFIABLE_STRATEGIES的日線再評估(daily_bars_with_today)是對整段歷史重新
+    跑一次edge-triggered策略、把ts換成當下時間(見run_live.py同一段的說明)，只要盤中分數在
+    門檻附近反覆達標，同一個還沒解除的方向就會被當成「新」事件一直插入——不是真的每次都是
+    新訊號，是重複觸發同一個還沒改變的狀態。這裡改成如果這個(symbol, strategy)最新一筆
+    紀錄的方向跟這次要插入的相同，就跳過不插入，只有方向真的翻轉(BUY→SELL或反之)才算新
+    事件。同一次呼叫裡按順序處理，前面剛插入的事件在同一個connection上就看得到(sqlite同
+    connection的read-your-writes)，所以批次回補(一次可能有很多筆同symbol/strategy事件)
+    也能正確逐筆比較。
     Returns only the events that were actually newly inserted."""
     newly_inserted = []
     for e in events:
+        last = conn.execute(
+            "SELECT direction FROM signal_events WHERE symbol = ? AND strategy = ? ORDER BY ts DESC LIMIT 1",
+            (e.symbol, e.strategy),
+        ).fetchone()
+        if last is not None and last["direction"] == e.direction.value:
+            continue
         cur = conn.execute(
             """INSERT OR IGNORE INTO signal_events (symbol, ts, strategy, direction, price, detail, tier)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
