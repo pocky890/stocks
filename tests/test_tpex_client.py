@@ -60,26 +60,6 @@ def test_fetch_valuations_latest_parses_pe_yield_pb(monkeypatch):
     assert rows[0]["pb_ratio"] == pytest.approx(1.56)
 
 
-def test_fetch_ex_dividend_schedule_converts_roc_date(monkeypatch):
-    payload = [
-        {
-            "ExRrightsExDividendDate": "1150727",
-            "SecuritiesCompanyCode": "00858",
-            "ExRrightsExDividend": "除息",
-            "StockDividendRatio": "0.00000000",
-            "CashDividend": "1.40000000",
-        }
-    ]
-    monkeypatch.setattr(tpex_client.requests, "get", lambda *a, **k: FakeResponse(payload))
-
-    rows = tpex_client.fetch_ex_dividend_schedule()
-
-    assert rows[0]["symbol"] == "00858"
-    assert rows[0]["ex_date"] == "2026-07-27"
-    assert rows[0]["cash_dividend"] == pytest.approx(1.40)
-    assert rows[0]["detail"] == "除息"
-
-
 def test_fetch_company_directory_uses_abbreviation_not_legal_name(monkeypatch):
     payload = [
         {

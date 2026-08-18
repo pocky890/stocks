@@ -1058,3 +1058,52 @@ UPDATE symbols SET disabled_strategies = REPLACE(disabled_strategies, 'golden_cr
 `disabled_strategies`裡如果有殘留舊字串，也不會被新程式碼的排除邏輯正確識別(等於
 "golden_cross"這個新名字的排除狀態會被當成從沒排除過，下次跑`recompute_strategy_
 selection.py`才會覆蓋掉重新算對)。
+
+## 2026-08-18：除權息預告表改用FinMind完整歷史，取代TWSE/TPEx官方「預告表」API
+
+使用者問「近期除權息資料現在有正確嗎」，查證後發現落差比想像中大：`ex_dividend_
+schedule`表(2026-08-15新增的除息假停損修正功能用來判斷「今天是不是除息日」)裡當時
+只有2筆現行觀察清單股票的紀錄。根因是TWSE/TPEx的「除權息預告表」API(`TWT48U_ALL`/
+`tpex_exright_prepost`)**只列出「已公告但還沒發生」的除權息，事件一過期就從清單上
+消失，不是歷史紀錄**——這個功能2026-08-15才新增，代表任何除息日早於那天的股票，從
+開始抓的那一刻起就已經不在預告表上了，永遠不會被抓到。用FinMind的完整歷史dataset
+(`TaiwanStockDividend`)比對，發現觀察清單當時其實已經有26筆2026年的除權息事件，
+只捕捉到2筆(6491剛好在功能上線後、除息日之前抓到；2383是還沒發生的未來排定)。
+
+同時查證還發現：CLAUDE.md原本記錄「除權息預告表繼續走TPEx官方API(這個endpoint沒
+觀察到SSL問題)」這個假設也不成立——實測連續呼叫`tpex_exright_prepost`時第一次就
+撞到跟三大法人/估值當初棄用TPEx官方API同一個已知的SSL憑證問題(Missing Subject Key
+Identifier)，只是間歇性的，第二次才成功。
+
+**已採用：`ex_dividend_schedule`的資料來源全面改用`finmind_client.fetch_ex_dividend_
+schedule_for_range()`(`TaiwanStockDividend`dataset)**，取代`twse_client`/`tpex_client`
+的`fetch_ex_dividend_schedule()`(兩個函式已經整支刪除，不再使用官方預告表API)：
+- `daily_update._refresh_ex_dividend_schedule()`：新函式，取代原本分散在
+  `_refresh_market_data_twse`(只有上市)跟`_refresh_market_data_tpex`(上櫃)裡的預告表
+  呼叫，改成`check_and_update()`裡對整個觀察清單(不分市場，跟月營收同一個模式)呼叫
+  一次。**不用**`_fetch_range_per_symbol`那套「上次抓到的日期+1」書籤機制——那個機制
+  假設書籤欄位只會往過去累積，但這裡的書籤候選欄位(ex_date)常常是還沒發生的未來
+  日期，用它當下次查詢的起點會跳過決議公告時間更早、但除權息日期還沒到的下一輪
+  公告(FinMind的start_date/end_date過濾的是決議/公告日期，不是ex_date本身)。改成
+  每次都重查整段股價歷史涵蓋的範圍——`check_and_update()`一天最多真的觸發兩次，
+  全觀察清單成本很低，INSERT OR REPLACE本身就是idempotent。
+- `daily_update.add_symbol_to_watchlist()`：新增股票時原本完全沒有回補除權息(這是
+  之前就有的漏洞，不是這次才出現)，這次一併補上，跟三大法人/估值/月營收同一套
+  try/except容錯、同樣回補近10年歷史。
+- `scripts/fetch_market_data.py`：原本除權息只backfill上市(`twse_symbols`)，上櫃
+  股票完全沒有這份資料；改用FinMind後上市/上櫃都補、且能回補過去已發生的歷史事件。
+  已經對全觀察清單29檔跑過一次，`ex_dividend_schedule`從3筆補到307筆(10年)，
+  2026年的紀錄從2筆補到30筆(含幾筆之前沒注意到的純股票股利事件，例如2313/3189/3363
+  在現金股利之外還各有一次股票股利，date跟前面查現金股利時看到的不同)。
+
+**這台電腦已經跑過這次的回補**，如果另一台電腦的`data/*.db`也在用這個除息假停損修正
+功能，pull到這個commit後要在那台電腦上執行一次`python scripts/fetch_market_data.py`
+補齊(或至少讓下次`check_and_update()`自然跑到——`_refresh_ex_dividend_schedule`
+每次都是全範圍重查，不需要额外的一次性腳本，但`fetch_market_data.py`可以立刻補齊
+不用等)。這不是`recompute_strategy_selection.py`要處理的範圍(除權息資料沒有任何
+策略讀取，只有`run_live.py`的除息假停損修正跟dashboard的「近期除權息」表格用到)。
+
+回補後`ex_dividend_schedule`累積了10年歷史，dashboard的「近期除權息」表格原本沒有
+日期下限、會被10年前的舊紀錄洗版，不符合「近期」的標題語意——已加上
+`dashboard/app.py`的`EX_DIVIDEND_DISPLAY_SINCE = "2024-01-01"`常數，只在**顯示**
+時過濾(2024年至今，含已發生+未來排定)，資料庫本身不截斷、仍保留完整10年歷史。

@@ -128,6 +128,120 @@ def test_fetch_monthly_revenue_for_range_returns_empty_on_failure_message(monkey
     assert finmind_client.fetch_monthly_revenue_for_range("2330", "2025-01-01", "2025-02-28") == []
 
 
+def test_fetch_ex_dividend_schedule_for_range_maps_cash_only_event(monkeypatch):
+    payload = {
+        "msg": "success",
+        "data": [
+            {
+                "date": "2026-03-24",
+                "stock_id": "2330",
+                "StockEarningsDistribution": 0.0,
+                "StockExDividendTradingDate": "",
+                "CashEarningsDistribution": 6.00003573,
+                "CashExDividendTradingDate": "2026-03-17",
+            }
+        ],
+    }
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = finmind_client.fetch_ex_dividend_schedule_for_range("2330", "2026-01-01", "2026-12-31")
+
+    assert rows == [
+        {
+            "symbol": "2330",
+            "ex_date": "2026-03-17",
+            "cash_dividend": 6.00003573,
+            "stock_dividend_ratio": None,
+            "detail": "除息",
+        }
+    ]
+
+
+def test_fetch_ex_dividend_schedule_for_range_marks_stock_only_event_as_除權(monkeypatch):
+    payload = {
+        "msg": "success",
+        "data": [
+            {
+                "date": "2026-06-01",
+                "stock_id": "2454",
+                "StockEarningsDistribution": 0.5,
+                "StockExDividendTradingDate": "2026-06-10",
+                "CashEarningsDistribution": 0.0,
+                "CashExDividendTradingDate": "",
+            }
+        ],
+    }
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = finmind_client.fetch_ex_dividend_schedule_for_range("2454", "2026-01-01", "2026-12-31")
+
+    assert rows[0]["ex_date"] == "2026-06-10"
+    assert rows[0]["cash_dividend"] is None
+    assert rows[0]["stock_dividend_ratio"] == "0.50000000"
+    assert rows[0]["detail"] == "除權"
+
+
+def test_fetch_ex_dividend_schedule_for_range_marks_same_date_cash_and_stock_as_除權息(monkeypatch):
+    payload = {
+        "msg": "success",
+        "data": [
+            {
+                "date": "2026-06-01",
+                "stock_id": "2454",
+                "StockEarningsDistribution": 0.5,
+                "StockExDividendTradingDate": "2026-06-10",
+                "CashEarningsDistribution": 2.0,
+                "CashExDividendTradingDate": "2026-06-10",
+            }
+        ],
+    }
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = finmind_client.fetch_ex_dividend_schedule_for_range("2454", "2026-01-01", "2026-12-31")
+
+    assert len(rows) == 1
+    assert rows[0]["ex_date"] == "2026-06-10"
+    assert rows[0]["cash_dividend"] == 2.0
+    assert rows[0]["stock_dividend_ratio"] == "0.50000000"
+    assert rows[0]["detail"] == "除權息"
+
+
+def test_fetch_ex_dividend_schedule_for_range_sorts_by_ex_date(monkeypatch):
+    payload = {
+        "msg": "success",
+        "data": [
+            {
+                "date": "2026-06-01",
+                "stock_id": "2330",
+                "StockEarningsDistribution": 0.0,
+                "StockExDividendTradingDate": "",
+                "CashEarningsDistribution": 6.0,
+                "CashExDividendTradingDate": "2026-06-11",
+            },
+            {
+                "date": "2026-03-01",
+                "stock_id": "2330",
+                "StockEarningsDistribution": 0.0,
+                "StockExDividendTradingDate": "",
+                "CashEarningsDistribution": 6.0,
+                "CashExDividendTradingDate": "2026-03-17",
+            },
+        ],
+    }
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    rows = finmind_client.fetch_ex_dividend_schedule_for_range("2330", "2026-01-01", "2026-12-31")
+
+    assert [r["ex_date"] for r in rows] == ["2026-03-17", "2026-06-11"]
+
+
+def test_fetch_ex_dividend_schedule_for_range_returns_empty_on_failure_message(monkeypatch):
+    payload = {"msg": "error", "data": []}
+    monkeypatch.setattr(finmind_client.requests, "get", lambda *a, **k: FakeResponse(payload))
+
+    assert finmind_client.fetch_ex_dividend_schedule_for_range("2330", "2026-01-01", "2026-12-31") == []
+
+
 def test_fetch_stock_name_returns_stock_name_field(monkeypatch):
     payload = {
         "msg": "success",

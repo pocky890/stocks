@@ -4,7 +4,15 @@ import requests
 
 from stocks import daily_update
 from stocks.config import Config
-from stocks.db import add_to_watchlist, connect, fetch_signal_events, get_disabled_strategies, init_db, insert_signal_events
+from stocks.db import (
+    add_to_watchlist,
+    connect,
+    fetch_signal_events,
+    get_disabled_strategies,
+    init_db,
+    insert_bars_daily,
+    insert_signal_events,
+)
 from stocks.models import Bar, Direction, SignalEvent, Tier
 from stocks.notifier import NOTIFIABLE_STRATEGIES
 
@@ -38,6 +46,7 @@ def test_check_and_update_survives_one_source_failing(tmp_path, monkeypatch):
     monkeypatch.setattr(daily_update, "_refresh_price_data", lambda cfg, symbols: 1)
     monkeypatch.setattr(daily_update, "_refresh_market_data_twse", lambda cfg, symbols: 2)
     monkeypatch.setattr(daily_update, "_refresh_monthly_revenue", lambda cfg, symbols: False)
+    monkeypatch.setattr(daily_update, "_refresh_ex_dividend_schedule", lambda cfg, symbols: None)
 
     def raise_ssl_error(cfg, symbols):
         raise requests.exceptions.SSLError("certificate verify failed")
@@ -64,6 +73,7 @@ def test_check_and_update_reports_no_errors_when_everything_succeeds(tmp_path, m
     monkeypatch.setattr(daily_update, "_refresh_market_data_twse", lambda cfg, symbols: 0)
     monkeypatch.setattr(daily_update, "_refresh_market_data_tpex", lambda cfg, symbols: False)
     monkeypatch.setattr(daily_update, "_refresh_monthly_revenue", lambda cfg, symbols: False)
+    monkeypatch.setattr(daily_update, "_refresh_ex_dividend_schedule", lambda cfg, symbols: None)
 
     result = daily_update.check_and_update(config)
 
@@ -88,6 +98,7 @@ def test_check_and_update_prunes_signal_events_older_than_retention(tmp_path, mo
     monkeypatch.setattr(daily_update, "_refresh_market_data_twse", lambda cfg, symbols: 0)
     monkeypatch.setattr(daily_update, "_refresh_market_data_tpex", lambda cfg, symbols: False)
     monkeypatch.setattr(daily_update, "_refresh_monthly_revenue", lambda cfg, symbols: False)
+    monkeypatch.setattr(daily_update, "_refresh_ex_dividend_schedule", lambda cfg, symbols: None)
 
     daily_update.check_and_update(config)
 
@@ -120,6 +131,7 @@ def test_add_symbol_falls_back_to_earlier_date_when_todays_valuation_report_not_
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
     assert result["ok"] is True
@@ -149,6 +161,7 @@ def test_add_symbol_immediately_computes_disabled_strategies(tmp_path, monkeypat
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     daily_update.add_symbol_to_watchlist(config, "2408")
 
     with connect(db_path) as conn:
@@ -183,6 +196,7 @@ def test_add_symbol_tpex_backfills_three_years_via_finmind(tmp_path, monkeypatch
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "8299")
 
     assert result["ok"] is True
@@ -215,6 +229,7 @@ def test_add_symbol_tpex_falls_back_to_finmind_when_valuation_ssl_fails(tmp_path
     monkeypatch.setattr(daily_update.tpex_client, "fetch_valuations_latest", raise_ssl_error)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", lambda code: "山太士")
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "3595")
 
     assert result["ok"] is True
@@ -248,6 +263,7 @@ def test_add_symbol_tpex_survives_when_finmind_name_fallback_also_fails(tmp_path
     monkeypatch.setattr(daily_update.tpex_client, "fetch_valuations_latest", raise_ssl_error)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_stock_name", raise_ssl_error_for_code)
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "8299")
 
     assert result["ok"] is True
@@ -288,6 +304,7 @@ def test_add_symbol_twse_also_backfills_three_years_via_finmind(tmp_path, monkey
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
     assert result["ok"] is True
@@ -328,6 +345,7 @@ def test_add_symbol_twse_backfills_valuation_history_via_finmind(tmp_path, monke
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", fake_valuation_history)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
     assert result["ok"] is True
@@ -369,6 +387,7 @@ def test_add_symbol_valuation_history_failure_does_not_block_flows(tmp_path, mon
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", raise_error)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
     assert result["ok"] is True
@@ -409,6 +428,7 @@ def test_add_symbol_twse_backfills_monthly_revenue_via_finmind(tmp_path, monkeyp
 
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", fake_revenue_history)
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
     assert result["ok"] is True
@@ -445,6 +465,7 @@ def test_add_symbol_monthly_revenue_failure_does_not_block_flows(tmp_path, monke
 
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", raise_error)
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
     assert result["ok"] is True
@@ -532,6 +553,7 @@ def test_add_symbol_twse_falls_back_to_latest_day_when_finmind_fails(tmp_path, m
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "2408")
 
     assert result["ok"] is True
@@ -635,6 +657,7 @@ def test_add_symbol_to_watchlist_accepts_chinese_name(tmp_path, monkeypatch):
         lambda d: [{"symbol": "2408", "name": "南亞科", "date": d, "pe_ratio": 10, "dividend_yield": 1, "pb_ratio": 1}],
     )
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "南亞科")
 
     assert result["ok"] is True
@@ -652,6 +675,7 @@ def test_add_symbol_to_watchlist_reports_unresolvable_chinese_name(tmp_path, mon
     monkeypatch.setattr(daily_update.twse_client, "fetch_company_directory", lambda: [])
     monkeypatch.setattr(daily_update.tpex_client, "fetch_company_directory", lambda: [])
 
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", lambda s, a, b: [])
     result = daily_update.add_symbol_to_watchlist(config, "亂打的名字")
 
     assert result["ok"] is False
@@ -681,7 +705,6 @@ def test_refresh_market_data_tpex_queries_from_day_after_last_synced_date(tmp_pa
     monkeypatch.setattr(daily_update, "datetime", FrozenDateTime)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
-    monkeypatch.setattr(daily_update.tpex_client, "fetch_ex_dividend_schedule", lambda: [])
 
     captured = {}
 
@@ -716,7 +739,6 @@ def test_refresh_market_data_tpex_skips_symbol_already_synced_today(tmp_path, mo
     monkeypatch.setattr(daily_update, "datetime", FrozenDateTime)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_valuations_for_range", lambda s, a, b: [])
     monkeypatch.setattr(daily_update.finmind_client, "fetch_monthly_revenue_for_range", lambda s, a, b: [])
-    monkeypatch.setattr(daily_update.tpex_client, "fetch_ex_dividend_schedule", lambda: [])
 
     calls = []
     monkeypatch.setattr(
@@ -745,7 +767,6 @@ def test_refresh_market_data_tpex_backfills_valuation_via_finmind(tmp_path, monk
 
     monkeypatch.setattr(daily_update, "datetime", FrozenDateTime)
     monkeypatch.setattr(daily_update.finmind_client, "fetch_institutional_flows_for_range", lambda s, a, b: [])
-    monkeypatch.setattr(daily_update.tpex_client, "fetch_ex_dividend_schedule", lambda: [])
 
     monkeypatch.setattr(
         daily_update.finmind_client,
@@ -776,7 +797,6 @@ def test_refresh_market_data_tpex_valuation_failure_does_not_block_flows(tmp_pat
             return datetime(2026, 8, 7)
 
     monkeypatch.setattr(daily_update, "datetime", FrozenDateTime)
-    monkeypatch.setattr(daily_update.tpex_client, "fetch_ex_dividend_schedule", lambda: [])
     monkeypatch.setattr(
         daily_update.finmind_client,
         "fetch_institutional_flows_for_range",
@@ -795,6 +815,58 @@ def test_refresh_market_data_tpex_valuation_failure_does_not_block_flows(tmp_pat
         valuation_row = conn.execute("SELECT * FROM valuations WHERE symbol = '8299'").fetchone()
     assert flow_row["foreign_net"] == 100
     assert valuation_row is None
+
+
+def test_refresh_ex_dividend_schedule_inserts_finmind_results_for_every_symbol(tmp_path, monkeypatch):
+    """2026-08-18改用FinMind的TaiwanStockDividend取代TWSE/TPEx官方預告表——這個dataset
+    不分上市/上櫃，一次查詢就回傳整段股價歷史涵蓋的範圍(不像institutional_flows/
+    valuations那樣用「上次抓到的日期+1」書籤，理由見_refresh_ex_dividend_schedule
+    docstring)。"""
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    with connect(db_path) as conn:
+        add_to_watchlist(conn, "2330", market="TWSE")
+        add_to_watchlist(conn, "8299", market="TPEx")
+        insert_bars_daily(
+            conn,
+            [
+                Bar(symbol="2330", ts=datetime(2026, 1, 5), open=1, high=1, low=1, close=1, volume=1),
+                Bar(symbol="2330", ts=datetime(2026, 8, 7), open=1, high=1, low=1, close=1, volume=1),
+            ],
+        )
+
+    captured = []
+
+    def fake_schedule(symbol, start_date, end_date):
+        captured.append((symbol, start_date, end_date))
+        return [{"symbol": symbol, "ex_date": "2026-08-28", "cash_dividend": 25.0, "stock_dividend_ratio": None, "detail": "除息"}]
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", fake_schedule)
+
+    daily_update._refresh_ex_dividend_schedule(config, {"2330", "8299"})
+
+    assert set(captured) == {("2330", "2026-01-05", "2026-08-07"), ("8299", "2026-01-05", "2026-08-07")}
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT symbol, ex_date FROM ex_dividend_schedule ORDER BY symbol").fetchall()
+    assert [dict(r) for r in rows] == [
+        {"symbol": "2330", "ex_date": "2026-08-28"},
+        {"symbol": "8299", "ex_date": "2026-08-28"},
+    ]
+
+
+def test_refresh_ex_dividend_schedule_noop_when_no_price_history_yet(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    config = make_config(db_path)
+
+    def fail_if_called(symbol, start_date, end_date):
+        raise AssertionError("no bars_daily yet, should not call FinMind at all")
+
+    monkeypatch.setattr(daily_update.finmind_client, "fetch_ex_dividend_schedule_for_range", fail_if_called)
+
+    daily_update._refresh_ex_dividend_schedule(config, {"2330"})
 
 
 def test_should_check_for_updates_true_when_never_checked_before():

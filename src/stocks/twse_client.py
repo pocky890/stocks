@@ -1,10 +1,12 @@
 """證交所（TWSE，上市）免費公開資料（不需要金鑰、不需要開戶）。用來補三大法人/
-估值/除權息，跟Shioaji帳戶狀態完全無關。上櫃(TPEx)股票對應的資料在 tpex_client.py。"""
+估值，跟Shioaji帳戶狀態完全無關。上櫃(TPEx)股票對應的資料在 tpex_client.py。除權息預告表
+2026-08-18改用FinMind(見finmind_client.fetch_ex_dividend_schedule_for_range)，不再
+用這裡的官方API。"""
 import time
 
 import requests
 
-from stocks.parsing_utils import roc_date_to_iso, to_number
+from stocks.parsing_utils import to_number
 
 TIMEOUT = 15
 RETRIES = 3
@@ -115,21 +117,3 @@ def fetch_company_directory(retries: int = RETRIES) -> list[dict]:
         {"symbol": row["公司代號"], "name": row["公司簡稱"].strip(), "industry_code": row.get("產業別")}
         for row in payload
     ]
-
-
-def fetch_ex_dividend_schedule(retries: int = RETRIES) -> list[dict]:
-    """上市股票除權息預告表：這是往前看的公告清單（不是逐日查詢），一次呼叫拿到所有排定中的除權息。"""
-    payload = _get_json("https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL", retries=retries)
-
-    rows = []
-    for row in payload:
-        rows.append(
-            {
-                "symbol": row.get("Code"),
-                "ex_date": roc_date_to_iso(row["Date"]),
-                "cash_dividend": to_number(row.get("CashDividend"), cast=float),
-                "stock_dividend_ratio": row.get("StockDividendRatio") or None,
-                "detail": row.get("Exdividend"),
-            }
-        )
-    return rows

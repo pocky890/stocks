@@ -17,6 +17,7 @@ DATASET = "TaiwanStockInstitutionalInvestorsBuySell"
 VALUATION_DATASET = "TaiwanStockPER"
 STOCK_INFO_DATASET = "TaiwanStockInfo"
 MONTHLY_REVENUE_DATASET = "TaiwanStockMonthRevenue"
+DIVIDEND_DATASET = "TaiwanStockDividend"
 
 FOREIGN_NAMES = {"Foreign_Investor", "Foreign_Dealer_Self"}
 TRUST_NAMES = {"Investment_Trust"}
@@ -102,6 +103,46 @@ def fetch_monthly_revenue_for_range(symbol: str, start_date: str, end_date: str)
         }
         for row in _fetch_range(MONTHLY_REVENUE_DATASET, symbol, start_date, end_date)
     ]
+
+
+def fetch_ex_dividend_schedule_for_range(symbol: str, start_date: str, end_date: str) -> list[dict]:
+    """回傳[{symbol, ex_date, cash_dividend, stock_dividend_ratio, detail}, ...]，日期升序
+    排列。2026-08-18取代原本的twse_client/tpex_client.fetch_ex_dividend_schedule()——那兩個
+    是TWSE/TPEx官方「預告表」API，只列出「已公告但還沒發生」的除權息，事件一過期就從清單上
+    消失，不是歷史資料。這個除息修正功能2026-08-15才新增，導致當時已經過期的除權息事件
+    (即使今年稍早才發生)從一開始就沒機會被預告表捕捉到。TaiwanStockDividend是完整歷史
+    dataset，不會有這個問題，可以一次回補過去的落差，之後也不用擔心預告表把過去資料丟掉。
+
+    這個dataset一筆記錄對應一次股利分派決議，同時可能有現金股利跟股票股利各自的除權/
+    除息日(CashExDividendTradingDate/StockExDividendTradingDate，日期通常不同，也可能
+    其中一個是空字串代表這次沒有這項)——用這裡的date參數(start_date/end_date)過濾的
+    是決議/公告日期，不是除權息日期本身，所以不能把某支股票「目前已知最後一個除權息日」
+    當作下次查詢的起點(那個日期常常在未來，用它當書籤會跳過決議日期更早、但除權息日期
+    還沒到的下一輪公告)——因此呼叫端每次都查整段涵蓋範圍，不做增量書籤。"""
+    by_date: dict[str, dict] = {}
+    for row in _fetch_range(DIVIDEND_DATASET, symbol, start_date, end_date):
+        cash_date = row.get("CashExDividendTradingDate") or None
+        if cash_date:
+            by_date.setdefault(cash_date, {})["cash_dividend"] = row.get("CashEarningsDistribution")
+        stock_date = row.get("StockExDividendTradingDate") or None
+        if stock_date:
+            by_date.setdefault(stock_date, {})["stock_dividend_ratio"] = row.get("StockEarningsDistribution")
+
+    rows = []
+    for ex_date, fields in sorted(by_date.items()):
+        has_cash = "cash_dividend" in fields
+        has_stock = "stock_dividend_ratio" in fields
+        detail = "除權息" if has_cash and has_stock else "除權" if has_stock else "除息"
+        rows.append(
+            {
+                "symbol": symbol,
+                "ex_date": ex_date,
+                "cash_dividend": fields.get("cash_dividend"),
+                "stock_dividend_ratio": f"{fields['stock_dividend_ratio']:.8f}" if has_stock else None,
+                "detail": detail,
+            }
+        )
+    return rows
 
 
 def fetch_stock_name(symbol: str) -> str:

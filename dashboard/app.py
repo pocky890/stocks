@@ -182,6 +182,12 @@ def _cached_overview_rows_for(_config, codes: tuple):
     return [_cached_overview_row(_config, code) for code in codes]
 
 
+# 2026-08-18：ex_dividend_schedule改用FinMind回補後累積了10年歷史，「近期除權息」表格
+# 直接show全部的話會被10年前的舊紀錄洗版，不符合「近期」的標題語意——資料庫本身不截斷
+# (保留完整10年歷史)，只在這裡的顯示範圍加下限。
+EX_DIVIDEND_DISPLAY_SINCE = "2024-01-01"
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_chart_data(_config, symbol: str):
     """K線圖頁籤的資料抓取+畫圖包一層快取——這張圖疊了K線+4條均線+布林通道+成交量+
@@ -193,7 +199,13 @@ def _cached_chart_data(_config, symbol: str):
         bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
         flow_rows = [dict(r) for r in fetch_institutional_flows(conn, symbol)]
         valuation_rows = [dict(r) for r in fetch_valuations(conn, symbol)]
-        ex_div_rows = [dict(r) for r in fetch_ex_dividend_schedule(conn, symbol)]
+        # fetch_ex_dividend_schedule()本身回傳ex_date升序(給run_live.py當set用不care順序)，
+        # 這裡是唯一顯示給人看的地方，使用者要新的在上——只在這個顯示端reverse，不動共用函式。
+        ex_div_rows = [
+            dict(r)
+            for r in reversed(fetch_ex_dividend_schedule(conn, symbol))
+            if r["ex_date"] >= EX_DIVIDEND_DISPLAY_SINCE
+        ]
 
     fig = None
     if not bars.empty:

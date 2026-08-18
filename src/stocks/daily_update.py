@@ -7,14 +7,20 @@
 的範圍查詢，不用額外的sync log(institutional_flows/valuations兩張表都是symbol+date
 primary key，INSERT OR REPLACE蓋掉重疊範圍不會出錯)。2026-08-13把TPEx的估值也從官方
 免費API換成FinMind——官方API(www.tpex.org.tw)常有SSL憑證問題(對方伺服器憑證本身的
-問題)，FinMind穩定得多。除權息預告表還是走TPEx官方API(沒觀察到同樣的SSL問題，也還沒
-查證FinMind有沒有等效資料集)。融資融券資料2026-08-16拿掉(dashboard圖表用不到，改成
-成交量子圖)，不再抓取。
+問題)，FinMind穩定得多。融資融券資料2026-08-16拿掉(dashboard圖表用不到，改成成交量
+子圖)，不再抓取。
 
 月營收(monthly_revenue)：2026-08-16新增，基本面濾網研究用。跟三大法人/估值不同的是
 不分上市/上櫃，兩個市場共用同一個FinMind dataset(`TaiwanStockMonthRevenue`)，`_refresh_
 monthly_revenue`對整個觀察清單(不分市場)用同一套`_fetch_range_per_symbol`。目前還沒有
 任何策略讀取這份資料。
+
+除權息預告表(ex_dividend_schedule)：2026-08-18改用FinMind的`TaiwanStockDividend`(完整
+歷史)取代原本的TWSE/TPEx官方「預告表」API——後者只列出「已公告但還沒發生」的除權息，
+事件一過期就從清單上消失、不是歷史紀錄，也一樣會偶爾撞到TPEx官方API那個已知的SSL憑證
+問題(原本以為這個endpoint沒有這個問題，後來查證發現一樣會發生)。跟月營收一樣不分上市/
+上櫃，但`_refresh_ex_dividend_schedule`**不用**`_fetch_range_per_symbol`的日期書籤機制
+(見該函式docstring說明原因)，每次都重查整段股價歷史涵蓋的範圍。
 """
 import time
 from datetime import datetime, timedelta
@@ -97,11 +103,6 @@ def _refresh_market_data_twse(config: Config, symbols: set[str]) -> int:
                     upsert_symbol(conn, row["symbol"], name=row["name"], market="TWSE", is_watchlist=True)
             mark_market_data_synced(conn, [date])
 
-    schedule = [r for r in twse_client.fetch_ex_dividend_schedule(retries=1) if r["symbol"] in symbols]
-    with connect(config.db_path) as conn:
-        if schedule:
-            insert_ex_dividend_schedule(conn, schedule)
-
     return len(todo_dates)
 
 
@@ -172,15 +173,49 @@ def _refresh_monthly_revenue(config: Config, symbols: set[str]) -> bool:
     return len(dates_after - dates_before) > 0
 
 
+def _refresh_ex_dividend_schedule(config: Config, symbols: set[str]) -> None:
+    """除權息預告表2026-08-18起改用FinMind的TaiwanStockDividend(完整歷史)取代TWSE/TPEx
+    官方「預告表」API——後者只列出「已公告但還沒發生」的除權息，事件一過期就從清單上消失，
+    不是歷史紀錄。這個除息假停損修正功能2026-08-15才新增，導致今年6~8月已經發生的除權息
+    事件從一開始就沒機會被預告表捕捉到(使用者查證發現落差達24筆)；改用FinMind可以直接
+    回補這個落差，之後也不用擔心預告表把過去的資料丟掉。
+
+    跟三大法人/估值/月營收不同的是**不用**`_fetch_range_per_symbol`的「上次抓到的日期+1」
+    書籤機制——那個機制假設書籤欄位(date)只會往過去累積，但這裡的書籤候選欄位是ex_date，
+    常常是還沒發生的未來日期(例如某支股票已知下一次除息在兩週後)，如果拿它當下次查詢的
+    起點，會跳過決議公告時間更早、但除權息日期還沒到的下一輪公告(FinMind的start_date/
+    end_date過濾的是決議/公告日期，不是ex_date本身)。改成每次都重查整段股價歷史涵蓋的
+    範圍——check_and_update()一天最多真的觸發兩次，全觀察清單成本很低，INSERT OR REPLACE
+    本身就是idempotent，不會因為重複查詢而製造重複資料。跟月營收一樣不分上市/上櫃，兩個
+    市場共用同一個dataset。"""
+    if not symbols:
+        return
+
+    with connect(config.db_path) as conn:
+        all_dates = fetch_trading_dates(conn)
+    if not all_dates:
+        return
+    start_date, end_date = all_dates[0], all_dates[-1]
+
+    schedule = []
+    for symbol in symbols:
+        schedule += finmind_client.fetch_ex_dividend_schedule_for_range(symbol, start_date, end_date)
+
+    with connect(config.db_path) as conn:
+        if schedule:
+            insert_ex_dividend_schedule(conn, schedule)
+
+
 def _refresh_market_data_tpex(config: Config, symbols: set[str]) -> bool:
     """三大法人/估值都改用FinMind：每支股票各自查「上次抓到的日期+1」~「今天」，
     不是TPEx官方API那種「只給最新一天」——2026-08-13把估值也換掉，原因是
     TPEx官方免費API(www.tpex.org.tw)常有SSL憑證問題(Missing Subject Key Identifier，
     對方伺服器憑證本身的問題，不是我們這邊能修的)，兩個資料源各自獨立try/except，任一個
-    失敗不影響另一個。除權息預告表沒有FinMind等效資料集查證過，繼續走TPEx官方API(這個
-    endpoint目前沒觀察到SSL問題)。FinMind沒有公司名稱欄位，不影響——名稱在新增股票當下
-    就抓過了，之後不會變，不需要每天重新確認。用前後比對日期集合來判斷是不是真的有新資料
-    (不能只看「有沒有呼叫成功」，否則每次開app都會誤報「已更新」)。"""
+    失敗不影響另一個。除權息預告表2026-08-18也改用FinMind(見_refresh_ex_dividend_schedule)，
+    原本以為「這個endpoint沒觀察到SSL問題」，後來實際查證發現一樣會偶爾撞到同一個SSL
+    問題，跟三大法人/估值同一個理由換掉。FinMind沒有公司名稱欄位，不影響——名稱在新增
+    股票當下就抓過了，之後不會變，不需要每天重新確認。用前後比對日期集合來判斷是不是
+    真的有新資料(不能只看「有沒有呼叫成功」，否則每次開app都會誤報「已更新」)。"""
     if not symbols:
         return False
 
@@ -201,18 +236,11 @@ def _refresh_market_data_tpex(config: Config, symbols: set[str]) -> bool:
     except requests.RequestException:
         valuations = []
 
-    try:
-        schedule = [r for r in tpex_client.fetch_ex_dividend_schedule() if r["symbol"] in symbols]
-    except requests.RequestException:
-        schedule = []
-
     with connect(config.db_path) as conn:
         if flows:
             insert_institutional_flows(conn, flows)
         if valuations:
             insert_valuations(conn, valuations)
-        if schedule:
-            insert_ex_dividend_schedule(conn, schedule)
 
     dates_after = _fetched_dates_for_symbols(config, symbols)
     return len(dates_after - dates_before) > 0
@@ -349,7 +377,14 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
         revenue_history = []
         revenue_note = "月營收歷史回補失敗(FinMind連線問題)，先只有之後每月累積的資料"
 
-    chips_note = f"{flows_note}；{valuation_note}；{revenue_note}"
+    try:
+        ex_dividend_history = finmind_client.fetch_ex_dividend_schedule_for_range(code, earliest_date, latest_date)
+        ex_dividend_note = "除權息已透過FinMind補到近10年歷史"
+    except requests.RequestException:
+        ex_dividend_history = []
+        ex_dividend_note = "除權息歷史回補失敗(FinMind連線問題)，先只有之後累積的資料"
+
+    chips_note = f"{flows_note}；{valuation_note}；{revenue_note}；{ex_dividend_note}"
 
     if market == "TPEx":
         # 這裡故意還是打tpex_client(不是finmind_client)，因為新股票的名稱要從這個回應的
@@ -425,6 +460,8 @@ def add_symbol_to_watchlist(config: Config, code: str) -> dict:
             insert_valuations(conn, valuations)
         if revenue_history:
             insert_monthly_revenue(conn, revenue_history)
+        if ex_dividend_history:
+            insert_ex_dividend_schedule(conn, ex_dividend_history)
 
     # 新增當下立刻跑一次排除評估，不用等到下個月的排程——兩個市場這時三大法人都已經有
     # 10年歷史(FinMind)，chip_momentum/golden_cross這種靠籌碼判斷的策略可以馬上
@@ -513,6 +550,11 @@ def check_and_update(config: Config) -> dict:
         revenue_synced = _refresh_monthly_revenue(config, watchlist)
     except requests.RequestException as exc:
         errors.append(f"月營收更新失敗：{exc}")
+
+    try:
+        _refresh_ex_dividend_schedule(config, watchlist)
+    except requests.RequestException as exc:
+        errors.append(f"除權息預告表更新失敗：{exc}")
 
     with connect(config.db_path) as conn:
         prune_signal_events(conn)
