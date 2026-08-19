@@ -102,6 +102,27 @@ def build_today_partial_bar(rows) -> dict | None:
     }
 
 
+def build_today_bar(client, conn, symbol: str) -> dict | None:
+    """建立「今天到目前為止」的partial日K，成交量優先用Shioaji的kbars()查詢(伺服器端
+    算好的官方累計量)，不用我們自己的tick訂閱累加——2026-08-19發現breakout/trend_
+    following這類要求「成交量>N倍均量」的策略，只要當天訂閱中途斷線重連過一次(這個
+    專案已經記錄過好幾次連線不穩定)，重連空窗期的tick就會漏接，全天累加下來的成交量
+    可能只有官方數字的1/300~1/500(3450聯鈞/6187萬潤兩個實際案例)，遠低於門檻，導致
+    量能濾網整天不成立、訊號從未生成過，收盤後用官方資料重跑才會發現訊號其實在。
+    kbars()查詢失敗/逾時(見shioaji_client.fetch_today_kbars本身的try/except)時，退回
+    原本的tick累加partial K，不能讓整支股票的評估直接中斷。"""
+    kbars = client.fetch_today_kbars([symbol]).get(symbol)
+    if kbars:
+        return {
+            "open": kbars[0].open,
+            "high": max(b.high for b in kbars),
+            "low": min(b.low for b in kbars),
+            "close": kbars[-1].close,
+            "volume": sum(b.volume for b in kbars),
+        }
+    return build_today_partial_bar(fetch_bars_5min_today(conn, symbol))
+
+
 def todays_cash_dividend(conn, symbol: str, today) -> float:
     """今天如果剛好是這支股票的除息日，回傳現金股利金額，否則回傳0——2026-08-15使用者
     發現：除息當天交易所會把參考價機制性扣掉股利金額(除息參考價=前一天收盤-股利)，
@@ -116,7 +137,7 @@ def todays_cash_dividend(conn, symbol: str, today) -> float:
     return 0.0
 
 
-def build_daily_bars_with_today(conn, symbol: str) -> pd.DataFrame:
+def build_daily_bars_with_today(conn, symbol: str, client) -> pd.DataFrame:
     """給DAILY_CONCEPT_STRATEGIES用的日線序列：歷史日K(已接上三大法人資料，跟
     run_batch.py同樣的接法) + 今天的partial日K。如果run_batch.py已經跑過、bars_daily
     裡已經有今天正式的日K了，就不用補partial的，直接用正式資料。
@@ -141,7 +162,7 @@ def build_daily_bars_with_today(conn, symbol: str) -> pd.DataFrame:
                 history.loc[today_mask, col] += dividend_addback
         return history
 
-    today_bar = build_today_partial_bar(fetch_bars_5min_today(conn, symbol))
+    today_bar = build_today_bar(client, conn, symbol)
     if today_bar is None:
         return history
     if dividend_addback:
@@ -247,7 +268,7 @@ def main():
         now = datetime.now()
         for symbol in watchlist:
             with connect(config.db_path) as conn:
-                daily_bars_with_today = build_daily_bars_with_today(conn, symbol)
+                daily_bars_with_today = build_daily_bars_with_today(conn, symbol, client)
                 skip = INTRADAY_STRATEGIES | set(get_disabled_strategies(conn, symbol))
                 raw_events = evaluate_all(
                     symbol, daily_bars_with_today, config.strategy_params, tier=Tier.REALTIME, skip_strategies=skip
@@ -303,7 +324,7 @@ def main():
                     latest_per_strategy = {}
                     for r in sorted(todays_rows, key=lambda r: r["ts"]):
                         latest_per_strategy[r["strategy"]] = r
-                    daily_bars_with_today = build_daily_bars_with_today(conn, symbol)
+                    daily_bars_with_today = build_daily_bars_with_today(conn, symbol, client)
                     ex_dividend_dates = {r["ex_date"] for r in fetch_ex_dividend_schedule(conn, symbol)}
                 if not latest_per_strategy or daily_bars_with_today.empty:
                     continue
