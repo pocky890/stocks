@@ -154,6 +154,44 @@ def test_notify_symbol_signals_omits_trend_line_when_daily_bars_missing(captured
     assert "趨勢" not in text, "沒有日線資料(例如新股票剛加進來)就不該印出趨勢那一行"
 
 
+def test_notify_symbol_signals_shows_entry_info_and_return_for_sell(captured_calls):
+    # 2026-08-19使用者要求出場通知要看得到進場日期/價位跟報酬率，不能只看到出場原因。
+    config = make_config()
+    events = [
+        SignalEvent(
+            "6531", "long_swing", Direction.SELL, 851.0, datetime(2026, 8, 19, 9, 5), tier=Tier.REALTIME, detail="連續3天跌破60日均線"
+        )
+    ]
+    entry_events = {"long_swing": {"ts": "2026-08-01T09:30:00", "price": 820.0}}
+    notify_symbol_signals(config, "6531", "愛普", events, EMPTY_BARS, entry_events=entry_events)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "進場：2026-08-01 @820.0 → 出場@851.0，報酬率：+3.8%" in text
+
+
+def test_notify_symbol_signals_omits_entry_info_when_no_prior_entry_found(captured_calls):
+    # 找不到對應進場紀錄(例如這個(symbol,strategy)第一次出場)就只顯示出場原因，不能
+    # 因為缺這段資訊擋掉整則通知。
+    config = make_config()
+    events = [make_event("long_swing", Direction.SELL, "連續3天跌破60日均線")]
+    notify_symbol_signals(config, "6531", "愛普", events, EMPTY_BARS, entry_events={})
+
+    text = captured_calls[0]["data"]["text"]
+    assert "連續3天跌破60日均線" in text
+    assert "進場：" not in text
+
+
+def test_notify_symbol_signals_omits_entry_info_for_buy_events(captured_calls):
+    # 進場資訊只對出場(SELL)有意義，買進通知本身就是「現在進場」，不該附加報酬率這段。
+    config = make_config()
+    events = [make_event("long_swing", Direction.BUY, "多空排列站上均線")]
+    entry_events = {"long_swing": {"ts": "2026-08-01T09:30:00", "price": 820.0}}
+    notify_symbol_signals(config, "6531", "愛普", events, EMPTY_BARS, entry_events=entry_events)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "進場：" not in text
+
+
 def test_notify_symbol_signals_warns_when_sell_falls_on_ex_dividend_date(captured_calls):
     # 2026-08-15使用者發現：除權息當天股價會被交易所機制性扣掉股利金額，停損邏輯看不出
     # 這是股息因素還是真的下跌，容易誤判——賣出訊號剛好落在已知的除權息日就該額外提醒。
@@ -231,6 +269,28 @@ def test_notify_reminder_labels_title_when_buy_and_sell_both_still_pending(captu
     text = captured_calls[0]["data"]["text"]
     assert "買進+賣出訊號都還沒解除" in text
     assert "🟢買" in text and "🔴賣" in text
+
+
+def test_notify_reminder_shows_entry_info_and_return_for_sell(captured_calls):
+    config = make_config()
+    row = {"strategy": "long_swing", "direction": "sell", "price": 851.0, "ts": "2026-08-19T09:05:00"}
+    entry_events = {"long_swing": {"ts": "2026-08-01T09:30:00", "price": 820.0}}
+
+    notify_reminder(config, "6531", "愛普", [row], current_price=845.0, entry_events=entry_events)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "進場：2026-08-01 @820.0，報酬率：+3.8%" in text
+
+
+def test_notify_reminder_omits_entry_info_for_buy_rows(captured_calls):
+    config = make_config()
+    row = {"strategy": "breakout", "direction": "buy", "price": 100.0, "ts": "2026-08-14T09:30:00"}
+    entry_events = {"breakout": {"ts": "2026-08-01T09:30:00", "price": 90.0}}
+
+    notify_reminder(config, "2330", "台積電", [row], current_price=105.0, entry_events=entry_events)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "進場：" not in text
 
 
 def test_notify_reminder_sends_nothing_for_empty_rows(captured_calls):

@@ -101,6 +101,37 @@ def test_fetch_signal_events_filters_by_strategy(tmp_path):
     assert rows[0]["strategy"] == "buy_formula"
 
 
+def test_find_last_entry_event_returns_the_buy_before_this_sell(tmp_path):
+    # 2026-08-19使用者要求出場通知要看得到進場日期/價位跟報酬率——insert_signal_events
+    # 保證同一個(symbol,strategy)只有方向真的翻轉才新增紀錄，所以SELL前一筆(倒數第二筆)
+    # 理論上一定是對應的BUY。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    buy = make_event(direction=Direction.BUY, ts=datetime(2026, 1, 5, 9, 5))
+    sell = make_event(direction=Direction.SELL, ts=datetime(2026, 1, 10, 13, 20))
+
+    with db.connect(db_path) as conn:
+        db.insert_signal_events(conn, [buy, sell])
+        entry = db.find_last_entry_event(conn, "2330", "ma_crossover")
+
+    assert entry["ts"] == buy.ts.isoformat()
+    assert entry["price"] == buy.price
+
+
+def test_find_last_entry_event_returns_none_without_a_prior_buy(tmp_path):
+    # 這個(symbol,strategy)有紀錄以來的第一筆事件就是SELL(沒有更早的進場可對照)——
+    # 通知那邊要優雅降級，不能假設一定找得到進場紀錄。
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    sell = make_event(direction=Direction.SELL, ts=datetime(2026, 1, 10, 13, 20))
+
+    with db.connect(db_path) as conn:
+        db.insert_signal_events(conn, [sell])
+        entry = db.find_last_entry_event(conn, "2330", "ma_crossover")
+
+    assert entry is None
+
+
 def test_fetch_signal_events_symbols_restricts_to_that_list(tmp_path):
     # 2026-08-14使用者要求「訊號歷史紀錄」只留觀察清單——run_batch.py全市場掃描
     # (~2000檔非觀察清單股票)也會寫進signal_events，symbols參數要把這些篩掉，且要在

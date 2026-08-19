@@ -74,6 +74,21 @@ def _trend_text(daily_close: pd.Series) -> str:
     return "、".join(parts)
 
 
+def _format_signal_line(e: SignalEvent, entry) -> str:
+    """單筆觸發訊號的顯示文字。entry是db.find_last_entry_event()查到的進場紀錄(sqlite3.
+    Row，需要ts/price欄位)——出場(SELL)且找得到對應進場時，額外加一行進場日期/價位跟
+    這趟報酬率，讓使用者不用自己回頭查是什麼時候買的、賺賠多少。找不到進場紀錄(例如
+    這個(symbol,strategy)是第一次出場、沒有更早的進場對照)就只顯示原本的觸發原因，
+    不擋主要通知。"""
+    base = f"[V] {strategy_label(e.strategy)}：{e.detail or e.strategy}"
+    if e.direction != Direction.SELL or entry is None:
+        return base
+    entry_date = entry["ts"][:10]
+    entry_price = entry["price"]
+    return_pct = (e.price - entry_price) / entry_price * 100
+    return f"{base}\n      進場：{entry_date} @{entry_price:.1f} → 出場@{e.price:.1f}，報酬率：{return_pct:+.1f}%"
+
+
 def notify_symbol_signals(
     config: Config,
     symbol: str,
@@ -81,6 +96,7 @@ def notify_symbol_signals(
     events: list[SignalEvent],
     daily_bars: pd.DataFrame,
     ex_dividend_dates: set[str] = frozenset(),
+    entry_events: dict | None = None,
 ) -> bool:
     """Combine every triggered strategy for one symbol at one point in time into a
     single Telegram message, per the aggregation design (list which strategies fired,
@@ -100,11 +116,17 @@ def notify_symbol_signals(
     使用者發現：除權息當天交易所會把參考價機制性地扣掉股利金額(除息參考價=前一天收盤-
     股利)，這不是公司真的下跌，但停損/停利邏輯只看得到股價、看不到使用者應該收到的股息，
     可能誤判成跌破停損。這裡只是在通知裡多加一行提醒，讓使用者自己判斷這次觸發有沒有
-    參考價值，不是自動排除或改變訊號本身——訊號紀錄/歷史績效統計都不受影響。"""
+    參考價值，不是自動排除或改變訊號本身——訊號紀錄/歷史績效統計都不受影響。
+
+    entry_events：{strategy: db.find_last_entry_event()查到的進場紀錄}，只需要包含
+    這次events裡SELL的策略——2026-08-19使用者要求出場通知要看得到進場日期/價位跟報酬率，
+    不能只看到出場原因。呼叫端(run_live.py)要在還沒關閉的connection裡先查好，這裡不
+    自己開DB連線。"""
     events = [e for e in events if e.strategy in NOTIFIABLE_STRATEGIES]
     if not events:
         return True
 
+    entry_events = entry_events or {}
     buy_events = [e for e in events if e.direction == Direction.BUY]
     sell_events = [e for e in events if e.direction == Direction.SELL]
     if buy_events and sell_events:
@@ -123,7 +145,7 @@ def notify_symbol_signals(
         "",
         f"{emoji} 觸發訊號（{len(events)}項）：",
     ]
-    lines += [f"[V] {strategy_label(e.strategy)}：{e.detail or e.strategy}" for e in buy_events + sell_events]
+    lines += [_format_signal_line(e, entry_events.get(e.strategy)) for e in buy_events + sell_events]
 
     sell_ex_div_dates = {e.ts.strftime("%Y-%m-%d") for e in sell_events} & set(ex_dividend_dates)
     if sell_ex_div_dates:
@@ -141,7 +163,13 @@ def notify_symbol_signals(
 
 
 def notify_reminder(
-    config: Config, symbol: str, name: str, rows: list, current_price: float, ex_dividend_dates: set[str] = frozenset()
+    config: Config,
+    symbol: str,
+    name: str,
+    rows: list,
+    current_price: float,
+    ex_dividend_dates: set[str] = frozenset(),
+    entry_events: dict | None = None,
 ) -> bool:
     """13:20固定提醒：今天已經通知過的訊號，如果現在價格還是跟當時觸發方向一致(BUY還沒
     跌破、SELL還沒回升)，代表狀況還沒解除，使用者可能還沒處理，額外提醒一次——跟
@@ -151,9 +179,13 @@ def notify_reminder(
     strategy/direction/price/ts欄位。
 
     ex_dividend_dates同notify_symbol_signals——rows都是今天的資料(呼叫端已經篩過)，
-    今天如果剛好是這支股票的除權息日、又有賣出訊號還沒解除，一樣加提醒。"""
+    今天如果剛好是這支股票的除權息日、又有賣出訊號還沒解除，一樣加提醒。
+
+    entry_events同notify_symbol_signals：{strategy: db.find_last_entry_event()查到的
+    進場紀錄}，只需要包含這次rows裡SELL的策略。"""
     if not rows:
         return True
+    entry_events = entry_events or {}
     buy_rows = [r for r in rows if r["direction"] == Direction.BUY.value]
     sell_rows = [r for r in rows if r["direction"] == Direction.SELL.value]
     if buy_rows and sell_rows:
@@ -176,7 +208,14 @@ def notify_reminder(
         tag = "🟢買" if is_buy else "🔴賣"
         verb = "還沒跌破" if is_buy else "還沒回升"
         ts_text = row["ts"][11:16] if len(row["ts"]) >= 16 else row["ts"]
-        lines.append(f"[{tag}] {strategy_label(row['strategy'])}：{ts_text}觸發@{row['price']:.1f}，{verb}")
+        line = f"[{tag}] {strategy_label(row['strategy'])}：{ts_text}觸發@{row['price']:.1f}，{verb}"
+        entry = None if is_buy else entry_events.get(row["strategy"])
+        if entry is not None:
+            entry_date = entry["ts"][:10]
+            entry_price = entry["price"]
+            return_pct = (row["price"] - entry_price) / entry_price * 100
+            line += f"\n      進場：{entry_date} @{entry_price:.1f}，報酬率：{return_pct:+.1f}%"
+        lines.append(line)
 
     if sell_rows:
         today_str = sell_rows[0]["ts"][:10]

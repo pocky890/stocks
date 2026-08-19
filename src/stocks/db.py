@@ -277,6 +277,19 @@ def fetch_signal_events(
     return conn.execute(query, params).fetchall()
 
 
+def find_last_entry_event(conn: sqlite3.Connection, symbol: str, strategy: str):
+    """給出場通知用：查(symbol, strategy)最近2筆事件，倒數第一筆通常就是剛寫入signal_
+    events的這次SELL本身，回傳倒數第二筆——如果是BUY就是這次出場對應的進場紀錄(日期/
+    價位)，可以拿來算報酬率。insert_signal_events()保證同一個(symbol, strategy)只有
+    方向真的翻轉才會新增紀錄，所以倒數第二筆理論上一定跟這次方向相反。找不到(例如這是
+    這個(symbol, strategy)有紀錄以來的第一筆事件，沒有更早的進場可對照)或倒數第二筆
+    不是BUY，就回傳None，通知那邊優雅降級不顯示這段。"""
+    rows = fetch_signal_events(conn, symbol=symbol, strategy=strategy, limit=2)
+    if len(rows) < 2 or rows[1]["direction"] != Direction.BUY.value:
+        return None
+    return rows[1]
+
+
 SIGNAL_EVENTS_RETENTION_DAYS = 90  # 2026-08-14使用者要求「訊號歷史紀錄」只留3個月，
 # 不然signal_events會一直累積(尤其是每5分鐘一次的指標訊號)。build_paper_trades/
 # build_strategy_recommendations/_compute_track_records都是直接從bars_daily重新評估策略，

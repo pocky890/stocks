@@ -26,6 +26,7 @@ from stocks.db import (
     fetch_bars_daily,
     fetch_ex_dividend_schedule,
     fetch_institutional_flows,
+    find_last_entry_event,
     fetch_monthly_revenue,
     fetch_signal_events,
     fetch_watchlist,
@@ -301,7 +302,16 @@ def main():
                 with connect(config.db_path) as conn:
                     daily_bars = bars_to_dataframe(fetch_bars_daily(conn, symbol), ts_field="date")
                     ex_dividend_dates = {r["ex_date"] for r in fetch_ex_dividend_schedule(conn, symbol)}
-                notify_symbol_signals(config, symbol, symbol_names.get(symbol, ""), to_notify, daily_bars, ex_dividend_dates)
+                    # 使用者要求出場通知要看得到進場日期/價位跟報酬率，這裡在connection
+                    # 還沒關閉時先查好，只查SELL用到的策略。
+                    entry_events = {
+                        e.strategy: find_last_entry_event(conn, symbol, e.strategy)
+                        for e in to_notify
+                        if e.direction == Direction.SELL
+                    }
+                notify_symbol_signals(
+                    config, symbol, symbol_names.get(symbol, ""), to_notify, daily_bars, ex_dividend_dates, entry_events
+                )
                 for e in to_notify:
                     notified_direction_today[(symbol, e.strategy)] = e.direction
                 print(f"  {symbol} {bucket_end.strftime('%H:%M')} 觸發 {len(to_notify)} 個訊號(日線)")
@@ -348,7 +358,15 @@ def main():
                     )
                 ]
                 if still_valid:
-                    notify_reminder(config, symbol, symbol_names.get(symbol, ""), still_valid, current_price, ex_dividend_dates)
+                    with connect(config.db_path) as conn:
+                        entry_events = {
+                            r["strategy"]: find_last_entry_event(conn, symbol, r["strategy"])
+                            for r in still_valid
+                            if r["direction"] == Direction.SELL.value
+                        }
+                    notify_reminder(
+                        config, symbol, symbol_names.get(symbol, ""), still_valid, current_price, ex_dividend_dates, entry_events
+                    )
                     print(f"  {symbol} {bucket_end.strftime('%H:%M')} 提醒 {len(still_valid)} 個尚未解除的訊號")
 
     client.disconnect()
