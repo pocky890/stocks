@@ -567,6 +567,17 @@ def _render_history_tab(config, watchlist: list[dict], symbols: list):
         df["name"] = df["symbol"].map(symbol_names).fillna("—")  # 全市場批次掃描(tier=batch)
         # 的股票不在觀察清單裡，資料庫沒存名字，查不到就是None——顯示"—"跟其他地方缺值
         # 的慣例一致，不要讓使用者看到裸的"None"字串
+        # 2026-08-20使用者反映原始ISO格式(帶microseconds、"T"分隔)看不懂——改成台灣慣用
+        # 的日期+時:分，不顯示秒/微秒(這個表格本來就沒人需要看到秒級精度)。tier=batch的
+        # 訊號(單一指標，收盤後批次掃描，見上面filter_strategy的說明)本來就沒有真正的
+        # 「觸發時刻」概念，ts存的是那天日線K棒的index(午夜0點)，不是bug；只有少數
+        # tier=realtime卻顯示00:00的舊紀錄，是2026-08-13之前那次「daily_bars_with_today
+        # 重新評估把ts換成觸發當下時間」修正上線前留下的歷史資料，那個bug已經修好，
+        # 不會再產生新的這種紀錄。
+        # format="mixed"：新舊紀錄的ts字串格式不一致(舊的signal_events.strategy)修正前
+        # 的午夜K棒index是"...T00:00:00"，新的觸發時間帶microseconds"...T09:45:00.793340")，
+        # 沒有這個參數pd.to_datetime()遇到混合格式會直接拋ValueError整個頁籤crash。
+        df["ts"] = pd.to_datetime(df["ts"], format="mixed").dt.strftime("%Y-%m-%d %H:%M")
         st.dataframe(
             df[["ts", "symbol", "name", "strategy", "direction", "price", "detail", "tier"]], use_container_width=True
         )
