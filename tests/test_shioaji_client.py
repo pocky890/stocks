@@ -220,6 +220,23 @@ def test_fetch_kbars_raises_connection_error_when_kbars_call_hangs_past_timeout(
         assert "逾時" in str(exc)
 
 
+def test_subscribe_ticks_skips_symbol_with_missing_contract_but_subscribes_rest():
+    # 2026-08-20發現：run_live.py啟動時整支crash，查出來是Contracts.Stocks查不到某支
+    # 股票的合約(KeyError)，原本沒有任何try/except，導致當天29檔股票的即時監控全部
+    # 停擺。這裡驗證單一symbol查不到合約時跳過繼續，不影響其他symbol的訂閱。
+    subscribed = []
+    client = ShioajiClient(make_config())
+    client.api = types.SimpleNamespace(
+        Contracts=types.SimpleNamespace(Stocks={"2330": "contract-2330", "2317": "contract-2317"}),
+        subscribe=lambda contract, quote_type: subscribed.append(contract),
+        on_tick_stk_v1=lambda: (lambda fn: fn),
+    )
+
+    client.subscribe_ticks(["2330", "6696", "2317"], on_tick=lambda *a: None)
+
+    assert subscribed == ["contract-2330", "contract-2317"], "查不到合約的6696該被跳過，不影響其他兩檔訂閱"
+
+
 def test_fetch_kbars_parses_per_symbol_history_into_bars():
     client = ShioajiClient(make_config())
     fake_kbars = {

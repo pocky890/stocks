@@ -157,12 +157,21 @@ class ShioajiClient:
     def subscribe_ticks(self, symbols: list[str], on_tick) -> None:
         """on_tick(symbol: str, ts: datetime, price: float, volume: int) -- 呼叫端
         (bar_aggregator.BarAggregator.on_tick就是這個形狀)不需要知道shioaji的
-        TickSTKv1物件長什麼樣子。"""
+        TickSTKv1物件長什麼樣子。
+
+        單一symbol訂閱失敗(例如Shioaji合約資料還沒載入完成、或這支股票當天暫停交易)
+        跳過繼續訂閱下一檔——2026-08-20發現：原本任何一檔查不到合約就會讓KeyError直接
+        往main()外拋，run_live.py整支process在啟動階段就crash，導致當天29檔股票的
+        即時監控全部停擺，只因為其中一檔訂閱失敗。跟fetch_today_kbars()同一種容錯
+        慣例(單一symbol失敗不影響其他symbol)。"""
 
         @self.api.on_tick_stk_v1()
         def _callback(tick):
             on_tick(tick.code, tick.datetime, float(tick.close), int(tick.volume))
 
         for symbol in symbols:
-            contract = self.api.Contracts.Stocks[symbol]
-            self.api.subscribe(contract, quote_type=sj.constant.QUOTE_TYPE_TICK)
+            try:
+                contract = self.api.Contracts.Stocks[symbol]
+                self.api.subscribe(contract, quote_type=sj.constant.QUOTE_TYPE_TICK)
+            except Exception as exc:
+                print(f"訂閱{symbol}失敗，跳過這一檔：{exc}")
