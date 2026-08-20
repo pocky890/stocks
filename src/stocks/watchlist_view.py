@@ -141,11 +141,12 @@ def _reference_date(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame) ->
     today_daily_row = bars_daily_df[bars_daily_df.index >= today]
     if not today_daily_row.empty:
         return today
-    if not today_bars_df.empty:
+    if not today_bars_df.empty and today_bars_df.index[-1].normalize() == today:
         return now.normalize()
     if bars_daily_df.empty:
         return today
-    return bars_daily_df.index[-1].normalize()  # 非交易日：退回歷史最後一筆代表的那一天
+    return bars_daily_df.index[-1].normalize()  # 非交易日(或今天完全沒有任何新資料，見
+    # _current_price同一段說明)：退回歷史最後一筆代表的那一天
 
 
 def _prev_close(bars_daily_df: pd.DataFrame, reference_date: pd.Timestamp):
@@ -174,7 +175,16 @@ def _current_price(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
     bars_5min在INTRADAY_FRESH_WITHIN內有新資料就優先信任它(真的還在即時累積)；否則才退回
     bars_daily的今天列(假設是收盤後補上的，比凍結的盤中快照可靠)；兩者都沒有才用日線
     最後一筆(通常是昨天，或非交易日時的上一個交易日)。這裡的判斷邏輯要跟_reference_date
-    完全對齊，不要各自維護一份。"""
+    完全對齊，不要各自維護一份。
+
+    2026-08-20發現：「今天完全沒有任何新資料」不能直接退回today_bars_df的最後一筆——
+    fetch_bars_5min_latest_day()故意設計成「抓bars_5min裡實際最新的那一天」而不是嚴格
+    篩今天(見db.py同名函式docstring，這是為了非交易日能顯示上一個交易日的走勢)，如果
+    這支股票已經好幾天沒有任何盤中資料(例如6696仁新因股票面額變更(換股)停止交易)，
+    這個「最新一天」可能是好幾天前的舊快照，把它當成「今天的現價」會拿一個好幾天前的
+    數字去跟前一交易日收盤價比，算出離譜的漲跌%。改成只有today_bars_df最後一筆真的是
+    「今天」這個日曆日期時才信任它，否則一律退回bars_daily的最後一筆(跟_reference_date
+    的「非交易日」分支殊途同歸，兩種情況都是「沒有今天的新資訊」)。"""
     now = pd.Timestamp.now()
     if not today_bars_df.empty and (now - today_bars_df.index[-1]) <= INTRADAY_FRESH_WITHIN:
         return today_bars_df["close"].iloc[-1]
@@ -183,9 +193,30 @@ def _current_price(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
     today_daily_row = bars_daily_df[bars_daily_df.index >= today]
     if not today_daily_row.empty:
         return today_daily_row["close"].iloc[-1]
-    if not today_bars_df.empty:
+    if not today_bars_df.empty and today_bars_df.index[-1].normalize() == today:
         return today_bars_df["close"].iloc[-1]
     return bars_daily_df["close"].iloc[-1]
+
+
+def _is_likely_halted(bars_daily_df: pd.DataFrame, config: Config) -> bool:
+    """今天已經過了開盤時間，但bars_daily完全沒有今天這一列——2026-08-20使用者發現
+    6696仁新因股票面額變更(10股換1股)停止交易，daily_update.py每天都會嘗試抓yfinance
+    資料，如果連續抓不到「今天」的資料(不是「還沒到開盤時間」這種正常情況)，比較可能是
+    這支股票今天真的停止交易，不是單純的網路/API暫時性問題。週末/國定假日本來就沒有
+    交易，不算「停止交易」，要排除；國定假日行事曆這個專案沒有，跟is_market_open_now()
+    同一個已知限制(遇到國定假日會誤判，代價只是那天多顯示一次這個標示，不影響任何
+    交易邏輯)。"""
+    now = datetime.now()
+    if now.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        return False
+    open_time = datetime.strptime(config.market_open, "%H:%M").time()
+    if now.time() < open_time:
+        return False
+    if bars_daily_df.empty:
+        return False
+    today = pd.Timestamp(now).normalize()  # 用同一個now轉換，不要另外呼叫pd.Timestamp.now()
+    # (那樣測試monkeypatch這裡的datetime.now()時，pd.Timestamp.now()不會跟著被凍結)
+    return bars_daily_df.index[-1].normalize() < today
 
 
 def compute_change(bars_daily_df: pd.DataFrame, today_bars_df: pd.DataFrame):
@@ -291,6 +322,7 @@ def build_overview_row_for_symbol(config: Config, symbol: str) -> dict:
 
     change, change_pct = compute_change(bars, today_bars)
     prev_close = _prev_close(bars, _reference_date(bars, today_bars))
+    halted = _is_likely_halted(bars, config)
 
     # bars["close"]最後一筆可能是daily_update盤中抓到、之後整天凍結的快照(見
     # _current_price docstring)，蓋成跟「漲跌」同一套算法算出來的現價，RSI/MACD/
@@ -313,8 +345,10 @@ def build_overview_row_for_symbol(config: Config, symbol: str) -> dict:
     return {
         "代號": symbol,
         "名稱": name or "—",
-        "漲跌": change_text(change, change_pct),
-        "目前價位": price_text(latest_close, change_pct),
+        "漲跌": "⏸ 停止交易中" if halted else change_text(change, change_pct),
+        "目前價位": f"{_round_or_none(latest_close)}（最後資料{bars.index[-1].strftime('%m/%d')}）"
+        if halted
+        else price_text(latest_close, change_pct),
         "昨收": prev_close,
         "5日": _ma_price_text(latest_close, ma_series[5]),
         "10日": _ma_price_text(latest_close, ma_series[10]),

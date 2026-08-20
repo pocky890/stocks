@@ -9,6 +9,7 @@ from stocks.models import Bar
 from stocks.watchlist_view import (
     _bollinger_text,
     _current_streak,
+    _is_likely_halted,
     _ma_price_text,
     _macd_text,
     _rsi_text,
@@ -309,6 +310,118 @@ def test_compute_change_on_non_trading_day_compares_last_two_trading_days_not_sa
 
     assert change == pytest.approx(5.0), "不該是0——current跟prev_close不該指向同一天"
     assert change_pct == pytest.approx(5.0 / 95 * 100)
+
+
+def test_compute_change_ignores_intraday_snapshot_from_a_previous_day():
+    # 2026-08-20使用者發現：6696仁新因股票面額變更停止交易，bars_5min最後一筆是好幾天前
+    # (停止交易前)的舊快照(950)，bars_daily也完全沒有「今天」這一列——原本的邏輯只檢查
+    # today_bars_df是不是empty，不檢查它是不是真的「今天」，會把這筆好幾天前的舊快照
+    # 當成現價，跟前一交易日收盤價(93.7)比，算出離譜的913.9%。修正後應該完全忽略這筆
+    # 不是今天的舊快照，退回bars_daily的最後一筆自己跟自己前一筆比。
+    today = pd.Timestamp.now().normalize()
+    stale_day = today - pd.Timedelta(days=1)  # 停止交易前最後一個交易日
+    day_before_stale = stale_day - pd.Timedelta(days=1)
+    bars_daily = pd.DataFrame({"close": [88.6, 93.7]}, index=[day_before_stale, stale_day])
+    stale_intraday_snapshot = pd.DataFrame({"close": [950.0]}, index=[stale_day + pd.Timedelta(hours=13, minutes=30)])
+
+    change, change_pct = compute_change(bars_daily, stale_intraday_snapshot)
+
+    assert change == pytest.approx(93.7 - 88.6), "該用bars_daily自己的兩筆比，不是拿好幾天前的舊快照當現價"
+    assert change_pct == pytest.approx((93.7 - 88.6) / 88.6 * 100)
+
+
+def test_is_likely_halted_true_when_market_hours_passed_with_no_fresh_daily_row(monkeypatch):
+    from stocks import watchlist_view as watchlist_view_module
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 20, 10, 0)  # 週四，已過09:00開盤時間
+
+    monkeypatch.setattr(watchlist_view_module, "datetime", FrozenDatetime)
+    config = make_config(":memory:")
+    bars_daily = pd.DataFrame({"close": [93.7]}, index=[pd.Timestamp("2026-08-19")])
+
+    assert _is_likely_halted(bars_daily, config) is True
+
+
+def test_is_likely_halted_false_before_market_open(monkeypatch):
+    from stocks import watchlist_view as watchlist_view_module
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 20, 8, 0)  # 週四，還沒到09:00開盤——正常情況，不是停止交易
+
+    monkeypatch.setattr(watchlist_view_module, "datetime", FrozenDatetime)
+    config = make_config(":memory:")
+    bars_daily = pd.DataFrame({"close": [93.7]}, index=[pd.Timestamp("2026-08-19")])
+
+    assert _is_likely_halted(bars_daily, config) is False
+
+
+def test_is_likely_halted_false_on_weekend(monkeypatch):
+    from stocks import watchlist_view as watchlist_view_module
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 22, 10, 0)  # 週六——本來就沒有交易，不算停止交易
+
+    monkeypatch.setattr(watchlist_view_module, "datetime", FrozenDatetime)
+    config = make_config(":memory:")
+    bars_daily = pd.DataFrame({"close": [93.7]}, index=[pd.Timestamp("2026-08-19")])
+
+    assert _is_likely_halted(bars_daily, config) is False
+
+
+def test_is_likely_halted_false_when_daily_row_is_up_to_date(monkeypatch):
+    from stocks import watchlist_view as watchlist_view_module
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 20, 10, 0)
+
+    monkeypatch.setattr(watchlist_view_module, "datetime", FrozenDatetime)
+    config = make_config(":memory:")
+    bars_daily = pd.DataFrame({"close": [93.7]}, index=[pd.Timestamp("2026-08-20")])
+
+    assert _is_likely_halted(bars_daily, config) is False
+
+
+def test_build_overview_rows_shows_halted_indicator_instead_of_bogus_change_pct(tmp_path, monkeypatch):
+    # 端到端驗證6696的實際場景：停止交易前bars_5min留下950的舊快照，bars_daily的官方
+    # 收盤已經停在93.7(停止交易前最後一天)——畫面該顯示「停止交易中」，不是913.9%這種
+    # 拿舊快照硬算出來的離譜漲跌。
+    from stocks import watchlist_view as watchlist_view_module
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 20, 10, 0)  # 週四
+
+    monkeypatch.setattr(watchlist_view_module, "datetime", FrozenDatetime)
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    config = make_config(db_path)
+
+    daily_bars = [
+        Bar(symbol="6696", ts=datetime(2026, 8, 18), open=94.3, high=96.9, low=88.2, close=88.6, volume=17561250),
+        Bar(symbol="6696", ts=datetime(2026, 8, 19), open=89.0, high=95.7, low=87.7, close=93.7, volume=17189990),
+    ]
+    stale_snapshot = Bar(symbol="6696", ts=datetime(2026, 8, 19, 13, 30), open=950, high=951, low=943, close=950.0, volume=35521)
+
+    with db.connect(db_path) as conn:
+        db.insert_bars_daily(conn, daily_bars)
+        db.insert_bars_5min(conn, [stale_snapshot])
+        db.add_to_watchlist(conn, "6696", name="仁新")
+
+    row = build_overview_rows(config)[0]
+
+    assert row["漲跌"] == "⏸ 停止交易中"
+    assert "913" not in row["目前價位"] and "913" not in row["漲跌"]
+    assert "08/19" in row["目前價位"], "該標明最後資料是哪一天，不是假裝那是現在的報價"
 
 
 def test_change_text_colors_red_for_up_green_for_down():
