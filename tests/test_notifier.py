@@ -11,6 +11,7 @@ from stocks.notifier import (
     notify_connectivity,
     notify_ex_dividend_today,
     notify_reminder,
+    notify_resolved,
     notify_symbol_signals,
 )
 
@@ -318,6 +319,67 @@ def test_notify_reminder_omits_ex_dividend_warning_when_date_does_not_match(capt
 
     text = captured_calls[0]["data"]["text"]
     assert "除權息" not in text
+
+
+def test_notify_resolved_describes_sell_signal_that_recovered_above_trigger(captured_calls):
+    # 2026-08-20使用者發現：早上觸發賣出、13:20發現現價已經回升到觸發價之上時，原本
+    # 完全沒有任何通知(notify_reminder的still_valid篩選會把它濾掉)，使用者只能靠
+    # 「沒收到提醒」自己猜狀況解除了。要求補上明確的「已解除」通知。
+    config = make_config()
+    row = {"strategy": "long_swing", "direction": "sell", "price": 3795.0, "ts": "2026-08-20T09:45:00"}
+
+    notify_resolved(config, "2454", "聯發科", [row], current_price=3850.0)
+
+    assert len(captured_calls) == 1
+    text = captured_calls[0]["data"]["text"]
+    assert "賣出訊號已解除" in text
+    assert "🔴賣" in text
+    assert "已回升，風險解除" in text
+    assert "09:45" in text
+    assert "中長波段" in text
+    assert "$3850.0" in text
+
+
+def test_notify_resolved_describes_buy_signal_that_dropped_below_trigger(captured_calls):
+    config = make_config()
+    row = {"strategy": "breakout", "direction": "buy", "price": 100.0, "ts": "2026-08-14T09:30:00"}
+
+    notify_resolved(config, "2330", "台積電", [row], current_price=95.0)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "買進訊號已解除" in text
+    assert "🟢買" in text
+    assert "已跌破，機會消失" in text
+
+
+def test_notify_resolved_labels_title_when_buy_and_sell_both_resolved(captured_calls):
+    config = make_config()
+    rows = [
+        {"strategy": "breakout", "direction": "buy", "price": 100.0, "ts": "2026-08-14T09:30:00"},
+        {"strategy": "atr_breakout", "direction": "sell", "price": 200.0, "ts": "2026-08-14T10:00:00"},
+    ]
+
+    notify_resolved(config, "2330", "台積電", rows, current_price=150.0)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "買進+賣出訊號都已解除" in text
+
+
+def test_notify_resolved_shows_entry_info_and_return_for_sell(captured_calls):
+    config = make_config()
+    row = {"strategy": "long_swing", "direction": "sell", "price": 3795.0, "ts": "2026-08-20T09:45:00"}
+    entry_events = {"long_swing": {"ts": "2026-08-11T09:35:00", "price": 4020.0}}
+
+    notify_resolved(config, "2454", "聯發科", [row], current_price=3850.0, entry_events=entry_events)
+
+    text = captured_calls[0]["data"]["text"]
+    assert "進場：2026-08-11 @4020.0，報酬率：-5.6%" in text
+
+
+def test_notify_resolved_sends_nothing_for_empty_rows(captured_calls):
+    config = make_config()
+    notify_resolved(config, "2330", "台積電", [], current_price=100.0)
+    assert len(captured_calls) == 0
 
 
 def test_notify_connectivity_lost_and_restored(captured_calls):

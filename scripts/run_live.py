@@ -43,6 +43,7 @@ from stocks.notifier import (
     notify_connectivity,
     notify_ex_dividend_today,
     notify_reminder,
+    notify_resolved,
     notify_symbol_signals,
 )
 from stocks.shioaji_client import ShioajiClient
@@ -339,35 +340,46 @@ def main():
                 if not latest_per_strategy or daily_bars_with_today.empty:
                     continue
                 current_price = daily_bars_with_today["close"].iloc[-1]
-                still_valid = [
+                still_price_valid = [
                     r
                     for r in latest_per_strategy.values()
                     if (r["direction"] == Direction.BUY.value and current_price >= r["price"])
                     or (r["direction"] == Direction.SELL.value and current_price <= r["price"])
                 ]
+                # 2026-08-20使用者發現：方向已經反轉(BUY跌破了/SELL回升了)的那些原本會被
+                # 上面那段濾掉、完全沒有任何通知，使用者只能靠「沒收到提醒」自己猜已經
+                # 解除——這裡明確標出「已解除」的那些，另外發一則通知(見notify_resolved)。
+                still_valid_strategies = {r["strategy"] for r in still_price_valid}
+                resolved = [r for r in latest_per_strategy.values() if r["strategy"] not in still_valid_strategies]
                 # 斷路器也要擋這裡：不然BUY通知當下被斷路器擋掉不推播，13:20卻又直接讀
                 # signal_events把同一筆補發出去，等於繞過斷路器(2026-08-16使用者確認
-                # 要修這個漏洞)。SELL永遠不擋，跟即時檢查那邊的規則一致。
+                # 要修這個漏洞)。SELL永遠不擋，跟即時檢查那邊的規則一致。這個篩選只套用在
+                # 「還沒解除」的提醒上——「已解除」是告知一個已發生狀況的後續，跟斷路器
+                # 要不要擋新的BUY動作訊號是不同性質，不適用同一套規則。
                 still_valid = [
                     r
-                    for r in still_valid
+                    for r in still_price_valid
                     if r["direction"] != Direction.BUY.value
                     or r["strategy"] in CIRCUIT_BREAKER_EXEMPT_STRATEGIES
                     or not is_buy_suppressed(
                         symbol, industry_codes, circuit_breaker_state, daily_bars_with_today, config.circuit_breaker_own_ma_period
                     )
                 ]
-                if still_valid:
+                if still_valid or resolved:
                     with connect(config.db_path) as conn:
                         entry_events = {
                             r["strategy"]: find_last_entry_event(conn, symbol, r["strategy"])
-                            for r in still_valid
+                            for r in still_valid + resolved
                             if r["direction"] == Direction.SELL.value
                         }
+                if still_valid:
                     notify_reminder(
                         config, symbol, symbol_names.get(symbol, ""), still_valid, current_price, ex_dividend_dates, entry_events
                     )
                     print(f"  {symbol} {bucket_end.strftime('%H:%M')} 提醒 {len(still_valid)} 個尚未解除的訊號")
+                if resolved:
+                    notify_resolved(config, symbol, symbol_names.get(symbol, ""), resolved, current_price, entry_events)
+                    print(f"  {symbol} {bucket_end.strftime('%H:%M')} 通知 {len(resolved)} 個已解除的訊號")
 
     client.disconnect()
     print("收盤，連線已關閉")

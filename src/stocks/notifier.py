@@ -229,6 +229,63 @@ def notify_reminder(
     return send_message(config.telegram_bot_token, config.telegram_chat_id, "\n".join(lines))
 
 
+def notify_resolved(
+    config: Config,
+    symbol: str,
+    name: str,
+    rows: list,
+    current_price: float,
+    entry_events: dict | None = None,
+) -> bool:
+    """13:20固定檢查的另一面：今天通知過的訊號，現在方向已經反轉(BUY跌破了/SELL回升了)，
+    代表狀況解除了——2026-08-20使用者發現：原本這種情況notify_reminder()的still_valid
+    篩選會直接把它濾掉，導致完全沒有任何通知，使用者只能靠「今天下午沒收到提醒」自己
+    推論已經解除，看不出來到底是解除了還是系統忘了檢查。這裡補上明確的「已解除」通知，
+    跟notify_reminder互斥(同一筆signal_events紀錄，現在只會落在其中一邊)。
+
+    不套用斷路器篩選——斷路器是用來擋「要不要送出新的BUY動作訊號」，跟「告知一個已經
+    發生過的狀況現在解除了」是不同性質的訊息，不應該被同一套規則擋掉。
+
+    entry_events同notify_reminder：{strategy: db.find_last_entry_event()查到的進場
+    紀錄}，只需要包含這次rows裡SELL的策略——賣出訊號解除後，讓使用者還是看得到這趟
+    倉位目前的進場基準/報酬率參考，不是解除了就什麼資訊都不給。"""
+    if not rows:
+        return True
+    entry_events = entry_events or {}
+    buy_rows = [r for r in rows if r["direction"] == Direction.BUY.value]
+    sell_rows = [r for r in rows if r["direction"] == Direction.SELL.value]
+    if buy_rows and sell_rows:
+        title = "✅ 買進+賣出訊號都已解除"
+    elif buy_rows:
+        title = "✅ 買進訊號已解除"
+    else:
+        title = "✅ 賣出訊號已解除"
+
+    label = f"{symbol} {name}" if name else symbol
+    lines = [
+        f"【{title}】",
+        f"標的：{label}",
+        f"現價：${current_price:.1f}",
+        "",
+        "今天通知過的訊號，現在狀況已經解除：",
+    ]
+    for row in buy_rows + sell_rows:
+        is_buy = row["direction"] == Direction.BUY.value
+        tag = "🟢買" if is_buy else "🔴賣"
+        verb = "已跌破，機會消失" if is_buy else "已回升，風險解除"
+        ts_text = row["ts"][11:16] if len(row["ts"]) >= 16 else row["ts"]
+        line = f"[{tag}] {strategy_label(row['strategy'])}：{ts_text}觸發@{row['price']:.1f}，{verb}"
+        entry = None if is_buy else entry_events.get(row["strategy"])
+        if entry is not None:
+            entry_date = entry["ts"][:10]
+            entry_price = entry["price"]
+            return_pct = (row["price"] - entry_price) / entry_price * 100
+            line += f"\n      進場：{entry_date} @{entry_price:.1f}，報酬率：{return_pct:+.1f}%"
+        lines.append(line)
+
+    return send_message(config.telegram_bot_token, config.telegram_chat_id, "\n".join(lines))
+
+
 def notify_ex_dividend_today(config: Config, rows: list[dict]) -> bool:
     """早上一次性通知：今天觀察清單裡有哪幾檔要除權息、金額多少——2026-08-15使用者要求，
     這樣盤中如果剛好看到停損觸發，心裡已經有個底「這支今天有除息，可能是股價機制性
