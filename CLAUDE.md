@@ -875,11 +875,14 @@ json`同步觀察清單)只同步代號/名稱/市場/排序/群組，完全不�
 不是策略邏輯錯，是本機資料沒補齊，跟程式碼行為不一致的地方在資料層，不在邏輯層。
 
 **已修正**：跑`scripts/fetch_market_data.py`幫這28支補齊月營收(0→28支全有)，
-`scripts/populate_industry_codes.py`補產業代號(27/28→仍27/28——**3595山太士這1支
-查證是`populate_industry_codes.py`本身的設計限制**：同產業公司數<10家時該腳本會
-刻意跳過不指定，避免產業寬度斷路器統計樣本太小不可靠，不是抓取失敗，沒辦法用重跑
-解決)，並重跑`scripts/recompute_strategy_selection.py`同步月營收濾網真的生效後的
-排除清單結果。
+`scripts/populate_industry_codes.py`補產業代號(27/28→仍27/28——3595山太士這1支
+當時查證(誤)以為是「同產業公司數<10家時該腳本刻意跳過」，**2026-08-19重新查證發現
+這個說法是錯的**：`populate_industry_codes.py`的原始碼裡根本沒有這種依樣本數跳過的
+邏輯，實際條件只是單純的`info is None or not info.get("industry_code")`——3595
+是**整支都不在TWSE/TPEx官方公司名錄(`t187ap03_L`/`mopsfin_t187ap03_O`)裡**，不是
+「在名錄裡但同業太少」。詳見下面2026-08-19那則，同一個根因後來在6696身上再次確認)，
+並重跑`scripts/recompute_strategy_selection.py`同步月營收濾網真的生效後的排除清單
+結果。
 
 **這是一個一般性的規則，不是只有這28支的個案**：**之後只要有新股票是透過
 `watchlist_shared.json`跨機器同步(git pull)方式出現在觀察清單裡的(而不是在這台電腦上
@@ -1107,3 +1110,37 @@ schedule_for_range()`(`TaiwanStockDividend`dataset)**，取代`twse_client`/`tpe
 日期下限、會被10年前的舊紀錄洗版，不符合「近期」的標題語意——已加上
 `dashboard/app.py`的`EX_DIVIDEND_DISPLAY_SINCE = "2024-01-01"`常數，只在**顯示**
 時過濾(2024年至今，含已發生+未來排定)，資料庫本身不截斷、仍保留完整10年歷史。
+
+## 2026-08-19：6696仁新透過watchlist_shared.json同步進來後價格歷史沒真的回補到，
+跑`scripts/backfill_missing_watchlist_data.py`補齊；順便修正3595的錯誤根因記錄
+
+pull到c67c71b(觀察清單新增6696仁新)之後，這台電腦的`bars_daily`裡6696只有很少筆
+(跨機器同步進來的股票不會自動觸發`add_symbol_to_watchlist()`那套回補，是本檔案最上面
+「每台電腦拉新commit後要做的事」同一類坑，只是這次的資料類型是股價本身，不是策略排除
+清單)。跑`scripts/backfill_missing_watchlist_data.py`後已補到1787筆(2018-10-08~今天)。
+三大法人(842筆)/月營收(97筆)/除權息(4筆)這台電腦本來就有，只有股價這塊當時真的缺——
+用`MIN_BARS_DAILY=200`判斷「明顯不足」的門檻，200這個數字對6696這種2018年才有的
+股票也適用(不到10年的股票本來就不會有~2400筆，但1787遠遠超過200，不會被誤判成缺)。
+
+**同時發現去年(2026-08-17)記錄的3595山太士「產業代碼查不到」根因寫錯了**：當時記錄
+「populate_industry_codes.py本身的設計限制，同產業公司數<10家時刻意跳過」，這次
+直接查程式碼原始碼加上實際呼叫TWSE/TPEx公司名錄API驗證，發現**根本沒有這種依同業
+數量跳過的邏輯**——`populate_industry_codes.py`的條件只是單純「這支股票代號完全不在
+TWSE/TPEx官方公司名錄回應裡」(`info is None or not info.get("industry_code")`)。
+6696這次也踩到同一個「跳過」訊息，直接呼叫`twse_client.fetch_company_directory()`+
+`tpex_client.fetch_company_directory()`確認：6696、3595都完全不在這兩份官方名錄裡
+(不是名錄裡有這支股票但industry_code欄位剛好是空的)。**根因查證確認：查FinMind的
+`TaiwanStockInfo`發現兩支的`type`欄位都是`"emerging"`(興櫃股票)，不是正式上市/上櫃**
+——TWSE/TPEx的官方公司名錄(`t187ap03_L`/`mopsfin_t187ap03_O`)本來就只涵蓋正式上市/
+上櫃公司，興櫃股票不在裡面是預期行為，不是抓取異常。這也一併解釋了另一個這次順便
+發現的缺口：這兩支股票的`valuations`表也是0筆——FinMind的`TaiwanStockPER`跟TWSE/TPEx
+官方每日估值快照同樣都不涵蓋興櫃股票，這不是backfill腳本的bug，是興櫃股票本來就沒有
+官方本益比/殖利率/股價淨值比這類資料可抓，`dashboard`的「目前估值」區塊對這兩支股票
+會顯示「沒有估值資料」是正確行為，不用當成待修的缺口。三大法人/月營收/股價這三項
+FinMind跟yfinance都有涵蓋興櫃股票，才會補得起來。**這代表這兩支股票的產業代碼、
+估值資料都永遠無法補上**，不是「資料還沒準備好，之後重跑會生效」——`circuit_breaker.
+is_buy_suppressed()`對`industry_code is None`的處理本來就是直接回傳False(不觸發
+斷路器擋單，不是crash)，所以這兩支股票等於永久沒有產業寬度斷路器保護，這是已知、
+可接受的限制，不是bug。之後如果又有新股票同樣「查得到公司名錄産業別卻標記失敗」或
+「估值一直是0筆」，先查FinMind的`TaiwanStockInfo`的`type`是不是`"emerging"`，不用
+假設是抓取失敗或樣本數問題。
